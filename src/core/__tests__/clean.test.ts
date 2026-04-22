@@ -28,14 +28,21 @@ function writeFile(dir: string, relativePath: string, content = ""): void {
 // Mocks — set up before imports so vitest hoisting works
 // ---------------------------------------------------------------------------
 
-vi.mock("child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("child_process")>();
-  return {
-    ...actual,
-    execSync: vi.fn(() => ""),
-    execFileSync: vi.fn(() => ""),
-  };
-});
+// `clean.ts` uses the async shell helpers from `exec-async.ts` (post the
+// `5a76b27` execSync → Bun.spawn refactor). Mock those so the Xcode
+// process-probe tests don't actually spawn `pgrep` / `killall`.
+vi.mock("../exec-async.js", () => ({
+  execAsyncSafe: vi.fn(async () => ({
+    stdout: "",
+    stderr: "",
+    exitCode: 0,
+  })),
+  execShellAsync: vi.fn(async () => ({
+    stdout: "",
+    stderr: "",
+    exitCode: 0,
+  })),
+}));
 
 // ---------------------------------------------------------------------------
 // Imports (after mocks are declared)
@@ -374,27 +381,35 @@ describe("isXcodeRunning", () => {
     vi.clearAllMocks();
   });
 
-  it("returns true when pgrep finds Xcode (non-empty output)", async () => {
-    const { execSync } = await import("child_process");
-    (execSync as ReturnType<typeof vi.fn>).mockReturnValue("12345\n");
-
-    expect(isXcodeRunning()).toBe(true);
-  });
-
-  it("returns false when pgrep throws (no process found)", async () => {
-    const { execSync } = await import("child_process");
-    (execSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      throw new Error("exit code 1");
+  it("returns true when pgrep finds Xcode (non-empty output, exit 0)", async () => {
+    const { execAsyncSafe } = await import("../exec-async.js");
+    (execAsyncSafe as ReturnType<typeof vi.fn>).mockResolvedValue({
+      stdout: "12345\n",
+      stderr: "",
+      exitCode: 0,
     });
 
-    expect(isXcodeRunning()).toBe(false);
+    expect(await isXcodeRunning()).toBe(true);
+  });
+
+  it("returns false when pgrep rejects (no process found)", async () => {
+    const { execAsyncSafe } = await import("../exec-async.js");
+    (execAsyncSafe as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("exit code 1"),
+    );
+
+    expect(await isXcodeRunning()).toBe(false);
   });
 
   it("returns false when pgrep returns empty string", async () => {
-    const { execSync } = await import("child_process");
-    (execSync as ReturnType<typeof vi.fn>).mockReturnValue("");
+    const { execAsyncSafe } = await import("../exec-async.js");
+    (execAsyncSafe as ReturnType<typeof vi.fn>).mockResolvedValue({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    });
 
-    expect(isXcodeRunning()).toBe(false);
+    expect(await isXcodeRunning()).toBe(false);
   });
 });
 
@@ -403,18 +418,29 @@ describe("killXcode", () => {
     vi.clearAllMocks();
   });
 
-  it("returns true when killall Xcode succeeds", async () => {
-    const { execSync } = await import("child_process");
-    (execSync as ReturnType<typeof vi.fn>).mockReturnValue("");
+  it("returns true when killall Xcode succeeds and Xcode is no longer running", async () => {
+    const { execShellAsync, execAsyncSafe } = await import("../exec-async.js");
+    (execShellAsync as ReturnType<typeof vi.fn>).mockResolvedValue({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    });
+    // First poll: Xcode is gone (empty stdout) — `killXcode` returns true
+    // immediately via `isXcodeRunning()` returning false.
+    (execAsyncSafe as ReturnType<typeof vi.fn>).mockResolvedValue({
+      stdout: "",
+      stderr: "",
+      exitCode: 0,
+    });
 
     expect(await killXcode()).toBe(true);
   });
 
-  it("returns false when killall Xcode throws", async () => {
-    const { execSync } = await import("child_process");
-    (execSync as ReturnType<typeof vi.fn>).mockImplementation(() => {
-      throw new Error("no process found");
-    });
+  it("returns false when killall rejects", async () => {
+    const { execShellAsync } = await import("../exec-async.js");
+    (execShellAsync as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error("no process found"),
+    );
 
     expect(await killXcode()).toBe(false);
   });

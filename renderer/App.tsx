@@ -1,9 +1,11 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import type { ViewTab, ProfileInfo, InstanceInfo, InstanceLogs, LogSection, SectionStartEvent, SectionEndEvent } from './types';
+import type { ProfileInfo, InstanceInfo, InstanceLogs, LogSection, SectionStartEvent, SectionEndEvent } from './types';
 import { Sidebar } from './components/Sidebar';
+import type { SidebarModulePanel } from './components/Sidebar';
 import { StatusBar } from './components/StatusBar';
 import { ProfileBanner } from './components/ProfileBanner';
 import { InstanceTabs } from './components/InstanceTabs';
+import { ModulePanel } from './components/ModulePanel';
 import { DevSpace } from './views/DevSpace';
 import { DevToolsView } from './views/DevToolsView';
 import { LintTest } from './views/LintTest';
@@ -16,12 +18,20 @@ import { useSimulatedLogs } from './hooks/useSimulatedLogs';
 import type { SimulatedSectionEvent } from './hooks/useSimulatedLogs';
 import './App.css';
 
+interface ModulePanelListEntry {
+  moduleId: string;
+  panelId: string;
+  title: string;
+  icon?: string;
+}
+
 function makeEmptyLogs(): InstanceLogs {
   return { serviceLines: [], metroLines: [], sections: [] };
 }
 
 export function App() {
-  const [activeTab, setActiveTab] = useState<ViewTab>('dev-space');
+  const [activeTab, setActiveTab] = useState<string>('dev-space');
+  const [modulePanels, setModulePanels] = useState<ModulePanelListEntry[]>([]);
   const [profileVisible, setProfileVisible] = useState(true);
   const [showWizard, setShowWizard] = useState(false);
   const [showNewInstanceDialog, setShowNewInstanceDialog] = useState(false);
@@ -39,6 +49,39 @@ export function App() {
   const [logVersion, setLogVersion] = useState(0); // trigger re-renders for logs
 
   const invoke = useIpcInvoke();
+
+  // On mount + on every module-system event: refetch the panel list so
+  // 3p extensions appear in the sidebar without a reload. Reuses the
+  // same subscribe stream MCP's `tools/listChanged` consumes.
+  const fetchPanels = useCallback(() => {
+    invoke('modules:list-panels').then((resp: {
+      modules: Array<{
+        moduleId: string;
+        panels: Array<{ id: string; title: string; icon?: string }>;
+      }>;
+    } | null) => {
+      const next: ModulePanelListEntry[] = [];
+      for (const m of resp?.modules ?? []) {
+        for (const p of m.panels) {
+          next.push({
+            moduleId: m.moduleId,
+            panelId: p.id,
+            title: p.title,
+            icon: p.icon,
+          });
+        }
+      }
+      setModulePanels(next);
+    });
+  }, [invoke]);
+
+  useEffect(() => {
+    fetchPanels();
+  }, [fetchPanels]);
+
+  useIpcOn('modules:event', useCallback(() => {
+    fetchPanels();
+  }, [fetchPanels]));
 
   // On mount: fetch existing instances; if none exist and no profile, show wizard
   useEffect(() => {
@@ -335,7 +378,14 @@ export function App() {
           break;
         case 'Tab':
           e.preventDefault();
-          const tabs: ViewTab[] = ['dev-space', 'devtools', 'lint-test', 'metro-logs', 'settings'];
+          const tabs: string[] = [
+            'dev-space',
+            'devtools',
+            'lint-test',
+            'metro-logs',
+            'settings',
+            ...modulePanels.map((p) => `module:${p.moduleId}:${p.panelId}`),
+          ];
           const idx = tabs.indexOf(activeTab);
           setActiveTab(tabs[(idx + 1) % tabs.length]);
           break;
@@ -344,7 +394,7 @@ export function App() {
 
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [activeTab, invoke]);
+  }, [activeTab, invoke, modulePanels]);
 
   const handleShortcut = useCallback((command: string) => {
     invoke(command);
@@ -392,7 +442,26 @@ export function App() {
     setShowWizard(false);
   }, []);
 
+  const sidebarPanels: SidebarModulePanel[] = modulePanels.map((p) => ({
+    id: `module:${p.moduleId}:${p.panelId}`,
+    title: p.title,
+    icon: p.icon,
+  }));
+
   const renderView = () => {
+    // Module-contributed panels are keyed `module:<moduleId>:<panelId>`.
+    if (activeTab.startsWith('module:')) {
+      const rest = activeTab.slice('module:'.length);
+      const colon = rest.indexOf(':');
+      if (colon > 0) {
+        const moduleId = rest.slice(0, colon);
+        const panelId = rest.slice(colon + 1);
+        // Key by tab id so switching between panels re-mounts cleanly
+        // and ModulePanel's deactivate/activate cycle fires.
+        return <ModulePanel key={activeTab} moduleId={moduleId} panelId={panelId} />;
+      }
+    }
+
     switch (activeTab) {
       case 'dev-space':
         return (
@@ -413,13 +482,15 @@ export function App() {
         return <MetroLogs lines={activeLogs.metroLines} />;
       case 'settings':
         return <Settings />;
+      default:
+        return null;
     }
   };
 
   if (showNewInstanceDialog) {
     return (
       <div className="app-root">
-        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} />
+        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} modulePanels={sidebarPanels} />
         <div className="app-main">
           {instances.length > 0 && (
             <InstanceTabs
@@ -445,7 +516,7 @@ export function App() {
   if (showWizard) {
     return (
       <div className="app-root">
-        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} />
+        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} modulePanels={sidebarPanels} />
         <div className="app-main">
           {instances.length > 0 && (
             <InstanceTabs
@@ -474,7 +545,7 @@ export function App() {
 
   return (
     <div className="app-root">
-      <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} />
+      <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} modulePanels={sidebarPanels} />
       <div className="app-main">
         <InstanceTabs
           instances={instances}

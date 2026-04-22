@@ -4,6 +4,8 @@ import { useAppContext } from "../../app/AppContext.js";
 import { LogViewer } from "../../ui/components/LogViewer.js";
 import { useTheme } from "../../ui/theme-provider.js";
 
+export { metroLogsManifest } from "./manifests.js";
+
 function MetroLogsView(): React.JSX.Element {
   const { metroLines } = useAppContext();
   const theme = useTheme();
@@ -41,3 +43,4 @@ export const metroLogsModule: RnDevModule = {
     { key: "C", label: "Clear Logs", action: async () => {}, showInPanel: true },
   ],
 };
+

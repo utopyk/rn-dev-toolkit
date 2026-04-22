@@ -85,14 +85,14 @@ const ALL_OFF: McpFlags = {
 // ---------------------------------------------------------------------------
 
 describe("createToolDefinitions()", () => {
-  it("returns 29 tool definitions by default (23 legacy + devtools-status + 5 modules/* lifecycle)", () => {
+  it("returns 31 tool definitions by default (23 legacy + devtools-status + 5 modules/* lifecycle + 2 modules/config/*)", () => {
     const tools = createToolDefinitions(makeMockContext());
-    expect(tools).toHaveLength(29);
+    expect(tools).toHaveLength(31);
   });
 
-  it("returns 33 tool definitions when --enable-devtools-mcp is set (+4 devtools-network)", () => {
+  it("returns 35 tool definitions when --enable-devtools-mcp is set (+4 devtools-network)", () => {
     const tools = createToolDefinitions(makeMockContext({ flags: ALL_ON }));
-    expect(tools).toHaveLength(33);
+    expect(tools).toHaveLength(35);
   });
 
   it("each tool has name, description, inputSchema, and handler", () => {

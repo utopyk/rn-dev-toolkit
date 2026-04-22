@@ -68,6 +68,13 @@ export class ModuleRpc {
 export interface InitializeParams {
   capabilities: CapabilityDescriptor[];
   hostVersion: string;
+  /**
+   * Persisted per-module config blob, loaded by the host from
+   * `~/.rn-dev/modules/<id>/config.json` before the handshake. Always
+   * present — modules without a `contributes.config.schema` still see
+   * `{}`. Runtime updates arrive via the `config/changed` notification.
+   */
+  config: Record<string, unknown>;
 }
 
 export interface InitializeResult {

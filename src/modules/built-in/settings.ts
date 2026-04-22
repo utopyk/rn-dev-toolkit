@@ -5,6 +5,8 @@ import { useAppContext } from "../../app/AppContext.js";
 import { useTheme } from "../../ui/theme-provider.js";
 import { listThemes } from "../../ui/theme-provider.js";
 
+export { settingsManifest } from "./manifests.js";
+
 function SettingsView(): React.JSX.Element {
   const { profile } = useAppContext();
   const theme = useTheme();
@@ -105,3 +107,4 @@ export const settingsModule: RnDevModule = {
   component: SettingsView,
   shortcuts: [],
 };
+

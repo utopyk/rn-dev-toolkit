@@ -1,21 +1,30 @@
 import React from 'react';
-import type { ViewTab } from '../types';
 import './StatusBar.css';
 
 interface StatusBarProps {
   metroStatus: 'running' | 'starting' | 'stopped' | 'error';
   metroPort: number;
   watcherOn: boolean;
-  activeTab: ViewTab;
+  activeTab: string;
 }
 
-const tabLabels: Record<ViewTab, string> = {
+const tabLabels: Record<string, string> = {
   'dev-space': 'Dev Space',
   'devtools': 'DevTools',
   'lint-test': 'Lint & Test',
   'metro-logs': 'Metro Logs',
   'settings': 'Settings',
 };
+
+function labelFor(activeTab: string): string {
+  if (tabLabels[activeTab]) return tabLabels[activeTab];
+  if (activeTab.startsWith('module:')) {
+    const rest = activeTab.slice('module:'.length);
+    const colon = rest.indexOf(':');
+    if (colon > 0) return rest.slice(colon + 1);
+  }
+  return activeTab;
+}
 
 export function StatusBar({ metroStatus, metroPort, watcherOn, activeTab }: StatusBarProps) {
   return (
@@ -43,7 +52,7 @@ export function StatusBar({ metroStatus, metroPort, watcherOn, activeTab }: Stat
         </span>
         <span className="sep">|</span>
         <span>
-          Module: <span style={{ color: 'var(--accent)' }}>{tabLabels[activeTab]}</span>
+          Module: <span style={{ color: 'var(--accent)' }}>{labelFor(activeTab)}</span>
         </span>
       </div>
     </div>

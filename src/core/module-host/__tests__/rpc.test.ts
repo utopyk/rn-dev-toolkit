@@ -158,6 +158,7 @@ describe("performInitialize — host-driven handshake", () => {
     const result = await performInitialize(active.host, {
       capabilities: [{ id: "log" }, { id: "appInfo" }],
       hostVersion: "0.1.0",
+      config: {},
       timeoutMs: 1000,
     });
     expect(result.moduleId).toBe("fixture");
@@ -176,6 +177,7 @@ describe("performInitialize — host-driven handshake", () => {
       performInitialize(active.host, {
         capabilities: [],
         hostVersion: "0.1.0",
+        config: {},
         timeoutMs: 50,
       }),
     ).rejects.toThrow(/timeout|activation/i);

@@ -13,6 +13,16 @@
           "readOnlyHint": true
         }
       ]
+    },
+    "config": {
+      "schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "greeting": { "type": "string", "minLength": 1 },
+          "loud": { "type": "boolean" }
+        }
+      }
     }
   },
   "permissions": [],

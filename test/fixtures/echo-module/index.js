@@ -36,20 +36,57 @@ const manifest = {
         },
       ],
     },
+    config: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          greeting: { type: "string", minLength: 1 },
+          loud: { type: "boolean" },
+        },
+      },
+    },
   },
 };
+
+/** Observed config snapshots — lets integration tests verify onConfigChanged
+ * fired and that ctx.config was replaced in place before the callback ran. */
+const configHistory = [];
 
 const handle = runModule({
   manifest,
   tools: {
     "echo__ping": (params) => ({ pong: true, echoed: params }),
+    // Test helper: probes `ctx.host.capability(id).method(...args)` so
+    // integration tests can verify the host/call round-trip end-to-end.
+    // Not listed in `manifest.contributes.mcp.tools` — fixture-only.
+    "echo__probe-host": async (params, ctx) => {
+      const cap = ctx.host.capability(params.id);
+      if (!cap) return { found: false };
+      const fn = cap[params.method];
+      if (typeof fn !== "function") return { found: true, methodFound: false };
+      const result = await fn(...(params.args ?? []));
+      return { found: true, methodFound: true, result };
+    },
+    // Phase 5a: reads `ctx.config` so integration tests can verify the
+    // handshake propagated the persisted config blob + live updates
+    // replaced it in place. Not in the manifest's contributions.
+    "echo__read-config": (_params, ctx) => ({
+      config: ctx.config,
+      appInfoConfig: ctx.appInfo.config,
+      history: configHistory,
+    }),
   },
   onInitialize: (appInfo) => ({
     echoedHostVersion: appInfo.hostVersion,
     echoedCapabilityCount: appInfo.capabilities.length,
+    echoedInitialConfig: appInfo.config,
   }),
   activate: (ctx) => {
     ctx.log.info("echo fixture ready");
+  },
+  onConfigChanged: (config) => {
+    configHistory.push(config);
   },
   onConnection: (connection) => {
     connection.onRequest("echo", (params) => params);

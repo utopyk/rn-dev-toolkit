@@ -64,10 +64,15 @@ afterEach(async () => {
 });
 
 function makeManager(
-  overrides: { idleShutdownMs?: number } = {},
+  overrides: {
+    idleShutdownMs?: number;
+    capabilities?: CapabilityRegistry;
+  } = {},
 ): ModuleHostManager {
-  const capabilities = new CapabilityRegistry();
-  capabilities.register("log", {});
+  const capabilities = overrides.capabilities ?? new CapabilityRegistry();
+  if (!overrides.capabilities) {
+    capabilities.register("log", {});
+  }
   const manager = new ModuleHostManager({
     hostVersion: "0.1.0",
     capabilities,
@@ -148,6 +153,35 @@ describe("ModuleHostManager — integration (real subprocess)", () => {
     // Idle-shutdown timer should fire within ~50ms
     await new Promise((r) => setTimeout(r, 250));
     expect(manager.size).toBe(0);
+  });
+
+  it("routes `ctx.host.capability(id).method(args)` from subprocess back to the daemon CapabilityRegistry", async () => {
+    const capabilities = new CapabilityRegistry();
+    capabilities.register("math", {
+      add: (a: number, b: number) => a + b,
+    });
+    capabilities.register(
+      "secret",
+      { read: () => "classified" },
+      { requiredPermission: "secret:read" },
+    );
+    const manager = makeManager({ capabilities });
+    const managed = await manager.acquire(
+      registeredEchoModule({ permissions: [] }),
+      "probe",
+    );
+
+    const granted = await managed.rpc.sendRequest<
+      { id: string; method: string; args: unknown[] },
+      { found: boolean; methodFound?: boolean; result?: unknown }
+    >("tool/probe-host", { id: "math", method: "add", args: [3, 4] });
+    expect(granted).toEqual({ found: true, methodFound: true, result: 7 });
+
+    const denied = await managed.rpc.sendRequest<
+      { id: string; method: string; args: unknown[] },
+      { found: boolean }
+    >("tool/probe-host", { id: "secret", method: "read", args: [] });
+    expect(denied.found).toBe(false);
   });
 
   it("shutdownAll() kills every managed subprocess (orphan prevention)", async () => {

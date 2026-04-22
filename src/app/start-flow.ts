@@ -20,10 +20,15 @@ import { registerDevtoolsIpc } from "./devtools-ipc.js";
 import {
   ModuleRegistry,
   devSpaceModule,
+  devSpaceManifest,
   settingsModule,
+  settingsManifest,
   lintTestModule,
+  lintTestManifest,
   metroLogsModule,
+  metroLogsManifest,
   devtoolsNetworkModule,
+  registerMarketplaceBuiltIn,
 } from "../modules/index.js";
 import { firstRunSetup } from "./first-run.js";
 import { App } from "./App.js";
@@ -312,6 +317,7 @@ async function startServicesAsync(
   worktreeKey: string;
   builder: import("../core/builder.js").Builder;
   moduleHost: ModuleHostManager;
+  moduleRegistry: ModuleRegistry;
 }> {
   const emit = (line: string) => serviceBus.log(line);
 
@@ -534,10 +540,27 @@ async function startServicesAsync(
   const moduleHost = new ModuleHostManager({ hostVersion, capabilities });
   serviceBus.setModuleHost(moduleHost);
 
+  // Module registry is published separately so Phase 4 Electron main can
+  // resolve panel contributions without re-discovering manifests.
+
   // Phase 3a: discover user-global modules from ~/.rn-dev/modules/ and
   // register them as inert manifests. Rejections are logged but don't fail
   // startup — a broken 3p module shouldn't prevent the dev loop.
   const moduleRegistry = new ModuleRegistry();
+  serviceBus.setModuleRegistry(moduleRegistry);
+
+  // Phase 5b: register the four existing built-ins (dev-space, metro-logs,
+  // lint-test, settings) + the Marketplace built-in as manifest-driven
+  // RegisteredModules. `registerBuiltIn` stamps `kind: "built-in-privileged"`
+  // on each; they never spawn via ModuleHostManager, but they DO appear in
+  // `modules/list`, the Marketplace capability, and share the `contributes.
+  // config.schema` surface with 3p modules.
+  moduleRegistry.registerBuiltIn(devSpaceManifest);
+  moduleRegistry.registerBuiltIn(metroLogsManifest);
+  moduleRegistry.registerBuiltIn(lintTestManifest);
+  moduleRegistry.registerBuiltIn(settingsManifest);
+  registerMarketplaceBuiltIn({ moduleRegistry, capabilities });
+
   const loadResult = moduleRegistry.loadUserGlobalModules({
     hostVersion,
     scopeUnit: worktreeKey,
@@ -553,15 +576,34 @@ async function startServicesAsync(
     );
   }
 
-  registerModulesIpc(ipc, {
+  const modulesIpc = registerModulesIpc(ipc, {
     manager: moduleHost,
     registry: moduleRegistry,
   });
+  // Fan out module events to the serviceBus so Electron main can forward
+  // them to the renderer — same payload as MCP `tools/listChanged` so we
+  // don't introduce a second subscription path (per Phase 4 plan).
+  modulesIpc.moduleEvents.on("modules-event", (event) => {
+    serviceBus.emitModuleEvent(event);
+  });
+  // Phase 5a — publish the shared bus so Electron's `modules:config-set`
+  // handler can emit `config-changed` into the same bus MCP subscribers
+  // listen on, even when it bypasses the unix-socket dispatcher.
+  serviceBus.setModuleEventsBus(modulesIpc.moduleEvents);
 
   emit("\u2714 All services started");
   emit("");
 
-  return { metro, devtools, watcher, ipc, worktreeKey, builder, moduleHost };
+  return {
+    metro,
+    devtools,
+    watcher,
+    ipc,
+    worktreeKey,
+    builder,
+    moduleHost,
+    moduleRegistry,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +673,7 @@ async function startServices(
   startupLog: string[];
   builder: import("../core/builder.js").Builder;
   moduleHost: ModuleHostManager;
+  moduleRegistry: ModuleRegistry;
 }> {
   const result = await startServicesAsync(profile, projectRoot, artifactStore);
   return { ...result, startupLog: [] };

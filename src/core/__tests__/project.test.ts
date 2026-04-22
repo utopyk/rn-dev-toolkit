@@ -106,26 +106,26 @@ describe("detectProjectRoot", () => {
 // ---------------------------------------------------------------------------
 
 describe("isGitRepo", () => {
-  it("returns true for the current project directory (which is a git repo)", () => {
+  it("returns true for the current project directory (which is a git repo)", async () => {
     // The rn-dev-cli project itself is a git repo
-    const result = isGitRepo(process.cwd());
+    const result = await isGitRepo(process.cwd());
     expect(result).toBe(true);
   });
 
-  it("returns false for a plain temp directory (not a git repo)", () => {
+  it("returns false for a plain temp directory (not a git repo)", async () => {
     const tmpDir = makeTmpDir();
     try {
-      const result = isGitRepo(tmpDir);
+      const result = await isGitRepo(tmpDir);
       expect(result).toBe(false);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  it("returns true for a subdirectory inside a git repo", () => {
+  it("returns true for a subdirectory inside a git repo", async () => {
     // node_modules itself is inside the git repo
     const subDir = join(process.cwd(), "src", "core");
-    const result = isGitRepo(subDir);
+    const result = await isGitRepo(subDir);
     expect(result).toBe(true);
   });
 });
@@ -135,16 +135,16 @@ describe("isGitRepo", () => {
 // ---------------------------------------------------------------------------
 
 describe("getCurrentBranch", () => {
-  it("returns a non-empty string for the current project (which is on a branch)", () => {
-    const branch = getCurrentBranch(process.cwd());
+  it("returns a non-empty string for the current project (which is on a branch)", async () => {
+    const branch = await getCurrentBranch(process.cwd());
     expect(typeof branch).toBe("string");
     expect(branch!.length).toBeGreaterThan(0);
   });
 
-  it("returns null for a directory that is not a git repo", () => {
+  it("returns null for a directory that is not a git repo", async () => {
     const tmpDir = makeTmpDir();
     try {
-      const branch = getCurrentBranch(tmpDir);
+      const branch = await getCurrentBranch(tmpDir);
       expect(branch).toBeNull();
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
@@ -157,14 +157,14 @@ describe("getCurrentBranch", () => {
 // ---------------------------------------------------------------------------
 
 describe("getWorktrees", () => {
-  it("returns an array with at least one entry for the current project", () => {
-    const worktrees = getWorktrees(process.cwd());
+  it("returns an array with at least one entry for the current project", async () => {
+    const worktrees = await getWorktrees(process.cwd());
     expect(Array.isArray(worktrees)).toBe(true);
     expect(worktrees.length).toBeGreaterThan(0);
   });
 
-  it("each worktree entry has path, branch, and isMain fields", () => {
-    const worktrees = getWorktrees(process.cwd());
+  it("each worktree entry has path, branch, and isMain fields", async () => {
+    const worktrees = await getWorktrees(process.cwd());
     for (const wt of worktrees) {
       expect(typeof wt.path).toBe("string");
       expect(typeof wt.branch).toBe("string");
@@ -172,16 +172,16 @@ describe("getWorktrees", () => {
     }
   });
 
-  it("marks exactly one worktree as main", () => {
-    const worktrees = getWorktrees(process.cwd());
+  it("marks exactly one worktree as main", async () => {
+    const worktrees = await getWorktrees(process.cwd());
     const mainWorktrees = worktrees.filter((wt) => wt.isMain);
     expect(mainWorktrees).toHaveLength(1);
   });
 
-  it("returns empty array for non-git directory", () => {
+  it("returns empty array for non-git directory", async () => {
     const tmpDir = makeTmpDir();
     try {
-      const worktrees = getWorktrees(tmpDir);
+      const worktrees = await getWorktrees(tmpDir);
       expect(worktrees).toEqual([]);
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });

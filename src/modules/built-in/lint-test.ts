@@ -4,6 +4,8 @@ import { useAppContext } from "../../app/AppContext.js";
 import { LogViewer } from "../../ui/components/LogViewer.js";
 import { useTheme } from "../../ui/theme-provider.js";
 
+export { lintTestManifest } from "./manifests.js";
+
 function LintTestView(): React.JSX.Element {
   const { toolOutputLines } = useAppContext();
   const theme = useTheme();
@@ -38,3 +40,4 @@ export const lintTestModule: RnDevModule = {
   component: LintTestView,
   shortcuts: [],
 };
+

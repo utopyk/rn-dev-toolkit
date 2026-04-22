@@ -1,9 +1,8 @@
 import React from 'react';
-import type { ViewTab } from '../types';
 import './Sidebar.css';
 
 interface ModuleItem {
-  id: ViewTab;
+  id: string;
   icon: string;
   label: string;
 }
@@ -14,7 +13,7 @@ interface ShortcutItem {
   command: string | null;
 }
 
-const modules: ModuleItem[] = [
+const builtinModules: ModuleItem[] = [
   { id: 'dev-space', icon: '🚀', label: 'Dev Space' },
   { id: 'devtools', icon: '🔧', label: 'DevTools' },
   { id: 'lint-test', icon: '🧪', label: 'Lint & Test' },
@@ -32,14 +31,28 @@ const shortcuts: ShortcutItem[] = [
   { key: 'o', label: 'Dump Logs', command: 'logs:dump' },
 ];
 
-interface SidebarProps {
-  activeTab: ViewTab;
-  onTabChange: (tab: ViewTab) => void;
-  onShortcut: (command: string) => void;
-  onOpenWizard?: () => void;
+export interface SidebarModulePanel {
+  /** `module:<moduleId>:<panelId>` */
+  id: string;
+  title: string;
+  icon?: string;
 }
 
-export function Sidebar({ activeTab, onTabChange, onShortcut, onOpenWizard }: SidebarProps) {
+interface SidebarProps {
+  activeTab: string;
+  onTabChange: (tab: string) => void;
+  onShortcut: (command: string) => void;
+  onOpenWizard?: () => void;
+  modulePanels?: SidebarModulePanel[];
+}
+
+export function Sidebar({
+  activeTab,
+  onTabChange,
+  onShortcut,
+  onOpenWizard,
+  modulePanels = [],
+}: SidebarProps) {
   return (
     <div className="sidebar">
       {/* Logo */}
@@ -52,7 +65,7 @@ export function Sidebar({ activeTab, onTabChange, onShortcut, onOpenWizard }: Si
       {/* Modules */}
       <div className="sidebar-section">
         <div className="sidebar-section-title">MODULES</div>
-        {modules.map((mod) => (
+        {builtinModules.map((mod) => (
           <button
             key={mod.id}
             className={`sidebar-item sidebar-module${activeTab === mod.id ? ' active' : ''}`}
@@ -63,6 +76,22 @@ export function Sidebar({ activeTab, onTabChange, onShortcut, onOpenWizard }: Si
           </button>
         ))}
       </div>
+
+      {modulePanels.length > 0 && (
+        <div className="sidebar-section">
+          <div className="sidebar-section-title">EXTENSIONS</div>
+          {modulePanels.map((panel) => (
+            <button
+              key={panel.id}
+              className={`sidebar-item sidebar-module${activeTab === panel.id ? ' active' : ''}`}
+              onClick={() => onTabChange(panel.id)}
+            >
+              <span className="sidebar-module-icon">{panel.icon ?? '📦'}</span>
+              <span className="sidebar-item-label">{panel.title}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Shortcuts */}
       <div className="sidebar-section sidebar-shortcuts">

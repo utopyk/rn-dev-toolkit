@@ -13,18 +13,25 @@ function makeTmpDir(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Mock child_process and fs before importing the module under test
+// Mock exec-async (the async shell helpers preflight.ts depends on) and
+// net before importing the module under test. The old tests mocked
+// `child_process.execSync`, but preflight.ts was refactored to use
+// `execAsync` / `execAsyncSafe` from `exec-async.ts` in commit 5a76b27
+// — the execSync mock was never hit, which is why the node-version
+// tests silently tried to spawn the real `node -v`.
 // ---------------------------------------------------------------------------
 
-vi.mock("child_process", () => ({
-  execSync: vi.fn(),
+vi.mock("../exec-async.js", () => ({
+  execAsync: vi.fn(),
+  execAsyncSafe: vi.fn(),
+  execShellAsync: vi.fn(),
 }));
 
 vi.mock("net", () => ({
   createServer: vi.fn(),
 }));
 
-import { execSync } from "child_process";
+import { execAsync } from "../exec-async.js";
 import * as net from "net";
 import {
   PreflightEngine,
@@ -364,10 +371,10 @@ describe("createDefaultPreflightEngine", () => {
     vi.clearAllMocks();
   });
 
-  it("registers all 13 built-in checks", () => {
+  it("registers all 15 built-in checks", () => {
     const engine = createDefaultPreflightEngine(tmpDir);
     const allChecks = engine.getChecksForPlatform("both");
-    expect(allChecks).toHaveLength(13);
+    expect(allChecks).toHaveLength(15);
   });
 
   it("registers all expected check ids", () => {
@@ -435,7 +442,7 @@ describe("createDefaultPreflightEngine", () => {
   describe("node-version check", () => {
     it("passes when node version matches .nvmrc", async () => {
       writeFileSync(join(tmpDir, ".nvmrc"), "18.19.0\n");
-      vi.mocked(execSync).mockReturnValue(Buffer.from("v18.19.0\n"));
+      vi.mocked(execAsync).mockResolvedValue("v18.19.0\n");
 
       const engine = createDefaultPreflightEngine(tmpDir);
       const checks = engine.getChecksForPlatform("both");
@@ -447,7 +454,7 @@ describe("createDefaultPreflightEngine", () => {
 
     it("fails when node version does not match .nvmrc", async () => {
       writeFileSync(join(tmpDir, ".nvmrc"), "18.19.0\n");
-      vi.mocked(execSync).mockReturnValue(Buffer.from("v20.0.0\n"));
+      vi.mocked(execAsync).mockResolvedValue("v20.0.0\n");
 
       const engine = createDefaultPreflightEngine(tmpDir);
       const checks = engine.getChecksForPlatform("both");
@@ -460,7 +467,7 @@ describe("createDefaultPreflightEngine", () => {
 
     it("passes when no version file is present (no constraint)", async () => {
       // No .nvmrc, no .node-version, no engines in package.json
-      vi.mocked(execSync).mockReturnValue(Buffer.from("v18.19.0\n"));
+      vi.mocked(execAsync).mockResolvedValue("v18.19.0\n");
 
       const engine = createDefaultPreflightEngine(tmpDir);
       const checks = engine.getChecksForPlatform("both");
@@ -472,7 +479,7 @@ describe("createDefaultPreflightEngine", () => {
 
     it("passes when node version matches .node-version file", async () => {
       writeFileSync(join(tmpDir, ".node-version"), "20.11.0\n");
-      vi.mocked(execSync).mockReturnValue(Buffer.from("v20.11.0\n"));
+      vi.mocked(execAsync).mockResolvedValue("v20.11.0\n");
 
       const engine = createDefaultPreflightEngine(tmpDir);
       const checks = engine.getChecksForPlatform("both");
@@ -483,9 +490,9 @@ describe("createDefaultPreflightEngine", () => {
     });
 
     it("returns failed gracefully when node is not installed", async () => {
-      vi.mocked(execSync).mockImplementation(() => {
-        throw new Error("command not found: node");
-      });
+      vi.mocked(execAsync).mockRejectedValue(
+        new Error("command not found: node"),
+      );
 
       const engine = createDefaultPreflightEngine(tmpDir);
       const checks = engine.getChecksForPlatform("both");
@@ -666,12 +673,12 @@ describe("createDefaultPreflightEngine", () => {
       mkdirSync(join(tmpDir, "patches"));
       writeFileSync(join(tmpDir, "patches", "some-dep+1.0.0.patch"), "--- a\n+++ b\n");
 
-      // mock execSync to simulate patch check failing
-      vi.mocked(execSync).mockImplementation((cmd: string) => {
+      // Simulate a patch-check failure via the async exec wrapper
+      vi.mocked(execAsync).mockImplementation(async (cmd: string) => {
         if (String(cmd).includes("patch")) {
           throw new Error("patch not applied");
         }
-        return Buffer.from("");
+        return "";
       });
 
       const engine = createDefaultPreflightEngine(tmpDir);

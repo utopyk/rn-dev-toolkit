@@ -84,11 +84,14 @@
         },
         "config": {
           "type": "object",
-          "description": "Reserved for Phase 5 per-module config. Schema validates but host ignores in v1.",
+          "description": "Per-module config. Host stores the validated JSON blob at ~/.rn-dev/modules/<id>/config.json and passes it on the initialize handshake; modules also receive live updates via the config/changed notification.",
           "required": ["schema"],
           "additionalProperties": false,
           "properties": {
-            "schema": { "type": "object" }
+            "schema": {
+              "type": "object",
+              "description": "JSON Schema 2020-12 object the host validates candidate config against before persisting."
+            }
           }
         }
       }

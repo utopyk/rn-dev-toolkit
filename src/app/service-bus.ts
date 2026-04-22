@@ -12,6 +12,8 @@ import type { MetroManager } from "../core/metro.js";
 import type { FileWatcher } from "../core/watcher.js";
 import type { DevToolsManager } from "../core/devtools.js";
 import type { ModuleHostManager } from "../core/module-host/manager.js";
+import type { ModuleRegistry } from "../modules/registry.js";
+import type { ModulesEvent } from "./modules-ipc.js";
 
 export interface ServiceBusEvents {
   log: (text: string) => void;
@@ -37,6 +39,28 @@ export interface ServiceBusEvents {
    * MCP tools; Phase 4 subscribes to render panels.
    */
   moduleHost: (manager: ModuleHostManager) => void;
+  /**
+   * Published once after `moduleHost` — the registry tracks loaded
+   * manifests. Electron main subscribes so panel-bridge can resolve
+   * module root paths + manifests by id.
+   */
+  moduleRegistry: (registry: ModuleRegistry) => void;
+  /**
+   * Per-event fan-out from `registerModulesIpc`'s local bus — same
+   * payload that MCP's `tools/listChanged` path consumes. Electron main
+   * subscribes to forward to the renderer so the sidebar rebuilds when
+   * a module installs / crashes / toggles without introducing a second
+   * subscription mechanism.
+   */
+  moduleEvent: (event: ModulesEvent) => void;
+  /**
+   * The shared `moduleEvents` EventEmitter owned by `registerModulesIpc`.
+   * Published so Electron-side handlers (e.g. `modules:config-set`) that
+   * bypass the unix-socket dispatcher can still emit into the same bus
+   * MCP `modules/subscribe` consumers listen on — one subscription path,
+   * no divergent event sources.
+   */
+  moduleEventsBus: (emitter: EventEmitter) => void;
 }
 
 class ServiceBus extends EventEmitter {
@@ -66,6 +90,18 @@ class ServiceBus extends EventEmitter {
 
   setModuleHost(manager: ModuleHostManager) {
     this.emit("moduleHost", manager);
+  }
+
+  setModuleRegistry(registry: ModuleRegistry) {
+    this.emit("moduleRegistry", registry);
+  }
+
+  emitModuleEvent(event: ModulesEvent) {
+    this.emit("moduleEvent", event);
+  }
+
+  setModuleEventsBus(emitter: EventEmitter) {
+    this.emit("moduleEventsBus", emitter);
   }
 }
 

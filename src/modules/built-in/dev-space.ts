@@ -3,6 +3,8 @@ import type { RnDevModule } from "../../core/types.js";
 import { DevSpaceView } from "../../ui/layout/DevSpaceView.js";
 import { useAppContext } from "../../app/AppContext.js";
 
+export { devSpaceManifest } from "./manifests.js";
+
 const DevSpaceViewConnected: React.FC = () => {
   const { metroLines, toolOutputLines, shortcuts, wizardContent, buildPhase } = useAppContext();
   return React.createElement(DevSpaceView, {

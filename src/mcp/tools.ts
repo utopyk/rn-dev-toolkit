@@ -1196,6 +1196,91 @@ function buildModulesLifecycleTools(ctx: McpContext): ToolDefinition[] {
         return okResult(payload);
       },
     },
+    {
+      name: "rn-dev/modules-config-get",
+      description:
+        "Read a module's persisted config blob from ~/.rn-dev/modules/<id>/config.json. Returns `{}` when the module has no stored config. Advisory permissions do not gate config reads in v1.",
+      inputSchema: {
+        type: "object",
+        required: ["moduleId"],
+        properties: {
+          moduleId: { type: "string" },
+          scopeUnit: { type: "string" },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        required: ["moduleId", "config"],
+        properties: {
+          moduleId: { type: "string" },
+          config: { type: "object" },
+          error: { type: "string" },
+        },
+      },
+      handler: async (args) => {
+        const resp = await ipcAction(ctx, "modules/config/get", args);
+        if (!resp) return noSessionError();
+        const payload = resp.payload as Record<string, unknown>;
+        if (payload && typeof payload.error === "string") {
+          return {
+            isError: true,
+            structuredContent: payload,
+            content: [
+              { type: "text" as const, text: `modules/config/get error: ${payload.error}` },
+            ],
+          };
+        }
+        return okResult(payload);
+      },
+    },
+    {
+      name: "rn-dev/modules-config-set",
+      description:
+        "Shallow-merge `patch` into a module's persisted config, validate the result against the module's contributed JSON Schema, and atomically write to ~/.rn-dev/modules/<id>/config.json. Emits config-changed to live subscribers and pushes a config/changed notification to the running subprocess. Returns E_CONFIG_VALIDATION on schema failure. Advisory permissions do not gate config writes in v1.",
+      inputSchema: {
+        type: "object",
+        required: ["moduleId", "patch"],
+        properties: {
+          moduleId: { type: "string" },
+          scopeUnit: { type: "string" },
+          patch: {
+            type: "object",
+            description: "Shallow-merged into the current config before validation.",
+          },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["ok", "error"] },
+          config: { type: "object" },
+          code: { type: "string" },
+          message: { type: "string" },
+        },
+      },
+      handler: async (args) => {
+        const resp = await ipcAction(ctx, "modules/config/set", args);
+        if (!resp) return noSessionError();
+        const payload = resp.payload as Record<string, unknown>;
+        if (
+          payload &&
+          typeof payload.kind === "string" &&
+          payload.kind === "error"
+        ) {
+          return {
+            isError: true,
+            structuredContent: payload,
+            content: [
+              {
+                type: "text" as const,
+                text: `modules/config/set ${String(payload.code)}: ${String(payload.message)}`,
+              },
+            ],
+          };
+        }
+        return okResult(payload);
+      },
+    },
   ];
 }
 

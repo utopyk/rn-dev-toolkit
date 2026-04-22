@@ -21,7 +21,12 @@ export type ModuleActivationState = "inert" | "active" | "crashed" | "failed";
 
 export interface RegisteredModule {
   manifest: ModuleManifest;
-  /** Absolute path of the module's package root (contains rn-dev-module.json). */
+  /**
+   * Absolute path of the module's package root (contains rn-dev-module.json).
+   * For `kind: "built-in-privileged"` modules there is no package on disk —
+   * the sentinel `"<built-in:<id>>"` is used so consumers that key off this
+   * (e.g. panel-bridge moduleRoot resolution) can detect the in-process case.
+   */
   modulePath: string;
   /**
    * Scope unit this registration is bound to.
@@ -31,6 +36,36 @@ export interface RegisteredModule {
   scopeUnit: string;
   state: ModuleActivationState;
   isBuiltIn: boolean;
+  /**
+   * How the module's runtime is hosted.
+   *
+   * - `"subprocess"` — 3p module spawned as its own Node child process via
+   *   `ModuleHostManager`. The default when omitted, so every Phase 0–4
+   *   registration keeps its existing shape.
+   * - `"built-in-privileged"` — Phase 5b. In-process, trusted by the host
+   *   and exempt from the `<moduleId>__<tool>` prefix policy. Renderer
+   *   panels are native React components keyed by `manifest.id`, not
+   *   WebContentsView sandboxes. Never spawned by `ModuleHostManager`.
+   *
+   * Optional for backward compatibility — `undefined` is treated as
+   * `"subprocess"` by the registry and manager.
+   */
+  kind?: "subprocess" | "built-in-privileged";
+}
+
+/**
+ * Sentinel `modulePath` assigned to built-in-privileged modules. Lets
+ * panel-bridge + other consumers detect the in-process case without a
+ * separate field.
+ */
+export const BUILT_IN_MODULE_PATH_PREFIX = "<built-in:";
+
+export function builtInModulePath(moduleId: string): string {
+  return `${BUILT_IN_MODULE_PATH_PREFIX}${moduleId}>`;
+}
+
+export function isBuiltInModulePath(modulePath: string): boolean {
+  return modulePath.startsWith(BUILT_IN_MODULE_PATH_PREFIX);
 }
 
 /** A manifest that failed to load — captured so callers can surface diagnostics. */
@@ -134,6 +169,50 @@ export class ModuleRegistry {
       );
     }
     this.manifestModules.set(key, registered);
+  }
+
+  /**
+   * Phase 5b — register a built-in privileged module. Built-ins have no
+   * package on disk; the caller supplies the manifest inline. The registry
+   * fills in `kind: "built-in-privileged"`, `isBuiltIn: true`, `state:
+   * "active"` (built-ins don't spawn), and the `<built-in:<id>>` sentinel
+   * `modulePath` so panel-bridge + Electron-IPC layers can detect the
+   * in-process case without a separate field.
+   *
+   * The manifest is still run through `validateManifest` + `enforceToolPrefix`
+   * (with `isBuiltIn: true`, which waives the `<moduleId>__` prefix policy).
+   * A validation failure throws rather than returning a RejectedManifest
+   * because a broken built-in is a programmer error, not a runtime state.
+   */
+  registerBuiltIn(
+    manifest: ModuleManifest,
+    options: { scopeUnit?: string } = {},
+  ): RegisteredModule {
+    const validation = validateManifest(manifest);
+    if (!validation.valid) {
+      throw new ModuleError(
+        ModuleErrorCode.E_INVALID_MANIFEST,
+        `Built-in manifest for "${manifest.id}" failed schema validation (${validation.errors.length} error${validation.errors.length === 1 ? "" : "s"}): ${validation.errors
+          .map((e) => `${e.path}: ${e.message}`)
+          .join("; ")}`,
+        { errors: validation.errors },
+      );
+    }
+    enforceToolPrefix(validation.manifest, { isBuiltIn: true });
+
+    const scopeUnit =
+      manifest.scope === "global" ? "global" : (options.scopeUnit ?? "global");
+
+    const registered: RegisteredModule = {
+      manifest: validation.manifest,
+      modulePath: builtInModulePath(manifest.id),
+      scopeUnit,
+      state: "active",
+      isBuiltIn: true,
+      kind: "built-in-privileged",
+    };
+    this.registerManifest(registered);
+    return registered;
   }
 
   unregisterManifest(id: string, scopeUnit: string): boolean {

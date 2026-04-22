@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
@@ -5,6 +6,7 @@ import { join } from "path";
 import { dispatchModulesAction } from "../modules-ipc.js";
 import { ModuleRegistry } from "../../modules/registry.js";
 import { ModuleHostManager } from "../../core/module-host/manager.js";
+import { ModuleConfigStore } from "../../modules/config-store.js";
 import type { ModuleManifest } from "@rn-dev/module-sdk";
 import type { IpcMessage } from "../../core/ipc.js";
 import type { SpawnHandle, ModuleSpawner } from "../../core/module-host/manager.js";
@@ -462,5 +464,277 @@ describe("dispatchModulesAction — modules/enable", () => {
       makeMsg("modules/enable", {}),
     )) as { error?: string };
     expect(result.error).toMatch(/moduleId/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// modules/config/get + modules/config/set — Phase 5a
+// ---------------------------------------------------------------------------
+
+describe("dispatchModulesAction — modules/config", () => {
+  let modulesDir: string;
+  let configStore: ModuleConfigStore;
+
+  beforeEach(() => {
+    modulesDir = mkdtempSync(join(tmpdir(), "rn-dev-config-ipc-"));
+    configStore = new ModuleConfigStore({ modulesDir });
+  });
+
+  afterEach(() => {
+    rmSync(modulesDir, { recursive: true, force: true });
+  });
+
+  function makeSchemaedManifest(): ModuleManifest {
+    return makeManifest({
+      id: "tunable",
+      contributes: {
+        config: {
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              greeting: { type: "string", minLength: 1 },
+              count: { type: "integer", minimum: 0 },
+            },
+          },
+        },
+      } as ModuleManifest["contributes"],
+    });
+  }
+
+  it("modules/config/get returns {} when nothing is persisted", async () => {
+    active = await setup([makeSchemaedManifest()]);
+    const result = (await dispatchModulesAction(
+      {
+        registry: active.registry,
+        manager: active.manager,
+        configStore,
+      },
+      makeMsg("modules/config/get", {
+        moduleId: "tunable",
+        scopeUnit: "wt-1",
+      }),
+    )) as { moduleId: string; config: Record<string, unknown> };
+    expect(result.moduleId).toBe("tunable");
+    expect(result.config).toEqual({});
+  });
+
+  it("modules/config/set shallow-merges, validates, persists, and reports ok", async () => {
+    active = await setup([makeSchemaedManifest()]);
+    configStore.write("tunable", { greeting: "hi" });
+
+    const result = (await dispatchModulesAction(
+      {
+        registry: active.registry,
+        manager: active.manager,
+        configStore,
+      },
+      makeMsg("modules/config/set", {
+        moduleId: "tunable",
+        scopeUnit: "wt-1",
+        patch: { count: 3 },
+      }),
+    )) as { kind: string; config?: Record<string, unknown> };
+
+    expect(result.kind).toBe("ok");
+    expect(result.config).toEqual({ greeting: "hi", count: 3 });
+    // On-disk state matches.
+    expect(configStore.get("tunable")).toEqual({ greeting: "hi", count: 3 });
+  });
+
+  it("modules/config/set returns E_CONFIG_VALIDATION when patch violates schema", async () => {
+    active = await setup([makeSchemaedManifest()]);
+    const result = (await dispatchModulesAction(
+      {
+        registry: active.registry,
+        manager: active.manager,
+        configStore,
+      },
+      makeMsg("modules/config/set", {
+        moduleId: "tunable",
+        scopeUnit: "wt-1",
+        patch: { count: -5 },
+      }),
+    )) as { kind: string; code?: string; message?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("E_CONFIG_VALIDATION");
+    // Nothing persisted.
+    expect(configStore.get("tunable")).toEqual({});
+  });
+
+  it("modules/config/set emits a config-changed event onto moduleEvents", async () => {
+    active = await setup([makeSchemaedManifest()]);
+    const moduleEvents = new EventEmitter();
+    const received: Array<Record<string, unknown>> = [];
+    moduleEvents.on("modules-event", (e: Record<string, unknown>) => {
+      received.push(e);
+    });
+
+    await dispatchModulesAction(
+      {
+        registry: active.registry,
+        manager: active.manager,
+        configStore,
+        moduleEvents,
+      },
+      makeMsg("modules/config/set", {
+        moduleId: "tunable",
+        scopeUnit: "wt-1",
+        patch: { greeting: "hello" },
+      }),
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({
+      kind: "config-changed",
+      moduleId: "tunable",
+      scopeUnit: "wt-1",
+      config: { greeting: "hello" },
+    });
+  });
+
+  it("modules/config/set sends config/changed notification to a live subprocess", async () => {
+    active = await setup([makeSchemaedManifest()]);
+    const reg = active.registry.getManifest("tunable", "wt-1");
+    if (!reg) throw new Error("fixture missing");
+    const managed = await active.manager.acquire(reg, "c1");
+    const sendSpy = vi.spyOn(managed.rpc, "sendNotification");
+
+    await dispatchModulesAction(
+      {
+        registry: active.registry,
+        manager: active.manager,
+        configStore,
+      },
+      makeMsg("modules/config/set", {
+        moduleId: "tunable",
+        scopeUnit: "wt-1",
+        patch: { greeting: "ping" },
+      }),
+    );
+
+    expect(sendSpy).toHaveBeenCalledWith("config/changed", {
+      greeting: "ping",
+    });
+  });
+
+  it("modules/config/set returns E_CONFIG_MODULE_UNKNOWN for unregistered ids", async () => {
+    active = await setup([makeSchemaedManifest()]);
+    const result = (await dispatchModulesAction(
+      {
+        registry: active.registry,
+        manager: active.manager,
+        configStore,
+      },
+      makeMsg("modules/config/set", {
+        moduleId: "ghost",
+        patch: { greeting: "x" },
+      }),
+    )) as { kind: string; code?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("E_CONFIG_MODULE_UNKNOWN");
+  });
+
+  it("modules/config/set rejects patches containing undefined values", async () => {
+    active = await setup([makeSchemaedManifest()]);
+    const result = (await dispatchModulesAction(
+      {
+        registry: active.registry,
+        manager: active.manager,
+        configStore,
+      },
+      makeMsg("modules/config/set", {
+        moduleId: "tunable",
+        scopeUnit: "wt-1",
+        // `undefined` round-trips through IPC as a dropped key in real
+        // traffic, but direct dispatch passes it through. Without the
+        // guard, JSON.stringify would silently drop the entry and the
+        // caller would get a persisted blob with fewer keys than intended.
+        patch: { greeting: undefined as unknown as string },
+      }),
+    )) as { kind: string; code?: string; message?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("E_CONFIG_BAD_PATCH");
+    expect(result.message).toMatch(/undefined/i);
+  });
+
+  it("modules/config/set rejects non-object patches with E_CONFIG_BAD_PATCH", async () => {
+    active = await setup([makeSchemaedManifest()]);
+    const result = (await dispatchModulesAction(
+      {
+        registry: active.registry,
+        manager: active.manager,
+        configStore,
+      },
+      makeMsg("modules/config/set", {
+        moduleId: "tunable",
+        patch: "not an object" as unknown as Record<string, unknown>,
+      }),
+    )) as { kind: string; code?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("E_CONFIG_BAD_PATCH");
+  });
+
+  it("modules/config without a schema accepts any patch", async () => {
+    active = await setup([makeManifest({ id: "schemaless" })]);
+    const result = (await dispatchModulesAction(
+      {
+        registry: active.registry,
+        manager: active.manager,
+        configStore,
+      },
+      makeMsg("modules/config/set", {
+        moduleId: "schemaless",
+        scopeUnit: "wt-1",
+        patch: { anything: { nested: "goes" } },
+      }),
+    )) as { kind: string; config?: Record<string, unknown> };
+    expect(result.kind).toBe("ok");
+    expect(result.config).toEqual({ anything: { nested: "goes" } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 5b — built-in-privileged modules are not spawnable through modules/call
+// ---------------------------------------------------------------------------
+
+describe("dispatchModulesAction — built-in-privileged guard", () => {
+  it("modules/call returns MODULE_UNAVAILABLE for built-in-privileged modules", async () => {
+    active = await setup();
+    // Register a built-in via the dedicated helper.
+    active.registry.registerBuiltIn({
+      id: "builtin-cap-only",
+      version: "0.1.0",
+      hostRange: ">=0.1.0",
+      scope: "global",
+    });
+
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/call", {
+        moduleId: "builtin-cap-only",
+        scopeUnit: "global",
+        tool: "whatever",
+        args: {},
+      }),
+    )) as { kind: string; code?: string; message?: string };
+
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("MODULE_UNAVAILABLE");
+    expect(result.message).toMatch(/built-in-privileged/);
+  });
+
+  it("manager.acquire throws E_BUILT_IN_NOT_SPAWNABLE for built-ins", async () => {
+    active = await setup();
+    const reg = active.registry.registerBuiltIn({
+      id: "builtin-unspawnable",
+      version: "0.1.0",
+      hostRange: ">=0.1.0",
+      scope: "global",
+    });
+
+    await expect(active.manager.acquire(reg, "c1")).rejects.toThrow(
+      /E_BUILT_IN_NOT_SPAWNABLE/,
+    );
   });
 });

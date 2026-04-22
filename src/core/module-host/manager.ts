@@ -1,7 +1,9 @@
 import { EventEmitter } from "node:events";
 import { spawn, type ChildProcess } from "node:child_process";
 import type { RegisteredModule } from "../../modules/registry.js";
+import { ModuleConfigStore } from "../../modules/config-store.js";
 import { CapabilityRegistry } from "./capabilities.js";
+import { attachHostRpc } from "./host-rpc.js";
 import { ModuleInstance, type ModuleInstanceState } from "./instance.js";
 import { ModuleLockfile } from "./lockfile.js";
 import {
@@ -46,6 +48,12 @@ export interface ModuleHostManagerOptions {
    * immediately on explicit shutdown.
    */
   idleShutdownMs?: number;
+  /**
+   * Per-module persistent config store. Defaults to a fresh
+   * `ModuleConfigStore()` pointing at `~/.rn-dev/modules/`. Tests inject
+   * their own store to isolate filesystem state.
+   */
+  configStore?: ModuleConfigStore;
 }
 
 export interface ManagedModule {
@@ -139,7 +147,19 @@ interface InternalEntry {
 export class ModuleHostManager extends EventEmitter {
   private readonly entries = new Map<string, InternalEntry>();
   private readonly spawner: ModuleSpawner;
-  private readonly capabilities: CapabilityRegistry;
+  /**
+   * Shared capability registry. Exposed so Electron main-process IPC
+   * handlers (e.g. `modules:host-call` from module panel preloads) can
+   * resolve against the same registry the subprocesses see via `host/call`
+   * RPC — single source of truth for permission gating.
+   */
+  public readonly capabilities: CapabilityRegistry;
+  /**
+   * Per-module config store. `public readonly` so `registerModulesIpc` and
+   * the Electron IPC layer resolve against the same on-disk state —
+   * matches the Phase 4 `capabilities` single-source-of-truth pattern.
+   */
+  public readonly configStore: ModuleConfigStore;
   private readonly hostVersion: string;
   private readonly initializeTimeoutMs: number;
   private readonly idleShutdownMs: number;
@@ -160,6 +180,7 @@ export class ModuleHostManager extends EventEmitter {
     super();
     this.spawner = options.spawner ?? new NodeSpawner();
     this.capabilities = options.capabilities ?? new CapabilityRegistry();
+    this.configStore = options.configStore ?? new ModuleConfigStore();
     this.hostVersion = options.hostVersion;
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? 3000;
     this.idleShutdownMs = options.idleShutdownMs ?? 60_000;
@@ -178,6 +199,11 @@ export class ModuleHostManager extends EventEmitter {
     registered: RegisteredModule,
     consumerId: string,
   ): Promise<ManagedModule> {
+    if (registered.kind === "built-in-privileged") {
+      throw new Error(
+        `E_BUILT_IN_NOT_SPAWNABLE: module "${registered.manifest.id}" is a built-in-privileged module — it runs in-process and cannot be spawned via ModuleHostManager.acquire().`,
+      );
+    }
     const key = ModuleHostManager.keyFor(registered);
     const existing = this.entries.get(key);
     if (existing) {
@@ -262,6 +288,24 @@ export class ModuleHostManager extends EventEmitter {
     };
   }
 
+  /**
+   * Push a live config update to a running subprocess. Caller is
+   * responsible for having written the new blob to disk first — the manager
+   * just ferries the notification. No-op when the (id, scope) pair is not
+   * currently managed; cold-start modules will pick up the new config via
+   * the next `initialize` handshake.
+   */
+  notifyConfigChanged(
+    moduleId: string,
+    scopeUnit: string,
+    config: Record<string, unknown>,
+  ): boolean {
+    const entry = this.entries.get(`${moduleId}:${scopeUnit}`);
+    if (!entry) return false;
+    entry.managed.rpc.sendNotification("config/changed", config);
+    return true;
+  }
+
   // -------------------------------------------------------------------------
   // Internal — spawn/handshake
   // -------------------------------------------------------------------------
@@ -327,6 +371,11 @@ export class ModuleHostManager extends EventEmitter {
         message: p?.message ?? "",
       });
     });
+    // Register host/call BEFORE listen() so a subprocess that calls back
+    // during its own `activate` (which runs inside `initialize`) reaches a
+    // live handler — the host is still awaiting the initialize response but
+    // vscode-jsonrpc is duplex and serves inbound requests concurrently.
+    attachHostRpc(rpc, manifest, this.capabilities);
     rpc.listen();
 
     instance.transitionTo("handshaking");
@@ -336,6 +385,7 @@ export class ModuleHostManager extends EventEmitter {
       initResult = await performInitialize(rpc, {
         capabilities: this.capabilities.describeAll(),
         hostVersion: this.hostVersion,
+        config: this.configStore.get(manifest.id),
         timeoutMs: this.initializeTimeoutMs,
       });
     } catch (err) {

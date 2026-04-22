@@ -77,13 +77,21 @@ export async function startFlow(options: StartOptions): Promise<void> {
   const theme = loadTheme(themeName);
   const effects = getThemeEffects(themeName);
 
-  // 5. Register modules
+  // 5. Register modules — single instance, shared by the TUI surface and the
+  //    daemon's manifest surface. Legacy Ink-style entries go through
+  //    `register()`; Phase 5b manifest-shape built-ins go through
+  //    `registerBuiltIn()`. `Marketplace` + user-global 3p manifests are
+  //    added later by `startServicesAsync` once the capability registry exists.
   const registry = new ModuleRegistry();
   registry.register(devSpaceModule);
   registry.register(lintTestModule);
   registry.register(metroLogsModule);
   registry.register(devtoolsNetworkModule);
   registry.register(settingsModule);
+  registry.registerBuiltIn(devSpaceManifest);
+  registry.registerBuiltIn(metroLogsManifest);
+  registry.registerBuiltIn(lintTestManifest);
+  registry.registerBuiltIn(settingsManifest);
 
   // 6. Determine if we need the wizard
   let profile: Profile | undefined;
@@ -195,7 +203,8 @@ export async function startFlow(options: StartOptions): Promise<void> {
       const result = await startServices(
         fullProfile,
         projectRoot,
-        artifactStore
+        artifactStore,
+        registry,
       );
 
       // Re-render with profile and services
@@ -211,20 +220,23 @@ export async function startFlow(options: StartOptions): Promise<void> {
         builder: result.builder,
       });
 
-      // Trigger build after re-render
-      const platformsToBuild: Array<"ios" | "android"> =
-        fullProfile.platform === "both" ? ["ios", "android"] : [fullProfile.platform];
+      // Trigger build after re-render (quick mode skips this — the already-
+      // installed app connects to Metro directly).
+      if (fullProfile.mode !== "quick") {
+        const platformsToBuild: Array<"ios" | "android"> =
+          fullProfile.platform === "both" ? ["ios", "android"] : [fullProfile.platform];
 
-      for (const plat of platformsToBuild) {
-        const devId = plat === "ios" ? fullProfile.devices?.ios : fullProfile.devices?.android;
-        result.builder.build({
-          projectRoot: fullProfile.worktree ?? projectRoot,
-          platform: plat,
-          deviceId: devId ?? undefined,
-          port: fullProfile.metroPort,
-          variant: fullProfile.buildVariant,
-          env: fullProfile.env,
-        });
+        for (const plat of platformsToBuild) {
+          const devId = plat === "ios" ? fullProfile.devices?.ios : fullProfile.devices?.android;
+          result.builder.build({
+            projectRoot: fullProfile.worktree ?? projectRoot,
+            platform: plat,
+            deviceId: devId ?? undefined,
+            port: fullProfile.metroPort,
+            variant: fullProfile.buildVariant,
+            env: fullProfile.env,
+          });
+        }
       }
     },
     onWizardCancel: () => {
@@ -234,7 +246,7 @@ export async function startFlow(options: StartOptions): Promise<void> {
 
   // 10. Start services async on the main thread (all shell calls use Bun.spawn, never blocks)
   if (profile && !needsWizard) {
-    startServicesAsync(profile, projectRoot, artifactStore).then((result) => {
+    startServicesAsync(profile, projectRoot, artifactStore, registry).then((result) => {
       metro = result.metro;
       devtools = result.devtools;
       watcher = result.watcher;
@@ -243,23 +255,27 @@ export async function startFlow(options: StartOptions): Promise<void> {
       builder = result.builder;
 
       // Trigger build after a short delay so React's useEffect has time
-      // to subscribe to builder events before they start firing
-      setTimeout(() => {
-        const platformsToBuild: Array<"ios" | "android"> =
-          profile.platform === "both" ? ["ios", "android"] : [profile.platform];
+      // to subscribe to builder events before they start firing. Quick
+      // mode skips this entirely — the existing installed app connects
+      // to Metro directly.
+      if (profile.mode !== "quick") {
+        setTimeout(() => {
+          const platformsToBuild: Array<"ios" | "android"> =
+            profile.platform === "both" ? ["ios", "android"] : [profile.platform];
 
-        for (const plat of platformsToBuild) {
-          const devId = plat === "ios" ? profile.devices?.ios : profile.devices?.android;
-          result.builder.build({
-            projectRoot: profile.worktree ?? projectRoot,
-            platform: plat,
-            deviceId: devId ?? undefined,
-            port: profile.metroPort,
-            variant: profile.buildVariant,
-            env: profile.env,
-          });
-        }
-      }, 200);
+          for (const plat of platformsToBuild) {
+            const devId = plat === "ios" ? profile.devices?.ios : profile.devices?.android;
+            result.builder.build({
+              projectRoot: profile.worktree ?? projectRoot,
+              platform: plat,
+              deviceId: devId ?? undefined,
+              port: profile.metroPort,
+              variant: profile.buildVariant,
+              env: profile.env,
+            });
+          }
+        }, 200);
+      }
     }).catch((err) => {
       serviceBus.log(`\u2716 Service startup error: ${err instanceof Error ? err.message : String(err)}`);
     });
@@ -308,7 +324,8 @@ export async function startFlow(options: StartOptions): Promise<void> {
 async function startServicesAsync(
   profile: Profile,
   projectRoot: string,
-  artifactStore: ArtifactStore
+  artifactStore: ArtifactStore,
+  moduleRegistry: ModuleRegistry,
 ): Promise<{
   metro: MetroManager;
   devtools: DevToolsManager;
@@ -396,8 +413,8 @@ async function startServicesAsync(
     }
   }
 
-  // 3. Run clean if needed
-  if (profile.mode !== "dirty") {
+  // 3. Run clean if needed — skipped for dirty + quick modes.
+  if (profile.mode !== "dirty" && profile.mode !== "quick") {
     const cleaner = new CleanManager(projectRoot);
     emit(`\u23f3 Running ${profile.mode} clean...`);
     await cleaner.execute(profile.mode, profile.platform, (step, status) => {
@@ -472,7 +489,7 @@ async function startServicesAsync(
     worktreeKey,
     projectRoot: effectiveRoot,
     port: profile.metroPort,
-    resetCache: profile.mode !== "dirty",
+    resetCache: profile.mode !== "dirty" && profile.mode !== "quick",
     verbose: true,
     env: profile.env,
   });
@@ -525,12 +542,20 @@ async function startServicesAsync(
   // Actual module-contributed tools/call proxying is Phase 3b.
   const capabilities = new CapabilityRegistry();
   const hostVersion = readHostVersion();
-  capabilities.register<AppInfoCapability>("appInfo", {
-    hostVersion,
-    platform: process.platform,
-    worktreeKey,
-  });
-  capabilities.register<LogCapability>("log", createScopedLogger(emit));
+  capabilities.register<AppInfoCapability>(
+    "appInfo",
+    {
+      hostVersion,
+      platform: process.platform,
+      worktreeKey,
+    },
+    { allowReserved: true },
+  );
+  capabilities.register<LogCapability>(
+    "log",
+    createScopedLogger(emit),
+    { allowReserved: true },
+  );
   capabilities.register("metro", metro, {
     requiredPermission: "exec:react-native",
   });
@@ -540,25 +565,13 @@ async function startServicesAsync(
   const moduleHost = new ModuleHostManager({ hostVersion, capabilities });
   serviceBus.setModuleHost(moduleHost);
 
-  // Module registry is published separately so Phase 4 Electron main can
-  // resolve panel contributions without re-discovering manifests.
-
-  // Phase 3a: discover user-global modules from ~/.rn-dev/modules/ and
-  // register them as inert manifests. Rejections are logged but don't fail
-  // startup — a broken 3p module shouldn't prevent the dev loop.
-  const moduleRegistry = new ModuleRegistry();
+  // Phase 5c — single ModuleRegistry. The TUI surface registered legacy
+  // Ink-style modules + the four built-in manifests up in `startFlow` before
+  // services started; the Marketplace built-in is registered here because it
+  // needs the capability registry (created above) to publish the `modules`
+  // host capability. `loadUserGlobalModules` then appends 3p manifests.
   serviceBus.setModuleRegistry(moduleRegistry);
 
-  // Phase 5b: register the four existing built-ins (dev-space, metro-logs,
-  // lint-test, settings) + the Marketplace built-in as manifest-driven
-  // RegisteredModules. `registerBuiltIn` stamps `kind: "built-in-privileged"`
-  // on each; they never spawn via ModuleHostManager, but they DO appear in
-  // `modules/list`, the Marketplace capability, and share the `contributes.
-  // config.schema` surface with 3p modules.
-  moduleRegistry.registerBuiltIn(devSpaceManifest);
-  moduleRegistry.registerBuiltIn(metroLogsManifest);
-  moduleRegistry.registerBuiltIn(lintTestManifest);
-  moduleRegistry.registerBuiltIn(settingsManifest);
   registerMarketplaceBuiltIn({ moduleRegistry, capabilities });
 
   const loadResult = moduleRegistry.loadUserGlobalModules({
@@ -580,15 +593,10 @@ async function startServicesAsync(
     manager: moduleHost,
     registry: moduleRegistry,
   });
-  // Fan out module events to the serviceBus so Electron main can forward
-  // them to the renderer — same payload as MCP `tools/listChanged` so we
-  // don't introduce a second subscription path (per Phase 4 plan).
-  modulesIpc.moduleEvents.on("modules-event", (event) => {
-    serviceBus.emitModuleEvent(event);
-  });
-  // Phase 5a — publish the shared bus so Electron's `modules:config-set`
-  // handler can emit `config-changed` into the same bus MCP subscribers
-  // listen on, even when it bypasses the unix-socket dispatcher.
+  // Simplicity #6 (Phase 5c) — the bus itself is the single fan-out point.
+  // MCP `modules/subscribe`, Electron renderer forward, and Electron
+  // `modules:config-set` each attach to this emitter directly. No relay
+  // through a second serviceBus topic.
   serviceBus.setModuleEventsBus(modulesIpc.moduleEvents);
 
   emit("\u2714 All services started");
@@ -663,7 +671,8 @@ function createScopedLogger(emit: (line: string) => void): LogCapability {
 async function startServices(
   profile: Profile,
   projectRoot: string,
-  artifactStore: ArtifactStore
+  artifactStore: ArtifactStore,
+  moduleRegistry: ModuleRegistry,
 ): Promise<{
   metro: MetroManager;
   devtools: DevToolsManager;
@@ -675,6 +684,11 @@ async function startServices(
   moduleHost: ModuleHostManager;
   moduleRegistry: ModuleRegistry;
 }> {
-  const result = await startServicesAsync(profile, projectRoot, artifactStore);
+  const result = await startServicesAsync(
+    profile,
+    projectRoot,
+    artifactStore,
+    moduleRegistry,
+  );
   return { ...result, startupLog: [] };
 }

@@ -13,7 +13,6 @@ import type { FileWatcher } from "../core/watcher.js";
 import type { DevToolsManager } from "../core/devtools.js";
 import type { ModuleHostManager } from "../core/module-host/manager.js";
 import type { ModuleRegistry } from "../modules/registry.js";
-import type { ModulesEvent } from "./modules-ipc.js";
 
 export interface ServiceBusEvents {
   log: (text: string) => void;
@@ -46,19 +45,14 @@ export interface ServiceBusEvents {
    */
   moduleRegistry: (registry: ModuleRegistry) => void;
   /**
-   * Per-event fan-out from `registerModulesIpc`'s local bus — same
-   * payload that MCP's `tools/listChanged` path consumes. Electron main
-   * subscribes to forward to the renderer so the sidebar rebuilds when
-   * a module installs / crashes / toggles without introducing a second
-   * subscription mechanism.
-   */
-  moduleEvent: (event: ModulesEvent) => void;
-  /**
-   * The shared `moduleEvents` EventEmitter owned by `registerModulesIpc`.
-   * Published so Electron-side handlers (e.g. `modules:config-set`) that
-   * bypass the unix-socket dispatcher can still emit into the same bus
-   * MCP `modules/subscribe` consumers listen on — one subscription path,
-   * no divergent event sources.
+   * The shared `moduleEvents` EventEmitter owned by `registerModulesIpc`
+   * (or created eagerly by the Electron-side module-system bootstrap).
+   *
+   * Published once; every subscriber (Electron renderer forward, MCP
+   * `modules/subscribe`, Electron `modules:config-set`) attaches directly
+   * to this emitter. Phase 5c — simplicity #6 removed the redundant
+   * `moduleEvent` topic that used to relay through the serviceBus; having
+   * one emitter means one fan-out point.
    */
   moduleEventsBus: (emitter: EventEmitter) => void;
 }
@@ -94,10 +88,6 @@ class ServiceBus extends EventEmitter {
 
   setModuleRegistry(registry: ModuleRegistry) {
     this.emit("moduleRegistry", registry);
-  }
-
-  emitModuleEvent(event: ModulesEvent) {
-    this.emit("moduleEvent", event);
   }
 
   setModuleEventsBus(emitter: EventEmitter) {

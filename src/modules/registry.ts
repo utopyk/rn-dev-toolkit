@@ -54,18 +54,16 @@ export interface RegisteredModule {
 }
 
 /**
- * Sentinel `modulePath` assigned to built-in-privileged modules. Lets
- * panel-bridge + other consumers detect the in-process case without a
- * separate field.
+ * Sentinel `modulePath` stamped on built-in-privileged modules so
+ * panel-bridge + other consumers that key off `modulePath` still get a
+ * well-defined string. Phase 5c: the "is this a built-in?" predicate has
+ * been removed in favor of branching on `RegisteredModule.kind` directly
+ * — the sentinel is now a display-only marker, not a fact to probe.
  */
 export const BUILT_IN_MODULE_PATH_PREFIX = "<built-in:";
 
 export function builtInModulePath(moduleId: string): string {
   return `${BUILT_IN_MODULE_PATH_PREFIX}${moduleId}>`;
-}
-
-export function isBuiltInModulePath(modulePath: string): boolean {
-  return modulePath.startsWith(BUILT_IN_MODULE_PATH_PREFIX);
 }
 
 /** A manifest that failed to load — captured so callers can surface diagnostics. */

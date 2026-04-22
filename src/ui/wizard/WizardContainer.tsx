@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useTheme } from "../theme-provider.js";
-import type { Profile, OnSaveAction, Platform, DeviceSelection, PreflightConfig } from "../../core/types.js";
+import type { Profile, OnSaveAction, Platform, DeviceSelection, PreflightConfig, RunMode } from "../../core/types.js";
 import { WorktreeStep } from "./WorktreeStep.js";
 import { BranchStep } from "./BranchStep.js";
 import { PlatformStep } from "./PlatformStep.js";
@@ -18,7 +18,7 @@ export interface WizardState {
   worktree: string | null;
   branch: string;
   platform: Platform;
-  mode: "dirty" | "clean" | "ultra-clean";
+  mode: RunMode;
   devices: DeviceSelection;
   buildVariant: "debug" | "release";
   preflight: PreflightConfig;
@@ -107,7 +107,7 @@ export function WizardContainer({
     }));
   }
 
-  function handleModeNext(mode: "dirty" | "clean" | "ultra-clean"): void {
+  function handleModeNext(mode: RunMode): void {
     setState((prev) => ({
       ...prev,
       mode,

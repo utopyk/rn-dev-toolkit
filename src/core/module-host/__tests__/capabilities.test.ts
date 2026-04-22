@@ -9,7 +9,7 @@ describe("CapabilityRegistry — register + resolve (no permission)", () => {
   it("resolves an unpermissioned capability by id", () => {
     const registry = new CapabilityRegistry();
     const logger: TestLogger = { log: () => {} };
-    registry.register<TestLogger>("log", logger);
+    registry.register<TestLogger>("log", logger, { allowReserved: true });
     expect(registry.resolve<TestLogger>("log", [])).toBe(logger);
   });
 
@@ -20,17 +20,43 @@ describe("CapabilityRegistry — register + resolve (no permission)", () => {
 
   it("throws on duplicate registration (id collision)", () => {
     const registry = new CapabilityRegistry();
-    registry.register("log", { log: () => {} });
+    registry.register("log", { log: () => {} }, { allowReserved: true });
     expect(() =>
-      registry.register("log", { log: () => {} }),
+      registry.register("log", { log: () => {} }, { allowReserved: true }),
     ).toThrow(/already registered/i);
   });
 
   it("lists registered ids via `ids()`", () => {
     const registry = new CapabilityRegistry();
-    registry.register("log", {});
-    registry.register("appInfo", {});
+    registry.register("log", {}, { allowReserved: true });
+    registry.register("appInfo", {}, { allowReserved: true });
     expect(registry.ids().sort()).toEqual(["appInfo", "log"]);
+  });
+});
+
+describe("CapabilityRegistry — reserved id guard (F6)", () => {
+  it("rejects plain register() of the reserved `log` id", () => {
+    const registry = new CapabilityRegistry();
+    expect(() => registry.register("log", {})).toThrow(/reserved/);
+  });
+
+  it("rejects plain register() of the reserved `appInfo` id", () => {
+    const registry = new CapabilityRegistry();
+    expect(() => registry.register("appInfo", {})).toThrow(/reserved/);
+  });
+
+  it("allows register() of reserved ids when allowReserved: true is set", () => {
+    const registry = new CapabilityRegistry();
+    expect(() =>
+      registry.register("log", { info: () => {} }, { allowReserved: true }),
+    ).not.toThrow();
+    expect(() =>
+      registry.register(
+        "appInfo",
+        { hostVersion: "x" },
+        { allowReserved: true },
+      ),
+    ).not.toThrow();
   });
 });
 
@@ -58,7 +84,7 @@ describe("CapabilityRegistry — permission gating", () => {
   it("unpermissioned capability is resolvable with any (or no) granted permissions", () => {
     const registry = new CapabilityRegistry();
     const logger = { log: () => {} };
-    registry.register("log", logger);
+    registry.register("log", logger, { allowReserved: true });
     expect(registry.resolve("log", [])).toBe(logger);
     expect(registry.resolve("log", ["network:outbound"])).toBe(logger);
   });
@@ -100,7 +126,7 @@ describe("CapabilityRegistry — introspection", () => {
 
   it("`describeAll()` returns metadata for every registered capability", () => {
     const registry = new CapabilityRegistry();
-    registry.register("log", {});
+    registry.register("log", {}, { allowReserved: true });
     registry.register("artifacts", {}, { requiredPermission: "fs:artifacts" });
     const all = registry.describeAll();
     expect(all).toHaveLength(2);
@@ -114,7 +140,7 @@ describe("CapabilityRegistry — introspection", () => {
 describe("CapabilityRegistry — unregister", () => {
   it("removes a capability and returns true", () => {
     const registry = new CapabilityRegistry();
-    registry.register("log", { log: () => {} });
+    registry.register("log", { log: () => {} }, { allowReserved: true });
     expect(registry.unregister("log")).toBe(true);
     expect(registry.resolve("log", [])).toBeNull();
   });

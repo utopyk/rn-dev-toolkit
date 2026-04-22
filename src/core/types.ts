@@ -4,7 +4,7 @@ export interface Profile {
   worktree: string | null;
   branch: string;
   platform: "ios" | "android" | "both";
-  mode: "dirty" | "clean" | "ultra-clean";
+  mode: RunMode;
   metroPort: number;
   devices: DeviceSelection;
   buildVariant: "debug" | "release";
@@ -85,7 +85,18 @@ export interface ThemeColors {
 }
 
 export type Platform = "ios" | "android" | "both";
-export type RunMode = "dirty" | "clean" | "ultra-clean";
+/**
+ * Run modes (fastest → slowest):
+ * - `quick`       — skip clean AND build; just start Metro. Use when the
+ *                   app binary is already installed on the device/sim and
+ *                   only the JS bundle needs to be served. Great for
+ *                   smoke-testing rn-dev-cli itself.
+ * - `dirty`       — skip clean; still builds the native app.
+ * - `clean`       — run clean then build.
+ * - `ultra-clean` — nuclear clean (delete node_modules, Pods, DerivedData,
+ *                   gradle caches) then build.
+ */
+export type RunMode = "quick" | "dirty" | "clean" | "ultra-clean";
 
 export interface PreflightCheck {
   id: string;

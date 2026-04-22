@@ -9,6 +9,7 @@ import { ModulePanel } from './components/ModulePanel';
 import { DevSpace } from './views/DevSpace';
 import { DevToolsView } from './views/DevToolsView';
 import { LintTest } from './views/LintTest';
+import { Marketplace } from './views/Marketplace';
 import { MetroLogs } from './views/MetroLogs';
 import { Settings } from './views/Settings';
 import { Wizard } from './views/Wizard';
@@ -383,6 +384,7 @@ export function App() {
             'devtools',
             'lint-test',
             'metro-logs',
+            'marketplace',
             'settings',
             ...modulePanels.map((p) => `module:${p.moduleId}:${p.panelId}`),
           ];
@@ -482,6 +484,8 @@ export function App() {
         return <MetroLogs lines={activeLogs.metroLines} />;
       case 'settings':
         return <Settings />;
+      case 'marketplace':
+        return <Marketplace />;
       default:
         return null;
     }

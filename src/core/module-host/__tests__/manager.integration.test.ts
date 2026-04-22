@@ -71,7 +71,7 @@ function makeManager(
 ): ModuleHostManager {
   const capabilities = overrides.capabilities ?? new CapabilityRegistry();
   if (!overrides.capabilities) {
-    capabilities.register("log", {});
+    capabilities.register("log", {}, { allowReserved: true });
   }
   const manager = new ModuleHostManager({
     hostVersion: "0.1.0",

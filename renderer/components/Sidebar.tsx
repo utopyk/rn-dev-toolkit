@@ -18,6 +18,7 @@ const builtinModules: ModuleItem[] = [
   { id: 'devtools', icon: '🔧', label: 'DevTools' },
   { id: 'lint-test', icon: '🧪', label: 'Lint & Test' },
   { id: 'metro-logs', icon: '📡', label: 'Metro Logs' },
+  { id: 'marketplace', icon: '🛒', label: 'Marketplace' },
   { id: 'settings', icon: '⚙', label: 'Settings' },
 ];
 

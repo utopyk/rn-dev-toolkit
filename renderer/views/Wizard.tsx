@@ -33,7 +33,7 @@ interface ToolingOption {
 }
 
 type Platform = 'ios' | 'android' | 'both';
-type Mode = 'dirty' | 'clean' | 'ultra-clean';
+type Mode = 'quick' | 'dirty' | 'clean' | 'ultra-clean';
 type PreflightFrequency = 'once' | 'always';
 
 interface WizardState {
@@ -56,7 +56,8 @@ interface WizardProps {
 const TOTAL_STEPS = 7;
 
 const MODE_DESCRIPTIONS: Record<Mode, string> = {
-  dirty: 'Skip clean steps, fastest startup. Use for normal development.',
+  quick: 'Skip clean AND build. Just start Metro. Use when the app is already on your device.',
+  dirty: 'Skip clean steps, fastest startup that still builds. Use for normal development.',
   clean: 'Clean build artifacts and caches before building.',
   'ultra-clean': 'Nuke node_modules, pods, and all caches. Full fresh start.',
 };
@@ -385,6 +386,7 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
           >
             <RadioGroup
               options={[
+                { value: 'quick', label: 'Quick', description: MODE_DESCRIPTIONS['quick'] },
                 { value: 'dirty', label: 'Dirty', description: MODE_DESCRIPTIONS['dirty'] },
                 { value: 'clean', label: 'Clean', description: MODE_DESCRIPTIONS['clean'] },
                 { value: 'ultra-clean', label: 'Ultra-Clean', description: MODE_DESCRIPTIONS['ultra-clean'] },

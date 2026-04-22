@@ -21,19 +21,23 @@
 import type { ModuleManifest } from "@rn-dev/module-sdk";
 import type { CapabilityRegistry } from "../../core/module-host/capabilities.js";
 import type { ModuleRegistry, RegisteredModule } from "../registry.js";
+import type { RegisteredModuleRow } from "../../app/modules-ipc.js";
 
 // ---------------------------------------------------------------------------
 // Capability surface
 // ---------------------------------------------------------------------------
 
-export interface MarketplaceModuleEntry {
-  id: string;
-  version: string;
-  scope: RegisteredModule["manifest"]["scope"];
-  isBuiltIn: boolean;
-  kind: "subprocess" | "built-in-privileged";
-  state: RegisteredModule["state"];
-}
+/**
+ * Arch #3 — identical projection shape to the `modules/list` IPC row. The
+ * Marketplace capability and the IPC surface read from the same registry;
+ * aligning the types keeps `rowFor` (modules-ipc.ts) as the single
+ * source of truth for how a `RegisteredModule` projects to the outside
+ * world. Marketplace trims the live-instance fields it doesn't need.
+ */
+export type MarketplaceModuleEntry = Pick<
+  RegisteredModuleRow,
+  "id" | "version" | "scope" | "isBuiltIn" | "kind" | "state"
+>;
 
 export interface MarketplaceCapability {
   /** Snapshot of every registered module — same source of truth as `modules/list`. */

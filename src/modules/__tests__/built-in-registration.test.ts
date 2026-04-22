@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   ModuleRegistry,
   builtInModulePath,
-  isBuiltInModulePath,
 } from "../registry.js";
 import {
   devSpaceManifest,
@@ -27,7 +26,9 @@ describe("registerBuiltIn — stamps kind + sentinel path + isBuiltIn", () => {
     const registered = registry.registerBuiltIn(metroLogsManifest);
 
     expect(registered.modulePath).toBe(builtInModulePath("metro-logs"));
-    expect(isBuiltInModulePath(registered.modulePath)).toBe(true);
+    // Arch #4 — consumers now branch on `kind`, not on the modulePath string.
+    // The sentinel remains for display; the predicate has been removed.
+    expect(registered.kind).toBe("built-in-privileged");
   });
 
   it("registers under the 'global' scopeUnit for global-scope manifests", () => {

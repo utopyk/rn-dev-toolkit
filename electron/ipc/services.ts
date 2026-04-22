@@ -12,6 +12,7 @@ import { execShellAsync } from '../../src/core/exec-async.js';
 import { CleanManager, detectAllPackageManagers, detectPackageManager } from '../../src/core/clean.js';
 import type { Profile } from '../../src/core/types.js';
 import { instances, state, send, appendLog, toSummary, findFreePort, type InstanceState } from './state.js';
+import { bootstrapElectronModuleSystem } from '../module-system-bootstrap.js';
 
 // ── Start services for a single instance ──
 
@@ -70,8 +71,8 @@ export async function startInstanceServices(instance: InstanceState, profileData
     emit('');
   }
 
-  // Run clean if not dirty mode
-  if (instance.mode !== 'dirty') {
+  // Run clean only for clean / ultra-clean modes (quick + dirty skip it).
+  if (instance.mode !== 'dirty' && instance.mode !== 'quick') {
     send('instance:section:start', { instanceId: instance.id, id: 'clean', title: `${instance.mode} Clean`, icon: '\u23F3' });
     emit(`Running ${instance.mode} clean...`);
     // Use the worktree path if available, otherwise the main project root
@@ -285,7 +286,7 @@ export async function startInstanceServices(instance: InstanceState, profileData
     worktreeKey,
     projectRoot: instance.worktree ?? projectRoot,
     port: instance.port,
-    resetCache: instance.mode !== 'dirty',
+    resetCache: instance.mode !== 'dirty' && instance.mode !== 'quick',
     env: profile.env,
   });
   instance.metro = metroMgr;
@@ -307,8 +308,9 @@ export async function startInstanceServices(instance: InstanceState, profileData
   emit('All services started');
   emit('');
 
-  // Check code signing before building (for iOS with physical devices)
-  if (instance.platform === 'ios' || instance.platform === 'both') {
+  // Check code signing before building (for iOS with physical devices).
+  // Skipped in quick mode since we're not building.
+  if (instance.mode !== 'quick' && (instance.platform === 'ios' || instance.platform === 'both')) {
     const effectiveRootForSigning = instance.worktree ?? projectRoot;
     const iosDir = join(effectiveRootForSigning, 'ios');
     try {
@@ -372,7 +374,13 @@ export async function startInstanceServices(instance: InstanceState, profileData
     }
   }
 
-  // Trigger build
+  // Trigger build (skipped in quick mode — the existing installed binary
+  // on the device/sim connects to Metro directly).
+  if (instance.mode === 'quick') {
+    emit('ℹ Quick mode — skipping build; relying on the existing installed app.');
+    return;
+  }
+
   setTimeout(() => {
     const b = new Builder();
     instance.builder = b;
@@ -431,6 +439,13 @@ export async function startRealServices(targetProjectRoot: string) {
   const rnDevDir = path.join(targetProjectRoot, '.rn-dev');
   state.artifactStore = new ArtifactStore(path.join(rnDevDir, 'artifacts'));
   const profileStore = new ProfileStore(path.join(rnDevDir, 'profiles'));
+
+  // Phase 5c — stand up the module system in Electron mode so the
+  // Marketplace panel, Settings config form, and `modules:list-panels`
+  // have a live backend. Synchronous + idempotent; the pre-registered
+  // ipcMain handlers pick up deps via serviceBus on publish.
+  const worktreeKey = state.artifactStore.worktreeHash(null);
+  bootstrapElectronModuleSystem({ worktreeKey });
 
   // Load the default profile
   const branch = await getCurrentBranch(targetProjectRoot) ?? 'main';

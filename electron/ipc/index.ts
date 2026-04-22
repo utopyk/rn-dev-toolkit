@@ -47,9 +47,14 @@ export function setupIpcBridge(window: BrowserWindow, initialProjectRoot?: strin
   serviceBus.on('log', (text: string) => send('service:log', text));
 
   // Forward module-system events to the renderer so the sidebar rebuilds
-  // when a 3p module installs / crashes / toggles. Same payload the MCP
-  // server consumes via `modules/subscribe` — one subscription path.
-  serviceBus.on('moduleEvent', (event) => send('modules:event', event));
+  // when a 3p module installs / crashes / toggles + Settings + Marketplace
+  // panels live-update on `config-changed`. Simplicity #6 (Phase 5c) —
+  // we subscribe to the shared moduleEvents bus once it's published,
+  // rather than routing through a second serviceBus topic. Same payload
+  // the MCP server consumes via `modules/subscribe`.
+  serviceBus.on('moduleEventsBus', (bus: EventEmitter) => {
+    bus.on('modules-event', (event) => send('modules:event', event));
+  });
 
   registerInstanceHandlers();
   registerMetroHandlers();

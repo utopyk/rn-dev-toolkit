@@ -6,7 +6,7 @@ import { useTheme } from "../theme-provider.js";
 // Types
 // ---------------------------------------------------------------------------
 
-export type RunMode = "dirty" | "clean" | "ultra-clean";
+export type RunMode = "quick" | "dirty" | "clean" | "ultra-clean";
 
 export interface ModeStepProps {
   initialValue?: RunMode;
@@ -20,11 +20,15 @@ export interface ModeStepProps {
 
 const MODE_ITEMS: Array<{ label: string; value: RunMode }> = [
   {
-    label: "\ud83d\udfe2 Dirty \u2014 Start Metro immediately (fastest)",
+    label: "\u26a1 Quick \u2014 Metro only; skip build (app already installed)",
+    value: "quick",
+  },
+  {
+    label: "\ud83d\udfe2 Dirty \u2014 Skip clean; still builds",
     value: "dirty",
   },
   {
-    label: "\ud83d\udfe1 Clean \u2014 Reinstall modules + pods, then start",
+    label: "\ud83d\udfe1 Clean \u2014 Reinstall modules + pods, then build",
     value: "clean",
   },
   {

@@ -85,11 +85,11 @@ export function handleConfigGet(
   );
 }
 
-export function handleConfigSet(
+export async function handleConfigSet(
   deps: ModulesConfigIpcDeps,
   payload: ConfigSetPayload,
-): ConfigSetReply {
-  const result = daemonSetConfig(
+): Promise<ConfigSetReply> {
+  const result = await daemonSetConfig(
     {
       manager: deps.manager,
       registry: deps.registry,

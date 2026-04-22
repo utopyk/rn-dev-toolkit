@@ -1,0 +1,132 @@
+.marketplace-view {
+  flex: 1;
+  padding: 20px 24px;
+  overflow-y: auto;
+  -webkit-app-region: no-drag;
+  color: var(--fg);
+}
+
+.marketplace-title {
+  font-size: 18px;
+  color: var(--fg);
+  margin-bottom: 6px;
+}
+
+.marketplace-subtitle {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 16px;
+}
+
+.marketplace-error-card {
+  border: 1px solid var(--error);
+  border-radius: 8px;
+  padding: 12px 16px;
+  color: var(--error);
+}
+
+.marketplace-error-detail {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.marketplace-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.marketplace-table thead th {
+  text-align: left;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 11px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+
+.marketplace-row td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+.marketplace-row:hover td {
+  background: var(--panel-focus);
+}
+
+.marketplace-module-id {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.marketplace-version {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.marketplace-badge {
+  display: inline-block;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-focus);
+  color: var(--fg);
+  white-space: nowrap;
+}
+
+.marketplace-badge--kind-built-in-privileged {
+  background: var(--selection);
+  color: var(--highlight);
+  border-color: var(--highlight);
+}
+
+.marketplace-badge--kind-subprocess {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+.marketplace-badge--scope {
+  color: var(--muted);
+}
+
+.marketplace-badge--state-active {
+  color: var(--success);
+  border-color: var(--success);
+}
+
+.marketplace-badge--state-error {
+  color: var(--error);
+  border-color: var(--error);
+}
+
+.marketplace-badge--state-idle {
+  color: var(--muted);
+}
+
+.marketplace-badge--state-transient {
+  color: var(--warning);
+  border-color: var(--warning);
+}
+
+.marketplace-crash-reason {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--error);
+  font-family: 'SF Mono', 'Menlo', monospace;
+}
+
+.marketplace-empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 24px 12px;
+  font-style: italic;
+}

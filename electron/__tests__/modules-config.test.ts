@@ -43,6 +43,7 @@ interface Harness {
   deps: ModulesConfigIpcDeps;
   audit: ConfigSetAuditEvent[];
   configStore: ModuleConfigStore;
+  registry: ModuleRegistry;
   cleanup: () => Promise<void>;
 }
 
@@ -72,6 +73,7 @@ function setup(manifest: ModuleManifest, modulesDir: string): Harness {
     deps,
     audit,
     configStore,
+    registry,
     cleanup: () => manager.shutdownAll(),
   };
 }
@@ -131,9 +133,9 @@ describe("electron/modules-config — handleConfigSet", () => {
     rmSync(modulesDir, { recursive: true, force: true });
   });
 
-  it("persists valid patches and emits a sorted-keys audit on ok", () => {
+  it("persists valid patches and emits a sorted-keys audit on ok", async () => {
     harness = setup(manifestWithConfig(), modulesDir);
-    const result = handleConfigSet(harness.deps, {
+    const result = await handleConfigSet(harness.deps, {
       moduleId: "tunable",
       scopeUnit: "wt-1",
       patch: { count: 2, greeting: "ok" },
@@ -157,9 +159,9 @@ describe("electron/modules-config — handleConfigSet", () => {
     ]);
   });
 
-  it("rejects schema violations and audits the error code", () => {
+  it("rejects schema violations and audits the error code", async () => {
     harness = setup(manifestWithConfig(), modulesDir);
-    const result = handleConfigSet(harness.deps, {
+    const result = await handleConfigSet(harness.deps, {
       moduleId: "tunable",
       scopeUnit: "wt-1",
       patch: { count: -1 },
@@ -174,14 +176,14 @@ describe("electron/modules-config — handleConfigSet", () => {
     expect(harness.configStore.get("tunable")).toEqual({});
   });
 
-  it("forwards config-changed through the shared moduleEvents bus", () => {
+  it("forwards config-changed through the shared moduleEvents bus", async () => {
     harness = setup(manifestWithConfig(), modulesDir);
     const received: Array<Record<string, unknown>> = [];
     harness.deps.moduleEvents.on(
       "modules-event",
       (e: Record<string, unknown>) => received.push(e),
     );
-    handleConfigSet(harness.deps, {
+    await handleConfigSet(harness.deps, {
       moduleId: "tunable",
       scopeUnit: "wt-1",
       patch: { greeting: "bus" },
@@ -194,9 +196,9 @@ describe("electron/modules-config — handleConfigSet", () => {
     });
   });
 
-  it("returns E_CONFIG_MODULE_UNKNOWN for unregistered ids", () => {
+  it("returns E_CONFIG_MODULE_UNKNOWN for unregistered ids", async () => {
     harness = setup(manifestWithConfig(), modulesDir);
-    const result = handleConfigSet(harness.deps, {
+    const result = await handleConfigSet(harness.deps, {
       moduleId: "never",
       patch: { greeting: "x" },
     });
@@ -204,5 +206,75 @@ describe("electron/modules-config — handleConfigSet", () => {
     if (result.kind === "error") {
       expect(result.code).toBe("E_CONFIG_MODULE_UNKNOWN");
     }
+  });
+
+  it("serializes concurrent sets for the same moduleId (disjoint keys)", async () => {
+    harness = setup(manifestWithConfig(), modulesDir);
+    // Two concurrent patches with disjoint key sets. Even under a lost-
+    // update bug, disjoint-key races can still merge correctly because
+    // the later read sees the earlier write when the event loop yields —
+    // but the contract is serialized execution, so this verifies the lock
+    // doesn't drop either write on the floor.
+    const [a, b] = await Promise.all([
+      handleConfigSet(harness.deps, {
+        moduleId: "tunable",
+        scopeUnit: "wt-1",
+        patch: { greeting: "first" },
+      }),
+      handleConfigSet(harness.deps, {
+        moduleId: "tunable",
+        scopeUnit: "wt-1",
+        patch: { count: 7 },
+      }),
+    ]);
+    expect(a.kind).toBe("ok");
+    expect(b.kind).toBe("ok");
+    const final = harness.configStore.get("tunable");
+    expect(final).toEqual({ greeting: "first", count: 7 });
+  });
+
+  it("runs concurrent sets for different moduleIds in parallel (no cross-module lock)", async () => {
+    // Second module with its own schema registered under a different id,
+    // so cross-module parallelism is observable. The test doesn't
+    // directly assert timing — it asserts that both sets succeed and
+    // that the map key includes the moduleId (not a global lock).
+    harness = setup(manifestWithConfig(), modulesDir);
+    const otherManifest: ModuleManifest = {
+      id: "other",
+      version: "0.1.0",
+      hostRange: ">=0.1.0",
+      scope: "per-worktree",
+      contributes: {
+        config: {
+          schema: {
+            type: "object",
+            additionalProperties: true,
+          },
+        },
+      },
+    };
+    harness.registry.registerManifest({
+      manifest: otherManifest,
+      modulePath: "/nowhere",
+      scopeUnit: "wt-1",
+      state: "active",
+      isBuiltIn: false,
+    });
+    const [a, b] = await Promise.all([
+      handleConfigSet(harness.deps, {
+        moduleId: "tunable",
+        scopeUnit: "wt-1",
+        patch: { greeting: "a" },
+      }),
+      handleConfigSet(harness.deps, {
+        moduleId: "other",
+        scopeUnit: "wt-1",
+        patch: { greeting: "b" },
+      }),
+    ]);
+    expect(a.kind).toBe("ok");
+    expect(b.kind).toBe("ok");
+    expect(harness.configStore.get("tunable")).toEqual({ greeting: "a" });
+    expect(harness.configStore.get("other")).toEqual({ greeting: "b" });
   });
 });

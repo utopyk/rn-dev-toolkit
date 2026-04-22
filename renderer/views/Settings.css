@@ -23,6 +23,21 @@
   margin-bottom: 12px;
 }
 
+.settings-section-description {
+  font-size: 12px;
+  color: var(--muted);
+  margin: -4px 0 12px;
+  line-height: 1.5;
+}
+
+.settings-section-description code {
+  font-family: 'SF Mono', 'Menlo', monospace;
+  background: var(--panel-focus);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
 .theme-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));

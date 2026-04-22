@@ -49,7 +49,7 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       webviewTag: true,  // Enable <webview> for DevTools
-      preload: path.join(__dirname, '..', 'electron', 'preload.js'),
+      preload: path.join(__dirname, '..', 'electron', 'preload.cjs'),
     },
   });
 

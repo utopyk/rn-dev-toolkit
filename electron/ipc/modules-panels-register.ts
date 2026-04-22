@@ -17,6 +17,7 @@ import {
   type ModulesPanelsIpcHandle,
   type SetPanelBoundsPayload,
 } from "./modules-panels.js";
+import { listRows } from "../../src/app/modules-ipc.js";
 import type { PanelSenderRegistry } from "../panel-sender-registry.js";
 
 /**
@@ -41,6 +42,18 @@ export function registerModulesPanelsIpc(
     const deps = getDeps();
     if (!deps) return { modules: [] };
     return listPanels(deps.registry);
+  });
+
+  // Phase 5c — full module rows for the Marketplace renderer panel.
+  // Projects through the same `rowFor` as the daemon's `modules/list`
+  // MCP action so one RegisteredModule → one row shape regardless of
+  // transport (unix socket vs Electron IPC).
+  ipcMain.handle("modules:list", () => {
+    const deps = getDeps();
+    if (!deps) return { modules: [] };
+    return {
+      modules: listRows({ manager: deps.manager, registry: deps.registry }),
+    };
   });
 
   ipcMain.handle(
@@ -140,6 +153,7 @@ export function registerModulesPanelsIpc(
   return {
     dispose: () => {
       ipcMain.removeHandler("modules:list-panels");
+      ipcMain.removeHandler("modules:list");
       ipcMain.removeHandler("modules:activate-panel");
       ipcMain.removeHandler("modules:deactivate-panel");
       ipcMain.removeHandler("modules:set-panel-bounds");

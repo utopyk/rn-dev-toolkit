@@ -131,6 +131,14 @@ export interface RegisteredModuleRow {
   scopeUnit: string;
   state: ModuleInstanceState | "inert";
   isBuiltIn: boolean;
+  /**
+   * How the module's runtime is hosted. `"subprocess"` for 3p modules
+   * spawned via `ModuleHostManager`; `"built-in-privileged"` for in-
+   * process built-ins. Phase 5c — consumers (Marketplace panel, renderer
+   * sidebar) branch on this rather than parsing `modulePath` or inferring
+   * from `isBuiltIn`.
+   */
+  kind: "subprocess" | "built-in-privileged";
   /** Only populated after the module has ever spawned. */
   lastCrashReason: string | null;
   /** Only populated when the instance is live. */
@@ -385,10 +393,28 @@ export function getModuleConfig(
   };
 }
 
-export function setModuleConfig(
+/**
+ * Security F3 — per-module serialization lock. Two concurrent
+ * `modules/config/set` calls for the same moduleId used to race: both
+ * read the current config, both `{...current, ...patch}`, both write.
+ * The later write wins and the earlier caller's keys are silently lost.
+ *
+ * The lock is a `Map<moduleId+scopeUnit, Promise<void>>` — each set
+ * chains off the previous one so sets for the same module serialize.
+ * Sets for different modules run in parallel. The key includes scopeUnit
+ * because the same moduleId may legally be registered against multiple
+ * scopes (per-worktree 3p modules).
+ */
+const configSetLocks = new Map<string, Promise<unknown>>();
+
+function lockKey(moduleId: string, scopeUnit: string): string {
+  return `${moduleId}:${scopeUnit}`;
+}
+
+export async function setModuleConfig(
   opts: ModulesIpcOptions,
   payload: ModuleConfigSetRequest | null,
-): ModuleConfigSetResult {
+): Promise<ModuleConfigSetResult> {
   if (!payload || typeof payload.moduleId !== "string") {
     return {
       kind: "error",
@@ -430,9 +456,33 @@ export function setModuleConfig(
     };
   }
 
+  // Chain this set behind any in-flight set for the same (moduleId, scope).
+  const key = lockKey(reg.manifest.id, reg.scopeUnit);
+  const prior = configSetLocks.get(key) ?? Promise.resolve();
+  const next = prior.then(() =>
+    applyConfigSet(opts, reg, payload.patch),
+  );
+  // Swallow rejections on the chain promise so one failure doesn't poison
+  // the next waiter — each caller still awaits `next` and sees its own
+  // outcome. Clear the map entry once this chain tail completes so long-
+  // idle keys don't leak.
+  const cleanup = next.catch(() => undefined).finally(() => {
+    if (configSetLocks.get(key) === cleanup) {
+      configSetLocks.delete(key);
+    }
+  });
+  configSetLocks.set(key, cleanup);
+  return next;
+}
+
+function applyConfigSet(
+  opts: ModulesIpcOptions,
+  reg: RegisteredModule,
+  patch: Record<string, unknown>,
+): ModuleConfigSetResult {
   const store = resolveStore(opts);
   const current = store.get(reg.manifest.id);
-  const next = { ...current, ...payload.patch };
+  const next = { ...current, ...patch };
 
   const schema = extractConfigSchema(reg);
   const validation = store.validate(next, schema);
@@ -671,7 +721,13 @@ function handleSubscribe(
 // Internals
 // ---------------------------------------------------------------------------
 
-function listRows(opts: ModulesIpcOptions): RegisteredModuleRow[] {
+/**
+ * Exported so the Electron ipcMain layer can project module rows into
+ * its `modules:list` channel without re-implementing `rowFor`. Keeps
+ * `rowFor` as the single source of truth for how a RegisteredModule
+ * becomes an IPC row (arch #3).
+ */
+export function listRows(opts: ModulesIpcOptions): RegisteredModuleRow[] {
   return opts.registry.getAllManifests().map((reg) => rowFor(opts, reg));
 }
 
@@ -745,6 +801,26 @@ function rowFor(
   opts: ModulesIpcOptions,
   reg: RegisteredModule,
 ): RegisteredModuleRow {
+  const kind = reg.kind ?? "subprocess";
+  // Arch #4 — branch on kind rather than inferring from presence/absence
+  // of a live subprocess entry. Built-ins never spawn, so their state is
+  // the registry state (always "active" after registerBuiltIn stamps it),
+  // and pid/lastCrashReason stay null. Subprocess modules consult the
+  // manager as before.
+  if (kind === "built-in-privileged") {
+    return {
+      id: reg.manifest.id,
+      version: reg.manifest.version,
+      scope: reg.manifest.scope,
+      scopeUnit: reg.scopeUnit,
+      state: reg.state,
+      isBuiltIn: reg.isBuiltIn,
+      kind,
+      lastCrashReason: null,
+      pid: null,
+      tools: reg.manifest.contributes?.mcp?.tools ?? [],
+    };
+  }
   const live = opts.manager.inspect(reg.manifest.id, reg.scopeUnit);
   return {
     id: reg.manifest.id,
@@ -753,6 +829,7 @@ function rowFor(
     scopeUnit: reg.scopeUnit,
     state: live?.state ?? "inert",
     isBuiltIn: reg.isBuiltIn,
+    kind,
     lastCrashReason: live?.lastCrashReason ?? null,
     pid: live?.pid ?? null,
     tools: reg.manifest.contributes?.mcp?.tools ?? [],

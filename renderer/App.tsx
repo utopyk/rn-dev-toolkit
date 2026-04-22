@@ -55,12 +55,13 @@ export function App() {
   // 3p extensions appear in the sidebar without a reload. Reuses the
   // same subscribe stream MCP's `tools/listChanged` consumes.
   const fetchPanels = useCallback(() => {
-    invoke('modules:list-panels').then((resp: {
+    type PanelsReply = {
       modules: Array<{
         moduleId: string;
         panels: Array<{ id: string; title: string; icon?: string }>;
       }>;
-    } | null) => {
+    } | null;
+    invoke<PanelsReply>('modules:list-panels').then((resp) => {
       const next: ModulePanelListEntry[] = [];
       for (const m of resp?.modules ?? []) {
         for (const p of m.panels) {
@@ -86,13 +87,16 @@ export function App() {
 
   // On mount: fetch existing instances; if none exist and no profile, show wizard
   useEffect(() => {
-    invoke('instances:list').then((list: InstanceInfo[]) => {
+    invoke<InstanceInfo[]>('instances:list').then((list) => {
       if (list && list.length > 0) {
         setInstances(list);
         setActiveId(list[0].id);
         // Fetch logs for all instances
         for (const inst of list) {
-          invoke('instances:getLogs', inst.id).then((logs: { serviceLines: string[]; metroLines: string[] }) => {
+          invoke<{ serviceLines: string[]; metroLines: string[] }>(
+            'instances:getLogs',
+            inst.id,
+          ).then((logs) => {
             instanceLogsRef.current.set(inst.id, {
               serviceLines: logs?.serviceLines ?? [],
               metroLines: logs?.metroLines ?? [],
@@ -102,7 +106,7 @@ export function App() {
         }
       } else {
         // No instances yet — check if any profiles exist
-        invoke('profiles:list').then((profiles: any[]) => {
+        invoke<unknown[]>('profiles:list').then((profiles) => {
           if (!profiles || profiles.length === 0) {
             // No profiles at all — go straight to wizard
             setShowWizard(true);

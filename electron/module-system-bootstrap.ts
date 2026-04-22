@@ -1,25 +1,20 @@
 // Electron-mode module-system bootstrap.
 //
-// Phase 5c NEW work — before this existed, `modules:list-panels` returned
-// `{modules: []}` and `modules:config-*` returned `E_CONFIG_SERVICES_PENDING`
-// in Electron mode. `startRealServices` didn't initialize the module
-// system; the TUI path (`src/app/start-flow.ts`) did it for the daemon
-// but the Electron host had its own bootstrap that never got the equivalent.
+// Delegates capability/registry/built-in wiring to the shared
+// `createModuleSystem` factory (Phase 6 Arch P1-1). Keeps Electron-only
+// behavior here: the moduleEvents EventEmitter (daemon path gets its bus from
+// `registerModulesIpc`), the serviceBus publishes so pre-registered ipcMain
+// handlers can resolve their deps, and the idempotency guard so re-entry via
+// `app.activate` doesn't double-register.
 
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { CapabilityRegistry } from "../src/core/module-host/capabilities.js";
-import { ModuleHostManager } from "../src/core/module-host/manager.js";
-import { ModuleRegistry } from "../src/modules/registry.js";
-import {
-  devSpaceManifest,
-  metroLogsManifest,
-  lintTestManifest,
-  settingsManifest,
-} from "../src/modules/built-in/manifests.js";
-import { registerMarketplaceBuiltIn } from "../src/modules/built-in/marketplace.js";
+import type { CapabilityRegistry } from "../src/core/module-host/capabilities.js";
+import type { ModuleHostManager } from "../src/core/module-host/manager.js";
+import type { ModuleRegistry } from "../src/modules/registry.js";
+import { createModuleSystem, type LogCapability } from "../src/modules/create-module-system.js";
 import { serviceBus } from "../src/app/service-bus.js";
 
 export interface BootstrapResult {
@@ -27,14 +22,9 @@ export interface BootstrapResult {
   moduleHost: ModuleHostManager;
   moduleRegistry: ModuleRegistry;
   moduleEvents: EventEmitter;
+  hostVersion: string;
 }
 
-/**
- * Call once from `startRealServices` right after `state.artifactStore` +
- * `state.projectRoot` are populated. Idempotent by virtue of the
- * serviceBus publish — re-running would double-register capabilities so
- * we guard with a module-scoped flag.
- */
 let booted: BootstrapResult | null = null;
 
 export function bootstrapElectronModuleSystem(args: {
@@ -43,35 +33,11 @@ export function bootstrapElectronModuleSystem(args: {
   if (booted) return booted;
 
   const hostVersion = readHostVersion();
-  const capabilities = new CapabilityRegistry();
-  capabilities.register(
-    "appInfo",
-    {
-      hostVersion,
-      platform: process.platform,
-      worktreeKey: args.worktreeKey,
-    },
-    { allowReserved: true },
-  );
-  capabilities.register(
-    "log",
-    {
-      debug: (msg: string) => console.log(`[mod debug] ${msg}`),
-      info: (msg: string) => console.log(`[mod info] ${msg}`),
-      warn: (msg: string) => console.warn(`[mod warn] ${msg}`),
-      error: (msg: string) => console.error(`[mod error] ${msg}`),
-    },
-    { allowReserved: true },
-  );
-
-  const moduleHost = new ModuleHostManager({ hostVersion, capabilities });
-
-  const moduleRegistry = new ModuleRegistry();
-  moduleRegistry.registerBuiltIn(devSpaceManifest);
-  moduleRegistry.registerBuiltIn(metroLogsManifest);
-  moduleRegistry.registerBuiltIn(lintTestManifest);
-  moduleRegistry.registerBuiltIn(settingsManifest);
-  registerMarketplaceBuiltIn({ moduleRegistry, capabilities });
+  const { capabilities, moduleHost, moduleRegistry } = createModuleSystem({
+    hostVersion,
+    worktreeKey: args.worktreeKey,
+    logger: electronConsoleLogger(),
+  });
 
   // Load user-global 3p manifests — best-effort; a broken 3p module
   // shouldn't break the Electron boot. Rejections surface through the
@@ -94,12 +60,26 @@ export function bootstrapElectronModuleSystem(args: {
 
   const moduleEvents = new EventEmitter();
 
+  serviceBus.setHostVersion(hostVersion);
   serviceBus.setModuleHost(moduleHost);
   serviceBus.setModuleRegistry(moduleRegistry);
   serviceBus.setModuleEventsBus(moduleEvents);
 
-  booted = { capabilities, moduleHost, moduleRegistry, moduleEvents };
+  booted = { capabilities, moduleHost, moduleRegistry, moduleEvents, hostVersion };
   return booted;
+}
+
+function electronConsoleLogger(): LogCapability {
+  const format = (
+    msg: string,
+    data?: Record<string, unknown>,
+  ): string => (data ? `${msg} ${JSON.stringify(data)}` : msg);
+  return {
+    debug: (msg, data) => console.log(`[mod debug] ${format(msg, data)}`),
+    info: (msg, data) => console.log(`[mod info] ${format(msg, data)}`),
+    warn: (msg, data) => console.warn(`[mod warn] ${format(msg, data)}`),
+    error: (msg, data) => console.error(`[mod error] ${format(msg, data)}`),
+  };
 }
 
 // Resolve the host's package.json relative to this file, NOT process.cwd().

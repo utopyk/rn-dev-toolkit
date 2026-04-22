@@ -35,10 +35,11 @@ export function registerModulesConfigIpc(
         message: "modules-config: services not ready yet",
       };
     }
-    // Phase 5b hardening — panel senders may only address their own
-    // moduleId. Host UI (main BrowserWindow) can address any.
+    // Read path — host UI can read any moduleId (Marketplace panel
+    // enumerates all states; Settings reads its own + potentially peers).
+    // Panel senders are still constrained to their own moduleId.
     const senderReg = getSenderRegistry?.();
-    if (senderReg && !senderReg.canAddress(event.sender, payload.moduleId)) {
+    if (senderReg && !senderReg.canRead(event.sender, payload.moduleId)) {
       return {
         kind: "error" as const,
         code: "E_CONFIG_SENDER_MISMATCH" as const,
@@ -58,13 +59,17 @@ export function registerModulesConfigIpc(
         message: "modules-config: services not ready yet",
       };
     }
+    // Write path — Phase 6 Security P1-1. Host UI can only write to
+    // moduleIds in its allowlist (see allowHostWrite). A renderer XSS
+    // on the host UI is capped at those modules instead of every
+    // installed 3p module's config.
     const senderReg = getSenderRegistry?.();
-    if (senderReg && !senderReg.canAddress(event.sender, payload.moduleId)) {
+    if (senderReg && !senderReg.canWrite(event.sender, payload.moduleId)) {
       return {
         kind: "error" as const,
         code: "E_CONFIG_SENDER_MISMATCH" as const,
         message:
-          "modules:config-set rejected: sender is not bound to the requested module",
+          "modules:config-set rejected: sender is not permitted to write the requested module",
       };
     }
     return handleConfigSet(deps, payload);

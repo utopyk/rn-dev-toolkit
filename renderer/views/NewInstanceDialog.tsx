@@ -24,7 +24,7 @@ export function NewInstanceDialog({ onSelectProfile, onCreateNew, onCancel }: Ne
 
   useEffect(() => {
     setLoading(true);
-    invoke('profiles:list').then((data: ProfileSummary[]) => {
+    invoke<ProfileSummary[]>('profiles:list').then((data) => {
       setProfiles(data ?? []);
       setLoading(false);
     });

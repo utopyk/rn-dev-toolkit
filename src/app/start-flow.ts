@@ -12,7 +12,7 @@ import { DevToolsManager } from "../core/devtools.js";
 import { CleanManager } from "../core/clean.js";
 import { FileWatcher } from "../core/watcher.js";
 import { IpcServer } from "../core/ipc.js";
-import { ModuleHostManager } from "../core/module-host/manager.js";
+import type { ModuleHostManager } from "../core/module-host/manager.js";
 import { CapabilityRegistry } from "../core/module-host/capabilities.js";
 import { registerModulesIpc } from "./modules-ipc.js";
 import { loadTheme, getThemeEffects } from "../ui/theme-provider.js";
@@ -20,16 +20,15 @@ import { registerDevtoolsIpc } from "./devtools-ipc.js";
 import {
   ModuleRegistry,
   devSpaceModule,
-  devSpaceManifest,
   settingsModule,
-  settingsManifest,
   lintTestModule,
-  lintTestManifest,
   metroLogsModule,
-  metroLogsManifest,
   devtoolsNetworkModule,
-  registerMarketplaceBuiltIn,
 } from "../modules/index.js";
+import {
+  createModuleSystem,
+  type LogCapability,
+} from "../modules/create-module-system.js";
 import { firstRunSetup } from "./first-run.js";
 import { App } from "./App.js";
 import { serviceBus } from "./service-bus.js";
@@ -77,21 +76,16 @@ export async function startFlow(options: StartOptions): Promise<void> {
   const theme = loadTheme(themeName);
   const effects = getThemeEffects(themeName);
 
-  // 5. Register modules — single instance, shared by the TUI surface and the
-  //    daemon's manifest surface. Legacy Ink-style entries go through
-  //    `register()`; Phase 5b manifest-shape built-ins go through
-  //    `registerBuiltIn()`. `Marketplace` + user-global 3p manifests are
-  //    added later by `startServicesAsync` once the capability registry exists.
+  // 5. Register legacy Ink-style modules onto a registry the TUI renders from.
+  //    Manifest-shape built-ins + Marketplace + user-global 3p modules are
+  //    layered on later inside `startServicesAsync` via `createModuleSystem`,
+  //    once the capability registry + host version are resolved.
   const registry = new ModuleRegistry();
   registry.register(devSpaceModule);
   registry.register(lintTestModule);
   registry.register(metroLogsModule);
   registry.register(devtoolsNetworkModule);
   registry.register(settingsModule);
-  registry.registerBuiltIn(devSpaceManifest);
-  registry.registerBuiltIn(metroLogsManifest);
-  registry.registerBuiltIn(lintTestManifest);
-  registry.registerBuiltIn(settingsManifest);
 
   // 6. Determine if we need the wizard
   let profile: Profile | undefined;
@@ -532,47 +526,32 @@ async function startServicesAsync(
   const builder = new Builder();
   serviceBus.setBuilder(builder);
 
-  // 12. Module host — Phase 2 + Phase 3a.
+  // 12. Module host — Phase 2 + Phase 3a, refactored via `createModuleSystem`
+  // (Phase 6 Arch P1-1).
   //
-  // Owns subprocess lifecycle for 3p modules. Registers built-in capabilities
-  // that modules can resolve via host.capability<T>(id). Phase 3a also loads
-  // user-global module manifests + wires the `modules/*` IPC dispatcher so
-  // MCP clients can query lifecycle state.
-  //
-  // Actual module-contributed tools/call proxying is Phase 3b.
-  const capabilities = new CapabilityRegistry();
+  // The factory stamps `appInfo` / `log` on the capability registry, registers
+  // every built-in manifest, and wires the Marketplace built-in's capability.
+  // `metro` / `artifacts` are TUI-path specific — they register before the
+  // factory so modules activated during built-in manifest registration can
+  // resolve them.
   const hostVersion = readHostVersion();
-  capabilities.register<AppInfoCapability>(
-    "appInfo",
-    {
-      hostVersion,
-      platform: process.platform,
-      worktreeKey,
-    },
-    { allowReserved: true },
-  );
-  capabilities.register<LogCapability>(
-    "log",
-    createScopedLogger(emit),
-    { allowReserved: true },
-  );
+  const capabilities = new CapabilityRegistry();
   capabilities.register("metro", metro, {
     requiredPermission: "exec:react-native",
   });
   capabilities.register("artifacts", artifactStore, {
     requiredPermission: "fs:artifacts",
   });
-  const moduleHost = new ModuleHostManager({ hostVersion, capabilities });
+  const { moduleHost } = createModuleSystem({
+    hostVersion,
+    worktreeKey,
+    capabilities,
+    moduleRegistry,
+    logger: createScopedLogger(emit),
+  });
+  serviceBus.setHostVersion(hostVersion);
   serviceBus.setModuleHost(moduleHost);
-
-  // Phase 5c — single ModuleRegistry. The TUI surface registered legacy
-  // Ink-style modules + the four built-in manifests up in `startFlow` before
-  // services started; the Marketplace built-in is registered here because it
-  // needs the capability registry (created above) to publish the `modules`
-  // host capability. `loadUserGlobalModules` then appends 3p manifests.
   serviceBus.setModuleRegistry(moduleRegistry);
-
-  registerMarketplaceBuiltIn({ moduleRegistry, capabilities });
 
   const loadResult = moduleRegistry.loadUserGlobalModules({
     hostVersion,
@@ -617,19 +596,6 @@ async function startServicesAsync(
 // ---------------------------------------------------------------------------
 // Module-host capability helpers (Phase 2 daemon wiring)
 // ---------------------------------------------------------------------------
-
-interface AppInfoCapability {
-  hostVersion: string;
-  platform: NodeJS.Platform;
-  worktreeKey: string | null;
-}
-
-interface LogCapability {
-  debug: (msg: string, data?: Record<string, unknown>) => void;
-  info: (msg: string, data?: Record<string, unknown>) => void;
-  warn: (msg: string, data?: Record<string, unknown>) => void;
-  error: (msg: string, data?: Record<string, unknown>) => void;
-}
 
 function readHostVersion(): string {
   // Single source of truth: root package.json. Phase 2 handoff flags this

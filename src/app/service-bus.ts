@@ -55,6 +55,12 @@ export interface ServiceBusEvents {
    * one emitter means one fan-out point.
    */
   moduleEventsBus: (emitter: EventEmitter) => void;
+  /**
+   * Host version string published alongside `moduleHost` so IPC registrars
+   * (install flow, capability lookups) can thread it through without a
+   * second read of `package.json`. Phase 6.
+   */
+  hostVersion: (version: string) => void;
 }
 
 class ServiceBus extends EventEmitter {
@@ -92,6 +98,10 @@ class ServiceBus extends EventEmitter {
 
   setModuleEventsBus(emitter: EventEmitter) {
     this.emit("moduleEventsBus", emitter);
+  }
+
+  setHostVersion(version: string) {
+    this.emit("hostVersion", version);
   }
 }
 

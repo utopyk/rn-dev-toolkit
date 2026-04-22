@@ -216,8 +216,8 @@ export function DevToolsView({ metroPort }: DevToolsViewProps) {
     (payload: { port: number; kind: 'status' | 'delta' }) => {
       if (payload?.port !== metroPort) return;
       if (payload.kind !== 'status') return;
-      invoke('devtools-network:status', metroPort)
-        .then((s: StatusPayload | null) => {
+      invoke<StatusPayload | null>('devtools-network:status', metroPort)
+        .then((s) => {
           if (cancelledRef.current || !s) return;
           setTargets(s.targets);
         })

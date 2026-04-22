@@ -44,6 +44,14 @@ const INVOKE_EXACT = Object.freeze([
   'modules:config-get',
   'modules:config-set',
 
+  // Module-system install flow (Phase 6)
+  'modules:install',
+  'modules:uninstall',
+  'modules:acknowledge-third-party',
+  'modules:has-third-party-ack',
+  'marketplace:list',
+  'marketplace:info',
+
   // Open external (safe; opens editor via OS)
   'open:editor',
 

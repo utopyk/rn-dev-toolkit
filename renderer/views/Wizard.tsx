@@ -76,7 +76,10 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
     setLoadingKey('create-worktree');
     setCreatingWorktreeError('');
     try {
-      const result = await invoke('wizard:createWorktree', newWorktreeBranch.trim());
+      const result = await invoke<{ ok?: boolean; worktree?: WorktreeOption; error?: string }>(
+        'wizard:createWorktree',
+        newWorktreeBranch.trim(),
+      );
       if (result?.ok && result.worktree) {
         // Add the new worktree to the list and select it
         const newWt: WorktreeOption = result.worktree;
@@ -120,7 +123,7 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
   useEffect(() => {
     if (step === 1 && worktrees.length === 0) {
       setLoadingKey('worktrees');
-      invoke('wizard:getWorktrees').then((data: WorktreeOption[]) => {
+      invoke<WorktreeOption[]>('wizard:getWorktrees').then((data) => {
         setWorktrees(data ?? []);
         setLoadingKey(null);
       });
@@ -130,7 +133,7 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
   useEffect(() => {
     if (step === 2 && branches.length === 0) {
       setLoadingKey('branches');
-      invoke('wizard:getBranches').then((data: string[]) => {
+      invoke<string[]>('wizard:getBranches').then((data) => {
         setBranches(data ?? []);
         setLoadingKey(null);
       });
@@ -140,7 +143,7 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
   useEffect(() => {
     if (step === 5) {
       setLoadingKey('devices');
-      invoke('wizard:getDevices', state.platform).then((data: DeviceOption[]) => {
+      invoke<DeviceOption[]>('wizard:getDevices', state.platform).then((data) => {
         setDevices(data ?? []);
         setLoadingKey(null);
       });
@@ -149,7 +152,7 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
 
   useEffect(() => {
     if (step === 6 && preflightChecks.length === 0) {
-      invoke('wizard:getPreflightChecks').then((data: PreflightCheck[]) => {
+      invoke<PreflightCheck[]>('wizard:getPreflightChecks').then((data) => {
         const checks = data ?? [];
         setPreflightChecks(checks);
         // Pre-select all relevant checks
@@ -164,7 +167,7 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
   useEffect(() => {
     if (step === 7 && tooling.length === 0) {
       setLoadingKey('tooling');
-      invoke('wizard:getTooling').then((data: ToolingOption[]) => {
+      invoke<ToolingOption[]>('wizard:getTooling').then((data) => {
         setTooling(data ?? []);
         setLoadingKey(null);
       });
@@ -201,8 +204,8 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
     setSaving(true);
     const profileName = `profile-${Date.now()}`;
     // Check if any profiles exist — only set default if this is the first one
-    let existingProfiles: any[] = [];
-    try { existingProfiles = await invoke('profiles:list'); } catch {}
+    let existingProfiles: unknown[] = [];
+    try { existingProfiles = await invoke<unknown[]>('profiles:list'); } catch {}
     const isFirstProfile = !existingProfiles || existingProfiles.length === 0;
 
     const profileData = {

@@ -126,7 +126,11 @@ export function registerModulesPanelsIpc(
     // different moduleId gets the same `MODULE_UNAVAILABLE` that an
     // unknown moduleId would return (no "can't probe" signal).
     const senderReg = getSenderRegistry?.();
-    if (senderReg && !senderReg.canAddress(event.sender, payload.moduleId)) {
+    // host-call is panel-driven (3p panels resolving host capabilities); the
+    // host-UI branch is semantically "unused". Keeping `canRead` here matches
+    // the existing contract — Phase 6 `canWrite` doesn't apply since the
+    // call may be either read-like or write-like depending on capability.
+    if (senderReg && !senderReg.canRead(event.sender, payload.moduleId)) {
       if (deps.auditHostCall) {
         deps.auditHostCall({
           moduleId: payload.moduleId,

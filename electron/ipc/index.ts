@@ -17,6 +17,10 @@ import { createBoundsCache, type ModulesPanelsIpcDeps } from './modules-panels.j
 import { registerModulesPanelsIpc } from './modules-panels-register.js';
 import type { ModulesConfigIpcDeps } from './modules-config.js';
 import { registerModulesConfigIpc } from './modules-config-register.js';
+import {
+  registerModulesInstallIpc,
+  type ModulesInstallIpcDeps,
+} from './modules-install-register.js';
 
 // Phase 5b hardening — one PanelSenderRegistry per Electron process.
 // The main BrowserWindow's webContents is trusted as "host"; panel
@@ -38,10 +42,15 @@ export function setupIpcBridge(window: BrowserWindow, initialProjectRoot?: strin
     state.projectRoot = initialProjectRoot;
   }
 
-  // Trust the main BrowserWindow's webContents — it's the host UI and
-  // may address any moduleId via modules:config-* (e.g. Settings panel
-  // editing another module's config).
+  // Trust the main BrowserWindow's webContents as the host UI. READ
+  // access is wildcard (Marketplace panel enumerates every module; the
+  // modules:list surface needs cross-module reads). WRITE access is an
+  // explicit allowlist — Phase 6 Security P1-1 caps renderer-XSS blast
+  // radius. `settings` is the only host-writable module today; add more
+  // here when a new host-native panel legitimately edits another
+  // module's config.
   senderRegistry.trustHostSender(window.webContents);
+  senderRegistry.allowHostWrite('settings');
 
   // Forward service bus events to renderer (legacy, for global logs)
   serviceBus.on('log', (text: string) => send('service:log', text));
@@ -64,6 +73,7 @@ export function setupIpcBridge(window: BrowserWindow, initialProjectRoot?: strin
   registerDevtoolsHandlers();
   registerModulePanelsHandlers(window);
   registerModulesConfigHandlers();
+  registerModulesInstallHandlers();
 }
 
 /**
@@ -184,6 +194,67 @@ function registerModulesConfigHandlers(): void {
   });
   serviceBus.on('moduleEventsBus', (bus) => {
     latestEvents = bus;
+    tryInstall();
+  });
+}
+
+/**
+ * Phase 6 — install/uninstall/marketplace ipcMain handlers. Same eager
+ * register / getDeps lazy-fill pattern as modules-config so the renderer
+ * can safely invoke `marketplace:list` before services finish booting.
+ *
+ * Kieran + Security P1 (Phase 6 review): install/uninstall MUST gate
+ * through `PanelSenderRegistry.canWrite(MARKETPLACE_WRITE_PRINCIPAL)` so
+ * a sandboxed panel can't trigger pacote-backed installs on the user's
+ * behalf. We register the "marketplace" principal here so the host UI's
+ * webContents is the only sender the registrar accepts.
+ */
+function registerModulesInstallHandlers(): void {
+  let deps: ModulesInstallIpcDeps | null = null;
+
+  senderRegistry.allowHostWrite('marketplace');
+  registerModulesInstallIpc(
+    () => deps,
+    () => senderRegistry,
+  );
+
+  let latestManager: ModuleHostManager | null = null;
+  let latestRegistry: ModuleRegistry | null = null;
+  let latestEvents: EventEmitter | null = null;
+  let latestHostVersion: string | null = null;
+
+  const tryInstall = (): void => {
+    if (!latestManager || !latestRegistry || !latestEvents || !latestHostVersion || deps) {
+      return;
+    }
+    deps = {
+      manager: latestManager,
+      registry: latestRegistry,
+      moduleEvents: latestEvents,
+      hostVersion: latestHostVersion,
+      auditInstall: (event) => {
+        send(
+          'service:log',
+          `[modules-${event.kind}] ${event.moduleId}${event.version ? ` v${event.version}` : ''} ${event.outcome}${event.code ? ` (${event.code})` : ''}`,
+        );
+      },
+    };
+  };
+
+  serviceBus.on('moduleHost', (m) => {
+    latestManager = m;
+    tryInstall();
+  });
+  serviceBus.on('moduleRegistry', (r) => {
+    latestRegistry = r;
+    tryInstall();
+  });
+  serviceBus.on('moduleEventsBus', (bus) => {
+    latestEvents = bus;
+    tryInstall();
+  });
+  serviceBus.on('hostVersion', (v) => {
+    latestHostVersion = v;
     tryInstall();
   });
 }

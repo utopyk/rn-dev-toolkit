@@ -72,8 +72,8 @@ export function ModuleConfigForm({
   useEffect(() => {
     let active = true;
     setStatus({ kind: 'idle' });
-    invoke('modules:config-get', { moduleId, scopeUnit }).then(
-      (reply: ConfigGetReply | null) => {
+    invoke<ConfigGetReply | null>('modules:config-get', { moduleId, scopeUnit }).then(
+      (reply) => {
         if (!active) return;
         if (!reply) {
           setLoadError('IPC returned no response');
@@ -122,11 +122,11 @@ export function ModuleConfigForm({
   const commit = useCallback(async () => {
     setStatus({ kind: 'saving' });
     setJustSaved(false);
-    const reply = (await invoke('modules:config-set', {
+    const reply = await invoke<ConfigSetReply>('modules:config-set', {
       moduleId,
       scopeUnit,
       patch: draft,
-    })) as ConfigSetReply;
+    });
     if (reply.kind === 'ok') {
       setConfig(reply.config);
       setStatus({ kind: 'idle' });

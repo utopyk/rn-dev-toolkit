@@ -42,6 +42,19 @@ import {
   isDisabled,
   setDisabled,
 } from "../modules/disabled-flag.js";
+import {
+  RegistryFetcher,
+  resolveRegistryUrl,
+  type ModulesRegistry,
+  type RegistryEntry,
+} from "../modules/marketplace/registry.js";
+import {
+  installModule,
+  uninstallModule,
+  type InstallResult,
+  type PacoteLike,
+  type ArboristFactory,
+} from "../modules/marketplace/installer.js";
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -73,6 +86,21 @@ export interface ModulesIpcOptions {
    * to isolate filesystem side effects.
    */
   configStore?: ModuleConfigStore;
+  /**
+   * Marketplace registry fetcher. Defaults to a fresh RegistryFetcher() per
+   * dispatch — tests that want to stub the HTTP fetch inject one with a
+   * pre-loaded cache.
+   */
+  registryFetcher?: RegistryFetcher;
+  /**
+   * pacote override used by the Marketplace installer. Defaults to the
+   * real `pacote` package; tests inject a tarball stub.
+   */
+  pacote?: PacoteLike;
+  /**
+   * Arborist factory override used by the installer.
+   */
+  arboristFactory?: ArboristFactory;
 }
 
 /**
@@ -110,7 +138,11 @@ export type ModulesIpcAction =
   | "modules/disable"
   | "modules/subscribe"
   | "modules/config/get"
-  | "modules/config/set";
+  | "modules/config/set"
+  | "modules/install"
+  | "modules/uninstall"
+  | "marketplace/list"
+  | "marketplace/info";
 
 const MODULES_ACTIONS: ReadonlySet<string> = new Set<ModulesIpcAction>([
   "modules/list",
@@ -122,6 +154,10 @@ const MODULES_ACTIONS: ReadonlySet<string> = new Set<ModulesIpcAction>([
   "modules/subscribe",
   "modules/config/get",
   "modules/config/set",
+  "modules/install",
+  "modules/uninstall",
+  "marketplace/list",
+  "marketplace/info",
 ]);
 
 export interface RegisteredModuleRow {
@@ -198,6 +234,17 @@ export async function dispatchModulesAction(
         opts,
         msg.payload as ModuleConfigSetRequest,
       );
+    case "modules/install":
+      return installAction(opts, msg.payload as ModuleInstallRequest);
+    case "modules/uninstall":
+      return uninstallAction(
+        opts,
+        msg.payload as { moduleId: string; scopeUnit?: string; keepData?: boolean },
+      );
+    case "marketplace/list":
+      return marketplaceList(opts);
+    case "marketplace/info":
+      return marketplaceInfo(opts, msg.payload as { moduleId: string });
     case "modules/subscribe":
       // Subscribe is stream-shaped — not routed through the request/response
       // dispatcher. `registerModulesIpc` handles it directly.
@@ -715,6 +762,246 @@ function handleSubscribe(
   event.onClose(() => {
     moduleEvents.off("modules-event", pushEvent);
   });
+}
+
+// ---------------------------------------------------------------------------
+// Marketplace install / uninstall / list / info
+// ---------------------------------------------------------------------------
+
+export interface ModuleInstallRequest {
+  moduleId: string;
+  /**
+   * Every declared permission from the registry entry must appear here
+   * verbatim. Headless MCP callers populate this from the entry they got
+   * back from `marketplace/info`; GUI callers fill it from the consent
+   * dialog's checked state.
+   */
+  permissionsAccepted: string[];
+  /**
+   * Pass `true` after the one-time "third-party modules run as me" ack —
+   * GUI walks this, MCP callers can pass an out-of-band pre-recorded ack.
+   */
+  thirdPartyAcknowledged?: boolean;
+}
+
+export type ModuleInstallReply =
+  | {
+      kind: "ok";
+      moduleId: string;
+      version: string;
+      installPath: string;
+      tarballSha256: string;
+    }
+  | {
+      kind: "error";
+      code: string;
+      message: string;
+    };
+
+export type ModuleUninstallReply =
+  | { kind: "ok"; moduleId: string; removed: string; keptData: boolean }
+  | { kind: "error"; code: string; message: string };
+
+export interface MarketplaceEntryRow extends RegistryEntry {
+  installed: boolean;
+  installedVersion?: string;
+  installedState?: string;
+}
+
+export interface MarketplaceListReply {
+  kind: "ok";
+  registrySha256: string;
+  /** Resolved URL the fetcher pulled from — shown in the consent dialog. */
+  registryUrl: string;
+  entries: MarketplaceEntryRow[];
+}
+
+export type MarketplaceInfoReply =
+  | {
+      kind: "ok";
+      entry: RegistryEntry;
+      installed: boolean;
+      installedVersion?: string;
+      registrySha256: string;
+    }
+  | { kind: "error"; code: "E_UNKNOWN_MODULE" | "E_REGISTRY_UNAVAILABLE"; message: string };
+
+async function fetchRegistry(
+  opts: ModulesIpcOptions,
+): Promise<
+  | { kind: "ok"; registry: ModulesRegistry; sha256: string }
+  | { kind: "error"; code: string; message: string }
+> {
+  const fetcher = opts.registryFetcher ?? new RegistryFetcher();
+  const result = await fetcher.fetch({});
+  if (result.kind === "error") {
+    return { kind: "error", code: result.code, message: result.message };
+  }
+  return { kind: "ok", registry: result.registry, sha256: result.sha256 };
+}
+
+export async function marketplaceList(opts: ModulesIpcOptions): Promise<MarketplaceListReply | {
+  kind: "error";
+  code: string;
+  message: string;
+}> {
+  const reg = await fetchRegistry(opts);
+  if (reg.kind === "error") return reg;
+
+  const installed = new Map<string, RegisteredModule>();
+  for (const m of opts.registry.getAllManifests()) {
+    if (!m.isBuiltIn) installed.set(m.manifest.id, m);
+  }
+
+  return {
+    kind: "ok",
+    registrySha256: reg.sha256,
+    registryUrl: resolveRegistryUrl(),
+    entries: reg.registry.modules.map((e) => {
+      const existing = installed.get(e.id);
+      return {
+        ...e,
+        installed: existing !== undefined,
+        installedVersion: existing?.manifest.version,
+        installedState: existing?.state,
+      };
+    }),
+  };
+}
+
+export async function marketplaceInfo(
+  opts: ModulesIpcOptions,
+  payload: { moduleId: string } | null,
+): Promise<MarketplaceInfoReply> {
+  if (!payload || typeof payload.moduleId !== "string") {
+    return {
+      kind: "error",
+      code: "E_UNKNOWN_MODULE",
+      message: "marketplace/info requires { moduleId: string }",
+    };
+  }
+  const reg = await fetchRegistry(opts);
+  if (reg.kind === "error") {
+    return { kind: "error", code: "E_REGISTRY_UNAVAILABLE", message: reg.message };
+  }
+  const entry = reg.registry.modules.find((m) => m.id === payload.moduleId);
+  if (!entry) {
+    return {
+      kind: "error",
+      code: "E_UNKNOWN_MODULE",
+      message: `module "${payload.moduleId}" is not listed in the curated registry`,
+    };
+  }
+  const existing = opts.registry
+    .getAllManifests()
+    .find((m) => !m.isBuiltIn && m.manifest.id === payload.moduleId);
+  return {
+    kind: "ok",
+    entry,
+    installed: existing !== undefined,
+    installedVersion: existing?.manifest.version,
+    registrySha256: reg.sha256,
+  };
+}
+
+export async function installAction(
+  opts: ModulesIpcOptions,
+  payload: ModuleInstallRequest | null,
+): Promise<ModuleInstallReply> {
+  if (
+    !payload ||
+    typeof payload.moduleId !== "string" ||
+    !Array.isArray(payload.permissionsAccepted)
+  ) {
+    return {
+      kind: "error",
+      code: "E_BAD_REQUEST",
+      message:
+        "modules/install requires { moduleId: string, permissionsAccepted: string[] }",
+    };
+  }
+
+  const reg = await fetchRegistry(opts);
+  if (reg.kind === "error") {
+    return { kind: "error", code: reg.code, message: reg.message };
+  }
+  const entry = reg.registry.modules.find((m) => m.id === payload.moduleId);
+  if (!entry) {
+    return {
+      kind: "error",
+      code: "E_UNKNOWN_MODULE",
+      message: `module "${payload.moduleId}" is not listed in the curated registry`,
+    };
+  }
+
+  const result: InstallResult = await installModule({
+    entry,
+    permissionsAccepted: payload.permissionsAccepted,
+    registry: opts.registry,
+    hostVersion: opts.hostVersion ?? "0.0.0",
+    scopeUnit: opts.scopeUnit ?? "global",
+    modulesDir: opts.modulesDir,
+    thirdPartyAcknowledged: !!payload.thirdPartyAcknowledged,
+    pacote: opts.pacote,
+    arboristFactory: opts.arboristFactory,
+  });
+
+  if (result.kind === "error") {
+    return { kind: "error", code: result.code, message: result.message };
+  }
+
+  emitModuleEvent(opts, {
+    kind: "enabled",
+    moduleId: result.module.manifest.id,
+    scopeUnit: result.module.scopeUnit,
+  });
+
+  return {
+    kind: "ok",
+    moduleId: result.module.manifest.id,
+    version: result.module.manifest.version,
+    installPath: result.installPath,
+    tarballSha256: result.tarballSha256,
+  };
+}
+
+export async function uninstallAction(
+  opts: ModulesIpcOptions,
+  payload: { moduleId: string; scopeUnit?: string; keepData?: boolean } | null,
+): Promise<ModuleUninstallReply> {
+  if (!payload || typeof payload.moduleId !== "string") {
+    return {
+      kind: "error",
+      code: "E_BAD_REQUEST",
+      message: "modules/uninstall requires { moduleId: string, keepData?: boolean }",
+    };
+  }
+
+  const result = await uninstallModule({
+    moduleId: payload.moduleId,
+    registry: opts.registry,
+    manager: opts.manager,
+    scopeUnit: payload.scopeUnit ?? opts.scopeUnit ?? "global",
+    keepData: payload.keepData,
+    modulesDir: opts.modulesDir,
+  });
+
+  if (result.kind === "error") {
+    return { kind: "error", code: result.code, message: result.message };
+  }
+
+  emitModuleEvent(opts, {
+    kind: "disabled",
+    moduleId: payload.moduleId,
+    scopeUnit: payload.scopeUnit ?? opts.scopeUnit ?? "global",
+  });
+
+  return {
+    kind: "ok",
+    moduleId: payload.moduleId,
+    removed: result.removed,
+    keptData: result.keptData,
+  };
 }
 
 // ---------------------------------------------------------------------------

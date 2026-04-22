@@ -19,6 +19,18 @@ export interface IpcMessage {
 export interface IpcMessageEvent {
   message: IpcMessage;
   reply: (response: IpcMessage) => void;
+  /**
+   * Register a callback invoked when the underlying socket closes.
+   *
+   * Request/response handlers generally ignore this — the socket is closed
+   * by the client after it receives its reply. Subscription-style handlers
+   * (e.g. `modules/subscribe`) use it to detach listeners so the daemon
+   * doesn't leak subscribers once the MCP server disconnects.
+   *
+   * Listeners fire exactly once per socket close; throwing inside one does
+   * NOT prevent the remaining listeners from running.
+   */
+  onClose: (listener: () => void) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -49,6 +61,7 @@ export class IpcServer extends EventEmitter {
 
       const srv = net.createServer((socket) => {
         let buffer = "";
+        const closeListeners: Array<() => void> = [];
 
         socket.setEncoding("utf8");
 
@@ -76,12 +89,30 @@ export class IpcServer extends EventEmitter {
               }
             };
 
-            this.emit("message", { message, reply } satisfies IpcMessageEvent);
+            const onClose = (listener: () => void): void => {
+              closeListeners.push(listener);
+            };
+
+            this.emit("message", {
+              message,
+              reply,
+              onClose,
+            } satisfies IpcMessageEvent);
           }
         });
 
         socket.on("error", () => {
           // Individual connection errors are non-fatal for the server
+        });
+
+        socket.on("close", () => {
+          for (const listener of closeListeners) {
+            try {
+              listener();
+            } catch {
+              // Subscribers' cleanup shouldn't crash the server.
+            }
+          }
         });
       });
 
@@ -204,6 +235,96 @@ export class IpcClient {
         settled = true;
         clearTimeout(timer);
         reject(new Error("IPC connection closed before response was received"));
+      });
+    });
+  }
+
+  /**
+   * Open a long-lived subscription on the IPC socket.
+   *
+   * The flow: write `message` once, then parse every line that comes back.
+   * The first line whose `id` matches is the subscription confirmation and
+   * resolves the promise. Every subsequent line is passed to `onEvent`.
+   *
+   * Unlike `send`, the returned socket stays open until the caller invokes
+   * `handle.close()` (or the server disconnects). Use for event streams
+   * like `modules/subscribe`; use `send()` for request/response calls.
+   */
+  subscribe(
+    message: IpcMessage,
+    options: {
+      onEvent: (event: IpcMessage) => void;
+      onError?: (err: Error) => void;
+      onClose?: () => void;
+    },
+  ): Promise<{ initial: IpcMessage; close: () => void }> {
+    return new Promise((resolve, reject) => {
+      const socket = net.createConnection(this.socketPath);
+      let buffer = "";
+      let confirmed = false;
+      let closed = false;
+
+      const close = (): void => {
+        if (closed) return;
+        closed = true;
+        socket.destroy();
+      };
+
+      socket.setEncoding("utf8");
+
+      socket.on("connect", () => {
+        socket.write(JSON.stringify(message) + "\n");
+      });
+
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+
+          let parsed: IpcMessage;
+          try {
+            parsed = JSON.parse(trimmed) as IpcMessage;
+          } catch {
+            continue;
+          }
+
+          if (!confirmed && parsed.id === message.id) {
+            confirmed = true;
+            resolve({ initial: parsed, close });
+            continue;
+          }
+
+          try {
+            options.onEvent(parsed);
+          } catch (err) {
+            options.onError?.(
+              err instanceof Error ? err : new Error(String(err)),
+            );
+          }
+        }
+      });
+
+      socket.on("error", (err) => {
+        if (!confirmed) {
+          reject(err);
+          return;
+        }
+        options.onError?.(err);
+      });
+
+      socket.on("close", () => {
+        if (!confirmed) {
+          reject(new Error("IPC subscribe: connection closed before confirmation"));
+          return;
+        }
+        if (!closed) {
+          closed = true;
+        }
+        options.onClose?.();
       });
     });
   }

@@ -1,0 +1,20 @@
+{
+  "id": "echo",
+  "version": "0.1.0",
+  "hostRange": ">=0.1.0",
+  "scope": "global",
+  "contributes": {
+    "mcp": {
+      "tools": [
+        {
+          "name": "echo__ping",
+          "description": "Echo fixture ping tool.",
+          "inputSchema": { "type": "object" },
+          "readOnlyHint": true
+        }
+      ]
+    }
+  },
+  "permissions": [],
+  "activationEvents": ["onStartup"]
+}

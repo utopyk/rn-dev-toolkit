@@ -4,5 +4,14 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
+    globalSetup: ["./vitest.global-setup.ts"],
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      "**/.idea/**",
+      "**/.git/**",
+      "**/.cache/**",
+      "**/.claude/**",
+    ],
   },
 });

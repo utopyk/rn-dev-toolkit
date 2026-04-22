@@ -3,4 +3,5 @@ dist/
 dist-renderer/
 .rn-dev/
 .superpowers/
+.claude/
 renderer/node_modules/

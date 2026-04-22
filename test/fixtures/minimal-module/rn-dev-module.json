@@ -1,0 +1,20 @@
+{
+  "id": "minimal-fixture",
+  "version": "0.1.0",
+  "hostRange": ">=0.1.0",
+  "scope": "per-worktree",
+  "contributes": {
+    "mcp": {
+      "tools": [
+        {
+          "name": "minimal-fixture__ping",
+          "description": "Minimal fixture MCP tool used by registry tests.",
+          "inputSchema": { "type": "object", "properties": {} },
+          "readOnlyHint": true
+        }
+      ]
+    }
+  },
+  "permissions": ["network:outbound"],
+  "activationEvents": ["onStartup"]
+}

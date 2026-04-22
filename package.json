@@ -9,6 +9,10 @@
   "files": [
     "dist/"
   ],
+  "workspaces": [
+    "packages/*",
+    "modules/*"
+  ],
   "scripts": {
     "dev": "bun run src/index.tsx",
     "dev:renderer": "cd renderer && npx vite",
@@ -18,7 +22,7 @@
     "build:compile": "bun run build.ts compile",
     "build:renderer": "cd renderer && npx vite build",
     "build:electron": "npx electron-builder",
-    "test": "bun test",
+    "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
@@ -36,6 +40,8 @@
     "@modelcontextprotocol/sdk": "^1.27.1",
     "@opentui/core": "^0.1.90",
     "@opentui/react": "^0.1.90",
+    "@rn-dev/module-sdk": "workspace:*",
+    "ajv": "^8.18.0",
     "chalk": "^5.6.2",
     "chokidar": "^5.0.0",
     "commander": "^14.0.3",
@@ -45,6 +51,7 @@
     "log-symbols": "^7.0.1",
     "react": "^19.2.4",
     "semver": "^7.7.4",
+    "vscode-jsonrpc": "^8.2.0",
     "ws": "^8.20.0"
   },
   "devDependencies": {

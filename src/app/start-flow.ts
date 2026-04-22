@@ -12,6 +12,9 @@ import { DevToolsManager } from "../core/devtools.js";
 import { CleanManager } from "../core/clean.js";
 import { FileWatcher } from "../core/watcher.js";
 import { IpcServer } from "../core/ipc.js";
+import { ModuleHostManager } from "../core/module-host/manager.js";
+import { CapabilityRegistry } from "../core/module-host/capabilities.js";
+import { registerModulesIpc } from "./modules-ipc.js";
 import { loadTheme, getThemeEffects } from "../ui/theme-provider.js";
 import { registerDevtoolsIpc } from "./devtools-ipc.js";
 import {
@@ -308,6 +311,7 @@ async function startServicesAsync(
   ipc: IpcServer;
   worktreeKey: string;
   builder: import("../core/builder.js").Builder;
+  moduleHost: ModuleHostManager;
 }> {
   const emit = (line: string) => serviceBus.log(line);
 
@@ -505,10 +509,109 @@ async function startServicesAsync(
   const builder = new Builder();
   serviceBus.setBuilder(builder);
 
+  // 12. Module host — Phase 2 + Phase 3a.
+  //
+  // Owns subprocess lifecycle for 3p modules. Registers built-in capabilities
+  // that modules can resolve via host.capability<T>(id). Phase 3a also loads
+  // user-global module manifests + wires the `modules/*` IPC dispatcher so
+  // MCP clients can query lifecycle state.
+  //
+  // Actual module-contributed tools/call proxying is Phase 3b.
+  const capabilities = new CapabilityRegistry();
+  const hostVersion = readHostVersion();
+  capabilities.register<AppInfoCapability>("appInfo", {
+    hostVersion,
+    platform: process.platform,
+    worktreeKey,
+  });
+  capabilities.register<LogCapability>("log", createScopedLogger(emit));
+  capabilities.register("metro", metro, {
+    requiredPermission: "exec:react-native",
+  });
+  capabilities.register("artifacts", artifactStore, {
+    requiredPermission: "fs:artifacts",
+  });
+  const moduleHost = new ModuleHostManager({ hostVersion, capabilities });
+  serviceBus.setModuleHost(moduleHost);
+
+  // Phase 3a: discover user-global modules from ~/.rn-dev/modules/ and
+  // register them as inert manifests. Rejections are logged but don't fail
+  // startup — a broken 3p module shouldn't prevent the dev loop.
+  const moduleRegistry = new ModuleRegistry();
+  const loadResult = moduleRegistry.loadUserGlobalModules({
+    hostVersion,
+    scopeUnit: worktreeKey,
+  });
+  if (loadResult.modules.length > 0) {
+    emit(
+      `ℹ Loaded ${loadResult.modules.length} module manifest${loadResult.modules.length === 1 ? "" : "s"} (${loadResult.modules.map((m) => m.manifest.id).join(", ")})`,
+    );
+  }
+  for (const rejected of loadResult.rejected) {
+    emit(
+      `⚠ Module manifest rejected (${rejected.code}): ${rejected.manifestPath} — ${rejected.message}`,
+    );
+  }
+
+  registerModulesIpc(ipc, {
+    manager: moduleHost,
+    registry: moduleRegistry,
+  });
+
   emit("\u2714 All services started");
   emit("");
 
-  return { metro, devtools, watcher, ipc, worktreeKey, builder };
+  return { metro, devtools, watcher, ipc, worktreeKey, builder, moduleHost };
+}
+
+// ---------------------------------------------------------------------------
+// Module-host capability helpers (Phase 2 daemon wiring)
+// ---------------------------------------------------------------------------
+
+interface AppInfoCapability {
+  hostVersion: string;
+  platform: NodeJS.Platform;
+  worktreeKey: string | null;
+}
+
+interface LogCapability {
+  debug: (msg: string, data?: Record<string, unknown>) => void;
+  info: (msg: string, data?: Record<string, unknown>) => void;
+  warn: (msg: string, data?: Record<string, unknown>) => void;
+  error: (msg: string, data?: Record<string, unknown>) => void;
+}
+
+function readHostVersion(): string {
+  // Single source of truth: root package.json. Phase 2 handoff flags this
+  // — if the daemon is ever split off, re-wire this to a build-stamped
+  // constant instead of a runtime read.
+  try {
+    const pkgPath = path.join(process.cwd(), "package.json");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+    const pkg = JSON.parse(
+      require("fs").readFileSync(pkgPath, "utf-8"),
+    ) as { version?: string };
+    return pkg.version ?? "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+}
+
+function createScopedLogger(emit: (line: string) => void): LogCapability {
+  const format = (
+    level: string,
+    msg: string,
+    data?: Record<string, unknown>,
+  ): string => {
+    const suffix = data ? ` ${JSON.stringify(data)}` : "";
+    return `[module/${level}] ${msg}${suffix}`;
+  };
+  return {
+    debug: (msg, data) => emit(format("debug", msg, data)),
+    info: (msg, data) => emit(format("info", msg, data)),
+    warn: (msg, data) => emit(format("warn", msg, data)),
+    error: (msg, data) => emit(format("error", msg, data)),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -527,6 +630,7 @@ async function startServices(
   worktreeKey: string;
   startupLog: string[];
   builder: import("../core/builder.js").Builder;
+  moduleHost: ModuleHostManager;
 }> {
   const result = await startServicesAsync(profile, projectRoot, artifactStore);
   return { ...result, startupLog: [] };

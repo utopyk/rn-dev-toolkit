@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rn-dev.dev/schemas/module-manifest-1.0.0.json",
+  "title": "rn-dev-module",
+  "description": "Manifest for an rn-dev module. Lives at <module-root>/rn-dev-module.json.",
+  "type": "object",
+  "required": ["id", "version", "hostRange", "scope"],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+      "minLength": 2,
+      "maxLength": 64,
+      "description": "Module identifier. Lowercase kebab-case. Used as the tool-name prefix for 3p modules: <id>__<tool>."
+    },
+    "version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Semver version of this module."
+    },
+    "hostRange": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Semver range of rn-dev host versions this module supports."
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["global", "per-worktree", "workspace"],
+      "description": "Runtime scope. 'workspace' is accepted but treated as 'per-worktree' in v1."
+    },
+    "experimental": {
+      "type": "boolean",
+      "description": "If true, the host emits a warning when loading this module."
+    },
+    "contributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mcp": {
+          "type": "object",
+          "required": ["tools"],
+          "additionalProperties": false,
+          "properties": {
+            "tools": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/mcpTool" }
+            }
+          }
+        },
+        "electron": {
+          "type": "object",
+          "required": ["panels"],
+          "additionalProperties": false,
+          "properties": {
+            "panels": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/electronPanel" }
+            }
+          }
+        },
+        "tui": {
+          "type": "object",
+          "required": ["views"],
+          "additionalProperties": false,
+          "properties": {
+            "views": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/tuiView" }
+            }
+          }
+        },
+        "api": {
+          "type": "object",
+          "description": "Reserved for Phase 10 host.call() inter-module RPC. Schema validates but host ignores in v1.",
+          "required": ["methods"],
+          "additionalProperties": false,
+          "properties": {
+            "methods": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/apiMethod" }
+            }
+          }
+        },
+        "config": {
+          "type": "object",
+          "description": "Reserved for Phase 5 per-module config. Schema validates but host ignores in v1.",
+          "required": ["schema"],
+          "additionalProperties": false,
+          "properties": {
+            "schema": { "type": "object" }
+          }
+        }
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "description": "Advisory in v1 — shown in the install consent dialog, not sandbox-enforced. Known forms: adb, net:<port-range>, fs:artifacts, exec:<binary>, network:outbound.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "activationEvents": {
+      "type": "array",
+      "description": "When the module should activate. Known forms: onStartup, onMcpTool:<pattern>, onElectronPanel:<id>, onWorktreeOpen.",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "uses": {
+      "type": "array",
+      "description": "Reserved for Phase 10 inter-module dependencies. Schema validates but host ignores in v1.",
+      "items": {
+        "type": "object",
+        "required": ["id", "versionRange"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "versionRange": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "description": "Reserved for V2 signed-module verification. Schema validates but host ignores in v1.",
+      "required": ["algo", "publicKey", "signature"],
+      "additionalProperties": false,
+      "properties": {
+        "algo": { "type": "string", "const": "ed25519" },
+        "publicKey": { "type": "string", "minLength": 1 },
+        "signature": { "type": "string", "minLength": 1 }
+      }
+    },
+    "sandbox": {
+      "type": "object",
+      "description": "Reserved for V2 sandbox enforcement. Schema validates but host ignores in v1.",
+      "required": ["kind"],
+      "additionalProperties": true,
+      "properties": {
+        "kind": { "type": "string", "enum": ["none", "node-permission", "os-sandbox"] }
+      }
+    },
+    "target": {
+      "type": "object",
+      "description": "Reserved for V2 device-focused module targeting. Schema validates but host ignores in v1.",
+      "required": ["kind"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["emulator", "simulator", "physical"] }
+      }
+    }
+  },
+  "$defs": {
+    "mcpTool": {
+      "type": "object",
+      "required": ["name", "description", "inputSchema"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Tool name. 3p modules MUST prefix with <moduleId>__ (double underscore). Built-ins are exempt."
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "inputSchema": { "type": "object" },
+        "destructiveHint": { "type": "boolean" },
+        "readOnlyHint": { "type": "boolean" },
+        "openWorldHint": { "type": "boolean" }
+      }
+    },
+    "electronPanel": {
+      "type": "object",
+      "required": ["id", "title", "webviewEntry", "hostApi"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$" },
+        "title": { "type": "string", "minLength": 1 },
+        "icon": { "type": "string" },
+        "webviewEntry": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Path (relative to module root) of the panel's entry HTML."
+        },
+        "hostApi": {
+          "type": "array",
+          "description": "Allowlisted host-RPC method names the panel's preload exposes to the webview.",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "tuiView": {
+      "type": "object",
+      "required": ["id", "title"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "icon": { "type": "string" }
+      }
+    },
+    "apiMethod": {
+      "type": "object",
+      "required": ["description", "inputSchema", "outputSchema"],
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string", "minLength": 1 },
+        "inputSchema": { "type": "object" },
+        "outputSchema": { "type": "object" }
+      }
+    }
+  }
+}

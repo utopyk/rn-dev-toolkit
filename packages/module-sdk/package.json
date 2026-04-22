@@ -1,0 +1,31 @@
+{
+  "name": "@rn-dev/module-sdk",
+  "version": "0.1.0",
+  "description": "Author SDK for rn-dev third-party modules",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./manifest.schema.json": "./manifest.schema.json"
+  },
+  "files": [
+    "src/",
+    "dist/",
+    "manifest.schema.json"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "ajv": "^8.18.0",
+    "vscode-jsonrpc": "^8.2.0"
+  }
+}

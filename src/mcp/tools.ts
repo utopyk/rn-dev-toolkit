@@ -37,6 +37,20 @@ export interface McpFlags {
   /** S5: pass captured bodies through the MCP surface. Without this, every
    * DTO body is `{ kind: 'redacted', reason: 'mcp-default' }`. */
   mcpCaptureBodies: boolean;
+  /**
+   * Module ids explicitly enabled via `--enable-module:<id>`. When both
+   * this set AND `disabledModules` are empty, all loaded modules are
+   * treated as enabled. Precedence: `--disable-module:<id>` wins.
+   */
+  enabledModules: ReadonlySet<string>;
+  /** Module ids disabled via `--disable-module:<id>`. */
+  disabledModules: ReadonlySet<string>;
+  /**
+   * Headless consent for destructiveHint tools. When `true`, the MCP
+   * module-proxy lets `destructiveHint: true` tools through without
+   * per-call confirmation. Phase 3b enforces this at tools/call.
+   */
+  allowDestructiveTools: boolean;
 }
 
 export interface McpContext {
@@ -116,7 +130,13 @@ function detectPm(projectRoot: string): "npm" | "yarn" | "pnpm" {
 // ---------------------------------------------------------------------------
 
 export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
-  const flags = ctx.flags ?? { enableDevtoolsMcp: false, mcpCaptureBodies: false };
+  const flags: McpFlags = ctx.flags ?? {
+    enableDevtoolsMcp: false,
+    mcpCaptureBodies: false,
+    enabledModules: new Set<string>(),
+    disabledModules: new Set<string>(),
+    allowDestructiveTools: false,
+  };
   const devtoolsNetworkTools: ToolDefinition[] = flags.enableDevtoolsMcp
     ? buildDevtoolsNetworkTools(ctx, flags)
     : [];
@@ -124,6 +144,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
   return [
     ...devtoolsNetworkTools,
     buildDevtoolsStatusTool(ctx, flags),
+    ...buildModulesLifecycleTools(ctx),
     // Session management
     {
       name: "rn-dev/start-session",
@@ -986,6 +1007,193 @@ function buildDevtoolsNetworkTools(
         const resp = await ipcAction(ctx, "devtools/clear", args);
         if (!resp) return noSessionError();
         return okResult((resp.payload ?? { status: "cleared" }) as Record<string, unknown>);
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3a — module lifecycle MCP tools.
+//
+// These talk to the daemon's `modules-ipc` dispatcher (see
+// `src/app/modules-ipc.ts`). If there is no daemon running, every tool
+// returns `{ isError: true, ... }` with a clear "no session" message —
+// exactly the same posture as the devtools-network-* tools.
+// ---------------------------------------------------------------------------
+
+function buildModulesLifecycleTools(ctx: McpContext): ToolDefinition[] {
+  return [
+    {
+      name: "rn-dev/modules-list",
+      description:
+        "List installed rn-dev modules (3p + built-in) with current lifecycle state (inert|spawning|handshaking|active|updating|restarting|crashed|failed|stopping).",
+      inputSchema: {
+        type: "object",
+        properties: {},
+      },
+      outputSchema: {
+        type: "object",
+        required: ["modules"],
+        properties: {
+          modules: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["id", "version", "scope", "scopeUnit", "state", "isBuiltIn"],
+              properties: {
+                id: { type: "string" },
+                version: { type: "string" },
+                scope: {
+                  type: "string",
+                  enum: ["global", "per-worktree", "workspace"],
+                },
+                scopeUnit: { type: "string" },
+                state: { type: "string" },
+                isBuiltIn: { type: "boolean" },
+                pid: { type: ["number", "null"] },
+                lastCrashReason: { type: ["string", "null"] },
+              },
+            },
+          },
+        },
+      },
+      handler: async () => {
+        const resp = await ipcAction(ctx, "modules/list", {});
+        if (!resp) return noSessionError();
+        return okResult(resp.payload as Record<string, unknown>);
+      },
+    },
+    {
+      name: "rn-dev/modules-status",
+      description:
+        "Get lifecycle state + last-crash reason for a specific module. Returns null when the module id is unknown.",
+      inputSchema: {
+        type: "object",
+        required: ["moduleId"],
+        properties: {
+          moduleId: { type: "string" },
+          scopeUnit: {
+            type: "string",
+            description:
+              "Optional — disambiguates per-worktree modules. Omit to match any scope.",
+          },
+        },
+      },
+      handler: async (args) => {
+        const resp = await ipcAction(ctx, "modules/status", args);
+        if (!resp) return noSessionError();
+        return okResult(
+          (resp.payload as Record<string, unknown>) ?? { moduleId: args.moduleId, found: false },
+        );
+      },
+    },
+    {
+      name: "rn-dev/modules-restart",
+      description:
+        "Manually restart a module. Exposes the GUI 'Retry' button to agents — useful when a module is in the FAILED state and the user has fixed the underlying cause.",
+      inputSchema: {
+        type: "object",
+        required: ["moduleId"],
+        properties: {
+          moduleId: { type: "string" },
+          scopeUnit: { type: "string" },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          status: { type: "string" },
+          pid: { type: "number" },
+          error: { type: "string" },
+        },
+      },
+      handler: async (args) => {
+        const resp = await ipcAction(ctx, "modules/restart", args);
+        if (!resp) return noSessionError();
+        const payload = resp.payload as Record<string, unknown>;
+        if (payload && typeof payload.error === "string") {
+          return {
+            isError: true,
+            structuredContent: payload,
+            content: [
+              { type: "text" as const, text: `modules/restart error: ${payload.error}` },
+            ],
+          };
+        }
+        return okResult(payload);
+      },
+    },
+    {
+      name: "rn-dev/modules-enable",
+      description:
+        "Enable a previously-disabled module. Removes the persistent disabled.flag file and re-registers the module in inert state; it will spawn on first tools/call.",
+      inputSchema: {
+        type: "object",
+        required: ["moduleId"],
+        properties: {
+          moduleId: { type: "string" },
+          scopeUnit: { type: "string" },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          status: { type: "string" },
+          alreadyEnabled: { type: "boolean" },
+          state: { type: ["string", "null"] },
+          error: { type: "string" },
+        },
+      },
+      handler: async (args) => {
+        const resp = await ipcAction(ctx, "modules/enable", args);
+        if (!resp) return noSessionError();
+        const payload = resp.payload as Record<string, unknown>;
+        if (payload && typeof payload.error === "string") {
+          return {
+            isError: true,
+            structuredContent: payload,
+            content: [
+              { type: "text" as const, text: `modules/enable error: ${payload.error}` },
+            ],
+          };
+        }
+        return okResult(payload);
+      },
+    },
+    {
+      name: "rn-dev/modules-disable",
+      description:
+        "Disable a module persistently. Writes the disabled.flag file, shuts down the running subprocess (if any), and removes the module from the manifest map so its tools stop surfacing in tools/list at the next snapshot.",
+      inputSchema: {
+        type: "object",
+        required: ["moduleId"],
+        properties: {
+          moduleId: { type: "string" },
+          scopeUnit: { type: "string" },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          status: { type: "string" },
+          alreadyDisabled: { type: "boolean" },
+          error: { type: "string" },
+        },
+      },
+      handler: async (args) => {
+        const resp = await ipcAction(ctx, "modules/disable", args);
+        if (!resp) return noSessionError();
+        const payload = resp.payload as Record<string, unknown>;
+        if (payload && typeof payload.error === "string") {
+          return {
+            isError: true,
+            structuredContent: payload,
+            content: [
+              { type: "text" as const, text: `modules/disable error: ${payload.error}` },
+            ],
+          };
+        }
+        return okResult(payload);
       },
     },
   ];

@@ -195,3 +195,112 @@ describe("IpcClient", () => {
     await expect(client.send(msg)).rejects.toThrow(/timeout/i);
   }, 10_000);
 });
+
+// ---------------------------------------------------------------------------
+// IpcClient.subscribe — Phase 3d stream semantics
+// ---------------------------------------------------------------------------
+
+describe("IpcClient.subscribe", () => {
+  let tmpDir: string;
+  let socketPath: string;
+  let server: IpcServer;
+  let client: IpcClient;
+
+  beforeEach(() => {
+    tmpDir = makeTmpDir();
+    socketPath = join(tmpDir, "sub.sock");
+    server = new IpcServer(socketPath);
+    client = new IpcClient(socketPath);
+  });
+
+  afterEach(async () => {
+    await server.stop().catch(() => {});
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("resolves with the initial response + streams every subsequent event", async () => {
+    await server.start();
+    server.on(
+      "message",
+      ({
+        message,
+        reply,
+      }: {
+        message: IpcMessage;
+        reply: (r: IpcMessage) => void;
+      }) => {
+        reply({
+          type: "response",
+          action: message.action,
+          payload: { subscribed: true },
+          id: message.id,
+        });
+        // Push two events after the initial response.
+        for (let i = 0; i < 2; i++) {
+          reply({
+            type: "event",
+            action: "stream/tick",
+            payload: { n: i },
+            id: message.id,
+          });
+        }
+      },
+    );
+
+    const events: IpcMessage[] = [];
+    const sub = await client.subscribe(makeMessage("subscribe"), {
+      onEvent: (evt) => events.push(evt),
+    });
+
+    expect(sub.initial.payload).toEqual({ subscribed: true });
+
+    // Give events time to flow in; no timer-based guarantee so we poll.
+    const deadline = Date.now() + 500;
+    while (events.length < 2 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(events).toHaveLength(2);
+    expect(events[0].action).toBe("stream/tick");
+    expect((events[1].payload as { n: number }).n).toBe(1);
+
+    sub.close();
+  });
+
+  it("fires the server-side onClose listener when the client disposes", async () => {
+    await server.start();
+    let serverSideClosed = false;
+    server.on(
+      "message",
+      ({
+        message,
+        reply,
+        onClose,
+      }: {
+        message: IpcMessage;
+        reply: (r: IpcMessage) => void;
+        onClose: (cb: () => void) => void;
+      }) => {
+        onClose(() => {
+          serverSideClosed = true;
+        });
+        reply({
+          type: "response",
+          action: message.action,
+          payload: { subscribed: true },
+          id: message.id,
+        });
+      },
+    );
+
+    const sub = await client.subscribe(makeMessage("subscribe"), {
+      onEvent: () => {},
+    });
+    sub.close();
+
+    const deadline = Date.now() + 500;
+    while (!serverSideClosed && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    expect(serverSideClosed).toBe(true);
+  });
+});

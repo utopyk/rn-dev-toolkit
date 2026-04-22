@@ -12,7 +12,8 @@ export interface MainLayoutModule {
   id: string;
   icon: string;
   name: string;
-  component: React.FC;
+  /** Optional — modules without a TUI surface render a disabled tab. */
+  component?: React.FC;
 }
 
 export interface MainLayoutProps {

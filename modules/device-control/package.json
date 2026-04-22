@@ -1,0 +1,20 @@
+{
+  "name": "@rn-dev-modules/device-control",
+  "version": "0.0.0",
+  "description": "Drive Android emulators and iOS simulators from rn-dev — the first third-party module",
+  "type": "module",
+  "main": "./src/index.ts",
+  "files": [
+    "src/",
+    "rn-dev-module.json"
+  ],
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rn-dev/module-sdk": "*"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -107,7 +107,12 @@ export interface RnDevModule {
   name: string;
   icon: string;
   order: number;
-  component: React.FC;
+  /**
+   * Ink TUI component. Optional — a module with only MCP tools or Electron
+   * panels (i.e. no terminal surface) is valid. The TUI renders a disabled
+   * tab for modules missing this.
+   */
+  component?: React.FC;
   shortcuts?: Shortcut[];
 }
 

@@ -1,6 +1,6 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'path';
-import { setupIpcBridge, startRealServices } from './ipc-bridge.js';
+import { setupIpcBridge, startRealServices } from './ipc/index.js';
 import { detectProjectRoot } from '../src/core/project.js';
 
 const isDev = !app.isPackaged;

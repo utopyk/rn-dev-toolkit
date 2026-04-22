@@ -11,6 +11,7 @@ import { EventEmitter } from "events";
 import type { MetroManager } from "../core/metro.js";
 import type { FileWatcher } from "../core/watcher.js";
 import type { DevToolsManager } from "../core/devtools.js";
+import type { ModuleHostManager } from "../core/module-host/manager.js";
 
 export interface ServiceBusEvents {
   log: (text: string) => void;
@@ -30,6 +31,12 @@ export interface ServiceBusEvents {
    * Treat the name as provisional.
    */
   devtools: (manager: DevToolsManager) => void;
+  /**
+   * Published once when the daemon boots. The Phase 2 manager owns
+   * module subprocess lifecycle — Phase 3 subscribes to expose modules/*
+   * MCP tools; Phase 4 subscribes to render panels.
+   */
+  moduleHost: (manager: ModuleHostManager) => void;
 }
 
 class ServiceBus extends EventEmitter {
@@ -55,6 +62,10 @@ class ServiceBus extends EventEmitter {
 
   setDevTools(manager: DevToolsManager) {
     this.emit("devtools", manager);
+  }
+
+  setModuleHost(manager: ModuleHostManager) {
+    this.emit("moduleHost", manager);
   }
 }
 

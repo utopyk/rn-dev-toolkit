@@ -1,5 +1,10 @@
-import { describe, it, expect } from "vitest";
-import { CapabilityRegistry } from "../capabilities.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  CapabilityRegistry,
+  KNOWN_PERMISSIONS,
+  resetUnknownPermissionWarningsForTests,
+  warnIfUnknownPermission,
+} from "../capabilities.js";
 
 interface TestLogger {
   log: (msg: string) => void;
@@ -148,5 +153,73 @@ describe("CapabilityRegistry — unregister", () => {
   it("returns false for an unknown id", () => {
     const registry = new CapabilityRegistry();
     expect(registry.unregister("ghost")).toBe(false);
+  });
+});
+
+// Phase 10 P2-11 — typo detector for permission strings.
+describe("CapabilityRegistry — permission allowlist (Phase 10 P2-11)", () => {
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    resetUnknownPermissionWarningsForTests();
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it("KNOWN_PERMISSIONS covers the v1 canonical set", () => {
+    expect(KNOWN_PERMISSIONS).toEqual(
+      expect.arrayContaining([
+        "devtools:capture",
+        "devtools:capture:read",
+        "devtools:capture:mutate",
+        "exec:adb",
+        "exec:simctl",
+        "exec:react-native",
+        "fs:artifacts",
+        "network:outbound",
+      ]),
+    );
+  });
+
+  it("does NOT warn for a known requiredPermission", () => {
+    const registry = new CapabilityRegistry();
+    registry.register("artifacts", {}, { requiredPermission: "fs:artifacts" });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("warns once on register() with a misspelled requiredPermission", () => {
+    const registry = new CapabilityRegistry();
+    registry.register("typo", {}, { requiredPermission: "exec:addb" });
+    // Register a second time with the same typo in a different capability —
+    // dedup key is context:permission, so this logs separately.
+    registry.register("typo2", {}, { requiredPermission: "exec:addb" });
+    expect(warn).toHaveBeenCalledTimes(2);
+    expect((warn.mock.calls[0] ?? [])[0]).toMatch(/unknown permission "exec:addb"/);
+  });
+
+  it("warns for misspellings in methodPermissions", () => {
+    const registry = new CapabilityRegistry();
+    registry.register(
+      "caps",
+      { run: () => {} },
+      {
+        requiredPermission: "fs:artifacts",
+        methodPermissions: { run: "fs:artifactz" },
+      },
+    );
+    expect(warn).toHaveBeenCalled();
+    const calls = (warn.mock.calls as Array<Array<unknown>>).map(
+      (c) => c[0] as string,
+    );
+    expect(calls.some((s) => s.includes("fs:artifactz"))).toBe(true);
+  });
+
+  it("warnIfUnknownPermission dedups by context+permission", () => {
+    warnIfUnknownPermission("exec:garbage", `module "alpha"`);
+    warnIfUnknownPermission("exec:garbage", `module "alpha"`);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

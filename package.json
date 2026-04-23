@@ -24,6 +24,9 @@
     "build:electron": "npx electron-builder",
     "test": "vitest run",
     "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p electron/tsconfig.json && tsc --noEmit -p modules/device-control/tsconfig.json && tsc --noEmit -p modules/devtools-network/tsconfig.json",
+    "typecheck:electron": "tsc --noEmit -p electron/tsconfig.json",
+    "typecheck:modules": "tsc --noEmit -p modules/device-control/tsconfig.json && tsc --noEmit -p modules/devtools-network/tsconfig.json",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

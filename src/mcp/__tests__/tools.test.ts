@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { createToolDefinitions } from "../tools.js";
-import type { McpContext } from "../tools.js";
+import type { McpContext, ToolResult } from "../tools.js";
 import type { IpcMessage } from "../../core/ipc.js";
 
 // ---------------------------------------------------------------------------
@@ -62,9 +62,9 @@ function makeMockIpcClient(
 // ---------------------------------------------------------------------------
 
 describe("createToolDefinitions()", () => {
-  it("returns 30 tool definitions (23 legacy + 5 modules/* lifecycle + 2 modules/config/*)", () => {
+  it("returns 31 tool definitions (23 legacy + 5 modules/* lifecycle + 2 modules/config/* + modules-available)", () => {
     const tools = createToolDefinitions(makeMockContext());
-    expect(tools).toHaveLength(30);
+    expect(tools).toHaveLength(31);
   });
 
   it("each tool has name, description, inputSchema, and handler", () => {
@@ -229,5 +229,133 @@ describe("createToolDefinitions()", () => {
 
     const result = await tool.handler({});
     expect(result).toEqual({ status: "not-running" });
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 10 P1-3 — rn-dev/modules-available discoverability tool
+  // -------------------------------------------------------------------------
+
+  describe("rn-dev/modules-available", () => {
+    const marketplacePayload = {
+      kind: "ok",
+      registrySha256: "deadbeef",
+      registryUrl: "https://example.invalid/modules.json",
+      entries: [
+        {
+          id: "devtools-network",
+          description: "DevTools Network capture over CDP.",
+          author: "rn-dev",
+          version: "0.1.0",
+          permissions: ["devtools:capture"],
+          tarballSha256: "a".repeat(64),
+          npmPackage: "@rn-dev-modules/devtools-network",
+          homepage: "https://example.invalid/dn",
+          installed: true,
+          installedVersion: "0.1.0",
+          installedState: "active",
+        },
+        {
+          id: "device-control",
+          description: "adb / simctl device control.",
+          author: "rn-dev",
+          version: "0.1.0",
+          permissions: ["exec:adb", "exec:simctl"],
+          tarballSha256: "b".repeat(64),
+          npmPackage: "@rn-dev-modules/device-control",
+          homepage: "https://example.invalid/dc",
+          installed: false,
+        },
+      ],
+    };
+
+    it("returns no-session error when ipc client is null", async () => {
+      const ctx = makeMockContext();
+      const tools = createToolDefinitions(ctx);
+      const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
+
+      const result = (await tool.handler({})) as ToolResult;
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({ error: "no-session" });
+    });
+
+    it("proxies marketplace/list and returns { entries, registryUrl, registrySha256 }", async () => {
+      const ctx = makeMockContext({
+        ipcClient: makeMockIpcClient((action) => {
+          expect(action).toBe("marketplace/list");
+          return marketplacePayload;
+        }),
+      });
+      const tools = createToolDefinitions(ctx);
+      const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
+
+      const result = (await tool.handler({})) as ToolResult;
+      expect(result.isError).toBeUndefined();
+      const body = result.structuredContent as {
+        registryUrl: string;
+        registrySha256: string;
+        entries: Array<Record<string, unknown>>;
+      };
+      expect(body.registryUrl).toBe("https://example.invalid/modules.json");
+      expect(body.registrySha256).toBe("deadbeef");
+      expect(body.entries).toHaveLength(2);
+      expect(body.entries[0]).toMatchObject({
+        id: "devtools-network",
+        installed: true,
+        installedVersion: "0.1.0",
+      });
+      expect(body.entries[1]).toMatchObject({
+        id: "device-control",
+        installed: false,
+      });
+    });
+
+    it("filter narrows by id + description substring (case-insensitive)", async () => {
+      const ctx = makeMockContext({
+        ipcClient: makeMockIpcClient(() => marketplacePayload),
+      });
+      const tools = createToolDefinitions(ctx);
+      const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
+
+      const result = (await tool.handler({ filter: "NETWORK" })) as ToolResult;
+      const body = result.structuredContent as {
+        entries: Array<Record<string, unknown>>;
+      };
+      expect(body.entries).toHaveLength(1);
+      expect(body.entries[0]?.["id"]).toBe("devtools-network");
+    });
+
+    it("installedOnly hides installable-but-not-installed entries", async () => {
+      const ctx = makeMockContext({
+        ipcClient: makeMockIpcClient(() => marketplacePayload),
+      });
+      const tools = createToolDefinitions(ctx);
+      const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
+
+      const result = (await tool.handler({ installedOnly: true })) as ToolResult;
+      const body = result.structuredContent as {
+        entries: Array<Record<string, unknown>>;
+      };
+      expect(body.entries).toHaveLength(1);
+      expect(body.entries[0]?.["id"]).toBe("devtools-network");
+    });
+
+    it("propagates registry errors as isError results", async () => {
+      const ctx = makeMockContext({
+        ipcClient: makeMockIpcClient(() => ({
+          kind: "error",
+          code: "E_REGISTRY_FETCH_FAILED",
+          message: "network is down",
+        })),
+      });
+      const tools = createToolDefinitions(ctx);
+      const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
+
+      const result = (await tool.handler({})) as ToolResult;
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        kind: "error",
+        code: "E_REGISTRY_FETCH_FAILED",
+      });
+    });
   });
 });

@@ -37,6 +37,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import {
   appendFileSync,
   chmodSync,
+  createReadStream,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -48,6 +49,7 @@ import {
 import { EventEmitter } from "node:events";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 
 export type AuditOutcome = "ok" | "error" | "denied";
 
@@ -178,8 +180,9 @@ export class AuditLog extends EventEmitter {
    * synchronous callers on the same event loop tick can't interleave
    * — the earlier one's `lastHash`/`seq` mutations complete before the
    * later one reads them. The return type stays `Promise<AuditEntry>`
-   * for forward compatibility (streaming writes in Phase 9+), but the
-   * current implementation resolves synchronously.
+   * for forward compatibility (streaming writes in Phase 11+), but
+   * `append()` itself still resolves synchronously. Distinct from
+   * `verify()`, which streams the file and genuinely awaits.
    */
   append(input: AuditEntryInput): Promise<AuditEntry> {
     this.ensureInitialized();
@@ -213,45 +216,58 @@ export class AuditLog extends EventEmitter {
    * Paired rotation files: call `verify({ tailHash })` on the fresh log
    * with the `tailHash` from the rotated file's verification to continue
    * the chain.
+   *
+   * Streams line-by-line via `createReadStream` + `readline` so memory
+   * stays bounded even on multi-hundred-MB logs (Phase 8 review flagged
+   * the whole-file read as a DoS risk on a long-running daemon). The
+   * return shape is unchanged — callers just `await` now.
    */
-  verify(options: { tailHash?: string } = {}): VerifyResult {
+  async verify(options: { tailHash?: string } = {}): Promise<VerifyResult> {
     this.ensureInitialized();
     if (!existsSync(this.path)) {
       return { ok: true, entriesRead: 0, tailHash: options.tailHash ?? "" };
     }
-    const raw = readFileSync(this.path, "utf-8");
-    const lines = raw.split("\n").filter((l) => l.length > 0);
+
     let prevHash = options.tailHash ?? "";
     let entriesRead = 0;
-    for (const line of lines) {
-      let entry: AuditEntry;
-      try {
-        entry = JSON.parse(line) as AuditEntry;
-      } catch {
-        return { ok: false, failedAt: entriesRead, reason: "invalid JSON" };
+
+    const stream = createReadStream(this.path, { encoding: "utf-8" });
+    const rl = createInterface({ input: stream, crlfDelay: Infinity });
+    try {
+      for await (const line of rl) {
+        if (line.length === 0) continue;
+        let entry: AuditEntry;
+        try {
+          entry = JSON.parse(line) as AuditEntry;
+        } catch {
+          return { ok: false, failedAt: entriesRead, reason: "invalid JSON" };
+        }
+        if (entry.prevHash !== prevHash) {
+          return {
+            ok: false,
+            failedAt: entry.seq,
+            reason: `prevHash mismatch (expected "${prevHash}", got "${entry.prevHash}")`,
+          };
+        }
+        // Canonicalize the entry WITHOUT its own `hash` field — otherwise
+        // the HMAC includes its own output and verify can never match
+        // append's computation. `Omit<AuditEntry, "hash">` is a type-level
+        // hint, not a runtime strip; destructure explicitly.
+        const { hash: _stored, ...withoutHash } = entry;
+        const expectedHash = this.computeHash(withoutHash, entry.prevHash);
+        if (entry.hash !== expectedHash) {
+          return {
+            ok: false,
+            failedAt: entry.seq,
+            reason: "hash mismatch — entry has been tampered",
+          };
+        }
+        prevHash = entry.hash;
+        entriesRead++;
       }
-      if (entry.prevHash !== prevHash) {
-        return {
-          ok: false,
-          failedAt: entry.seq,
-          reason: `prevHash mismatch (expected "${prevHash}", got "${entry.prevHash}")`,
-        };
-      }
-      // Canonicalize the entry WITHOUT its own `hash` field — otherwise
-      // the HMAC includes its own output and verify can never match
-      // append's computation. `Omit<AuditEntry, "hash">` is a type-level
-      // hint, not a runtime strip; destructure explicitly.
-      const { hash: _stored, ...withoutHash } = entry;
-      const expectedHash = this.computeHash(withoutHash, entry.prevHash);
-      if (entry.hash !== expectedHash) {
-        return {
-          ok: false,
-          failedAt: entry.seq,
-          reason: "hash mismatch — entry has been tampered",
-        };
-      }
-      prevHash = entry.hash;
-      entriesRead++;
+    } finally {
+      rl.close();
+      stream.destroy();
     }
     return { ok: true, entriesRead, tailHash: prevHash };
   }
@@ -423,18 +439,51 @@ function generateKey(keyPath: string): Buffer {
  * HMAC must be reproducible for `verify()` on a different process.
  * `JSON.stringify` preserves insertion order, which is unstable across
  * environments, so we sort keys explicitly.
+ *
+ * Cycle guard (Phase 10 P2-8): if the input self-references (shouldn't
+ * happen for audit entries, but the function is callable from tests and
+ * future log formats), throw an explicit `AuditCanonicalizationError`
+ * rather than blowing up with `RangeError: Maximum call stack size
+ * exceeded`. Makes the failure traceable back to canonicalize() instead
+ * of looking like a generic recursion bug.
  */
-function canonicalize(value: unknown): string {
+function canonicalize(value: unknown, seen: WeakSet<object> = new WeakSet()): string {
   if (value === null || typeof value !== "object") {
     return JSON.stringify(value);
   }
-  if (Array.isArray(value)) {
-    return "[" + value.map(canonicalize).join(",") + "]";
+  if (seen.has(value)) {
+    throw new AuditCanonicalizationError(
+      "canonicalize(): input contains a cycle (self-reference) and cannot be deterministically serialized",
+    );
   }
-  const obj = value as Record<string, unknown>;
-  const keys = Object.keys(obj).sort();
-  const parts = keys.map(
-    (k) => JSON.stringify(k) + ":" + canonicalize(obj[k]),
-  );
-  return "{" + parts.join(",") + "}";
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return "[" + value.map((v) => canonicalize(v, seen)).join(",") + "]";
+    }
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    const parts = keys.map(
+      (k) => JSON.stringify(k) + ":" + canonicalize(obj[k], seen),
+    );
+    return "{" + parts.join(",") + "}";
+  } finally {
+    seen.delete(value);
+  }
 }
+
+export class AuditCanonicalizationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "AuditCanonicalizationError";
+  }
+}
+
+/**
+ * Test-only re-export of `canonicalize`. Not part of the public API —
+ * internal call sites use the one inside `computeHash`. Exposed so the
+ * cycle-guard test (Phase 10 P2-8) can exercise the guard without
+ * reaching through a full `append()` call that TS wouldn't let pass a
+ * cyclic input anyway.
+ */
+export const _canonicalizeForTests = canonicalize;

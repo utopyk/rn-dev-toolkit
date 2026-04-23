@@ -436,6 +436,57 @@ describe("ModuleRegistry", () => {
       expect(fixture?.manifest.permissions).toEqual(["network:outbound"]);
       expect(fixture?.manifest.activationEvents).toEqual(["onStartup"]);
     });
+
+    // Phase 10 P1-5 — static-vs-instance split: applyScan is the instance
+    // half of the scan/apply pipeline and can be called with any
+    // LoadManifestsResult, not just the output of scanUserGlobalModules.
+    describe("applyScan (Phase 10 split)", () => {
+      it("accepts a pre-scanned manifest and registers it", () => {
+        writeManifest("foo", baseManifest({ id: "foo" }));
+        const scan = ModuleRegistry.scanUserGlobalModules({
+          hostVersion: "0.1.0",
+          modulesDir,
+        });
+        expect(scan.modules).toHaveLength(1);
+
+        const applied = registry.applyScan(scan);
+        expect(applied.modules).toHaveLength(1);
+        expect(registry.getManifest("foo", "global")).toBeDefined();
+      });
+
+      it("preserves scan-time rejections in the applied result", () => {
+        const moduleRoot = join(modulesDir, "broken");
+        mkdirSync(moduleRoot, { recursive: true });
+        writeFileSync(
+          join(moduleRoot, "rn-dev-module.json"),
+          "{ not json",
+        );
+
+        const scan = ModuleRegistry.scanUserGlobalModules({
+          hostVersion: "0.1.0",
+          modulesDir,
+        });
+        expect(scan.rejected).toHaveLength(1);
+
+        const applied = registry.applyScan(scan);
+        expect(applied.rejected).toHaveLength(1);
+        expect(applied.modules).toHaveLength(0);
+      });
+
+      it("converts duplicate registration to an apply-time rejection (no throw)", () => {
+        writeManifest("dupe", baseManifest({ id: "dupe" }));
+        const scan = ModuleRegistry.scanUserGlobalModules({
+          hostVersion: "0.1.0",
+          modulesDir,
+        });
+        // Apply twice — second call hits the duplicate-id guard.
+        registry.applyScan(scan);
+        const second = registry.applyScan(scan);
+        expect(second.modules).toHaveLength(0);
+        expect(second.rejected).toHaveLength(1);
+        expect(second.rejected[0]?.code).toBe("E_INVALID_MANIFEST");
+      });
+    });
   });
 
   // -------------------------------------------------------------------------

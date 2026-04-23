@@ -1055,6 +1055,123 @@ function buildModulesLifecycleTools(ctx: McpContext): ToolDefinition[] {
         return okResult(payload);
       },
     },
+    {
+      // Phase 10 P1-3 — agent discoverability meta-tool. Agents that fail
+      // to find a capability via `tools/list` (e.g. they need "network
+      // capture" but devtools-network is not installed) now have a
+      // canonical probe: call `rn-dev/modules-available`, scan for the
+      // entry whose `description` matches, then call the user-facing
+      // install flow. Without this, agents would have to guess module
+      // names or ask the user to wire things up.
+      name: "rn-dev/modules-available",
+      description:
+        "Discover rn-dev modules available in the curated registry (installed + installable). Returns one entry per module with { id, description, permissions, installed, installedVersion, installedState }. Use this when `tools/list` doesn't surface the capability you need — the entry's `description` tells you what the module does, and `installed: false` means the user can install it via the Marketplace panel. Read-only; safe to call without consent.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          filter: {
+            type: "string",
+            description:
+              "Optional case-insensitive substring match against each entry's id + description. Omit to return everything.",
+          },
+          installedOnly: {
+            type: "boolean",
+            description:
+              "When true, return only entries already installed. Defaults to false (include installable entries too).",
+          },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        required: ["entries"],
+        properties: {
+          registryUrl: { type: "string" },
+          registrySha256: { type: "string" },
+          entries: {
+            type: "array",
+            items: {
+              type: "object",
+              required: [
+                "id",
+                "description",
+                "permissions",
+                "installed",
+              ],
+              properties: {
+                id: { type: "string" },
+                description: { type: "string" },
+                author: { type: "string" },
+                version: { type: "string" },
+                permissions: {
+                  type: "array",
+                  items: { type: "string" },
+                },
+                homepage: { type: "string" },
+                installed: { type: "boolean" },
+                installedVersion: { type: "string" },
+                installedState: { type: "string" },
+              },
+            },
+          },
+        },
+      },
+      handler: async (args) => {
+        const resp = await ipcAction(ctx, "marketplace/list", {});
+        if (!resp) return noSessionError();
+        const payload = resp.payload as Record<string, unknown>;
+        if (
+          payload &&
+          typeof payload["kind"] === "string" &&
+          payload["kind"] === "error"
+        ) {
+          return {
+            isError: true,
+            structuredContent: payload,
+            content: [
+              {
+                type: "text" as const,
+                text: `modules-available ${String(payload["code"])}: ${String(payload["message"])}`,
+              },
+            ],
+          };
+        }
+        const rawEntries = Array.isArray(payload["entries"])
+          ? (payload["entries"] as Array<Record<string, unknown>>)
+          : [];
+        const filter =
+          typeof args?.["filter"] === "string"
+            ? (args["filter"] as string).toLowerCase().trim()
+            : "";
+        const installedOnly = args?.["installedOnly"] === true;
+        const entries = rawEntries
+          .filter((e) => {
+            if (installedOnly && e["installed"] !== true) return false;
+            if (!filter) return true;
+            const id = typeof e["id"] === "string" ? e["id"].toLowerCase() : "";
+            const desc =
+              typeof e["description"] === "string"
+                ? (e["description"] as string).toLowerCase()
+                : "";
+            return id.includes(filter) || desc.includes(filter);
+          })
+          .map((e) => ({
+            id: e["id"],
+            description: e["description"],
+            author: e["author"],
+            version: e["version"],
+            permissions: e["permissions"],
+            homepage: e["homepage"],
+            installed: e["installed"],
+            installedVersion: e["installedVersion"],
+            installedState: e["installedState"],
+          }));
+        return okResult({
+          registryUrl: payload["registryUrl"],
+          registrySha256: payload["registrySha256"],
+          entries,
+        });
+      },
+    },
   ];
 }
 

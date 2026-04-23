@@ -4,6 +4,7 @@ import type { DevToolsManager } from '../../src/core/devtools.js';
 import type { ArtifactStore } from '../../src/core/artifact.js';
 import type { Builder } from '../../src/core/builder.js';
 import type { FileWatcher } from '../../src/core/watcher.js';
+import type { RunMode } from '../../src/core/types.js';
 
 export interface InstanceState {
   id: string;
@@ -15,7 +16,7 @@ export interface InstanceState {
   deviceName: string;
   deviceIcon: string;
   platform: 'ios' | 'android' | 'both';
-  mode: string;
+  mode: RunMode;
   metro: MetroManager | null;
   devtools: DevToolsManager | null;
   devtoolsStarted: boolean;

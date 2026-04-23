@@ -17,7 +17,8 @@ import { CapabilityRegistry } from "../core/module-host/capabilities.js";
 import {
   createDevtoolsHostCapability,
   DEVTOOLS_CAPABILITY_ID,
-  DEVTOOLS_CAPABILITY_PERMISSION,
+  DEVTOOLS_CAPABILITY_READ_PERMISSION,
+  DEVTOOLS_METHOD_PERMISSIONS,
 } from "../core/devtools/host-capability.js";
 import { registerModulesIpc } from "./modules-ipc.js";
 import { loadTheme, getThemeEffects } from "../ui/theme-provider.js";
@@ -27,6 +28,7 @@ import {
   settingsModule,
   lintTestModule,
   metroLogsModule,
+  isSensitivePermission,
 } from "../modules/index.js";
 import {
   createModuleSystem,
@@ -536,18 +538,12 @@ async function startServicesAsync(
   // factory so modules activated during built-in manifest registration can
   // resolve them.
   const hostVersion = readHostVersion();
-  const capabilities = new CapabilityRegistry();
-  capabilities.register("metro", metro, {
-    requiredPermission: "exec:react-native",
+  const capabilities = registerHostCapabilities({
+    metro,
+    artifactStore,
+    devtools,
+    worktreeKey,
   });
-  capabilities.register("artifacts", artifactStore, {
-    requiredPermission: "fs:artifacts",
-  });
-  capabilities.register(
-    DEVTOOLS_CAPABILITY_ID,
-    createDevtoolsHostCapability(devtools, worktreeKey),
-    { requiredPermission: DEVTOOLS_CAPABILITY_PERMISSION },
-  );
   const { moduleHost } = createModuleSystem({
     hostVersion,
     worktreeKey,
@@ -573,14 +569,11 @@ async function startServicesAsync(
   // ambient signal that a data-sensitive module is live. Emit one warning
   // line per module carrying a sensitive permission so tailing operators
   // see "devtools-network active" without running `rn-dev module list`.
-  const SENSITIVE_PERMS: ReadonlySet<string> = new Set([
-    "devtools:capture",
-    "exec:adb",
-    "exec:simctl",
-  ]);
+  // Uses `isSensitivePermission` from `src/modules/registry.ts` so the
+  // manifest lint (Phase 10 P2-12) and this banner stay on the same list.
   for (const mod of loadResult.modules) {
-    const sensitive = (mod.manifest.permissions ?? []).filter((p) =>
-      SENSITIVE_PERMS.has(p),
+    const sensitive = (mod.manifest.permissions ?? []).filter(
+      isSensitivePermission,
     );
     if (sensitive.length > 0) {
       emit(
@@ -622,6 +615,40 @@ async function startServicesAsync(
 // ---------------------------------------------------------------------------
 // Module-host capability helpers (Phase 2 daemon wiring)
 // ---------------------------------------------------------------------------
+
+/**
+ * Phase 10 P3-13 — extracted from `startServicesAsync` so the tangled
+ * capability registrations live in one place with a clear signature. Each
+ * dep maps 1:1 to a single `capabilities.register()` call; adding a new
+ * built-in host capability (e.g. a future "telemetry") means one more arg
+ * here and one more call, rather than widening the surface area of
+ * `startServicesAsync`.
+ */
+interface HostCapabilityDeps {
+  metro: MetroManager;
+  artifactStore: ArtifactStore;
+  devtools: DevToolsManager;
+  worktreeKey: string;
+}
+
+function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry {
+  const capabilities = new CapabilityRegistry();
+  capabilities.register("metro", deps.metro, {
+    requiredPermission: "exec:react-native",
+  });
+  capabilities.register("artifacts", deps.artifactStore, {
+    requiredPermission: "fs:artifacts",
+  });
+  capabilities.register(
+    DEVTOOLS_CAPABILITY_ID,
+    createDevtoolsHostCapability(deps.devtools, deps.worktreeKey),
+    {
+      requiredPermission: DEVTOOLS_CAPABILITY_READ_PERMISSION,
+      methodPermissions: DEVTOOLS_METHOD_PERMISSIONS,
+    },
+  );
+  return capabilities;
+}
 
 function readHostVersion(): string {
   // Single source of truth: root package.json. Phase 2 handoff flags this

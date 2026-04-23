@@ -1,4 +1,7 @@
-import Ajv, { type ErrorObject, type ValidateFunction } from "ajv/dist/2020.js";
+import AjvDefault, {
+  type ErrorObject,
+  type ValidateFunction,
+} from "ajv/dist/2020.js";
 import schema from "../manifest.schema.json" with { type: "json" };
 import { ModuleError, ModuleErrorCode } from "./errors.js";
 import type { ModuleManifest } from "./types.js";
@@ -14,8 +17,18 @@ export type ValidationResult =
   | { valid: true; manifest: ModuleManifest }
   | { valid: false; errors: ManifestError[] };
 
-// Ajv's default export under ESM+esModuleInterop is the constructor.
-const ajv = new Ajv({ allErrors: true, strict: false });
+// Ajv publishes as CJS without an `exports` map, so the esm default-interop
+// shape differs between `moduleResolution: bundler` (where the default is
+// the class directly) and `moduleResolution: NodeNext` (where it's
+// `{ default: Class }`). The any-cast below lets the SDK compile cleanly
+// under both — its consumers (modules/*) use NodeNext, the SDK itself is
+// built in bundler mode.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const AjvAny = AjvDefault as any;
+const AjvCtor = (AjvAny?.default ?? AjvAny) as new (
+  opts?: { allErrors?: boolean; strict?: boolean }
+) => { compile<T>(schema: unknown): ValidateFunction<T> };
+const ajv = new AjvCtor({ allErrors: true, strict: false });
 const validator: ValidateFunction<ModuleManifest> =
   ajv.compile<ModuleManifest>(schema);
 

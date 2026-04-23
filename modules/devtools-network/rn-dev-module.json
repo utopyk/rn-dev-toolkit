@@ -109,6 +109,6 @@
       }
     }
   },
-  "permissions": ["devtools:capture"],
+  "permissions": ["devtools:capture:read", "devtools:capture:mutate"],
   "activationEvents": ["onStartup"]
 }

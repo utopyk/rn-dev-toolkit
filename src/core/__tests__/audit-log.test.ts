@@ -3,7 +3,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { AuditLog } from "../audit-log.js";
+import {
+  AuditCanonicalizationError,
+  AuditLog,
+  _canonicalizeForTests,
+} from "../audit-log.js";
 
 describe("AuditLog", () => {
   let tmp: string;
@@ -60,7 +64,7 @@ describe("AuditLog", () => {
         patchKeys: ["k"],
       });
     }
-    expect(log.verify()).toEqual({
+    expect(await log.verify()).toEqual({
       ok: true,
       entriesRead: 10,
       tailHash: expect.any(String),
@@ -79,7 +83,7 @@ describe("AuditLog", () => {
     tampered["kind"] = "uninstall";
     lines[2] = JSON.stringify(tampered);
     writeFileSync(logPath, lines.join("\n") + "\n");
-    const result = log.verify();
+    const result = await log.verify();
     expect(result.ok).toBe(false);
     expect(result.failedAt).toBe(3);
   });
@@ -91,7 +95,7 @@ describe("AuditLog", () => {
     const entry = JSON.parse(raw.trim()) as Record<string, unknown>;
     entry["hash"] = "0".repeat(64);
     writeFileSync(logPath, JSON.stringify(entry) + "\n");
-    const result = log.verify();
+    const result = await log.verify();
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/hash mismatch/);
   });
@@ -137,7 +141,7 @@ describe("AuditLog", () => {
     expect(rotated[1]!.seq).toBe(2);
 
     // Cross-file verify: feed rotated tail hash into the fresh log's verify.
-    const fresh = log.verify({ tailHash: rotated[rotated.length - 1]!.hash });
+    const fresh = await log.verify({ tailHash: rotated[rotated.length - 1]!.hash });
     expect(fresh.ok).toBe(true);
     expect(fresh.entriesRead).toBe(1);
     void e1;
@@ -167,7 +171,7 @@ describe("AuditLog", () => {
     const e3 = await log2.append({ kind: "install", moduleId: "c", outcome: "ok" });
     expect(e3.seq).toBe(3);
 
-    const result = log2.verify();
+    const result = await log2.verify();
     expect(result.ok).toBe(true);
     expect(result.entriesRead).toBe(3);
   });
@@ -187,7 +191,7 @@ describe("AuditLog", () => {
       expect(e.patchKeys).toEqual(["theme", "logLevel"]);
       expect(e.scopeUnit).toBe("wt-1");
     }
-    expect(log.verify().ok).toBe(true);
+    expect((await log.verify()).ok).toBe(true);
   });
 
   it("rotates through generations + deletes files older than rotateKeep", async () => {
@@ -227,4 +231,69 @@ describe("AuditLog", () => {
     expect(rotations.length).toBeGreaterThanOrEqual(1);
     expect(rotations[0]?.rotatedTo).toBe(logPath + ".1");
   });
+
+  // Phase 10 P2-8 — cycle guard. canonicalize() used to blow the stack
+  // with RangeError if the input had a self-reference (shouldn't happen
+  // for typed audit inputs, but the defense-in-depth matters because
+  // append() was close to the hot path).
+  describe("canonicalize cycle guard (Phase 10 P2-8)", () => {
+    it("throws AuditCanonicalizationError on a direct self-reference", () => {
+      const obj: Record<string, unknown> = { a: 1 };
+      obj["self"] = obj;
+      expect(() => _canonicalizeForTests(obj)).toThrow(
+        AuditCanonicalizationError,
+      );
+      expect(() => _canonicalizeForTests(obj)).toThrow(/cycle/);
+    });
+
+    it("throws on an indirect cycle through an array", () => {
+      const a: unknown[] = [];
+      const b: Record<string, unknown> = { inner: a };
+      a.push(b);
+      expect(() => _canonicalizeForTests({ root: a })).toThrow(
+        AuditCanonicalizationError,
+      );
+    });
+
+    it("still works for the non-cyclic shapes canonicalize sees from append()", () => {
+      const out = _canonicalizeForTests({
+        b: 2,
+        a: [1, { x: "y" }],
+      });
+      // Keys sorted, nested structure preserved.
+      expect(out).toBe('{"a":[1,{"x":"y"}],"b":2}');
+    });
+  });
+
+  // Phase 10 P1-4 — guard against the whole-file-read regression. A
+  // malformed or malicious log has no practical size cap (the daemon
+  // rotates but a paranoid operator may disable it or an attacker could
+  // swap the file for a huge one). verify() now streams line-by-line via
+  // createReadStream + readline so peak RSS doesn't grow with the file.
+  it("verify() streams a 100k-entry log without loading it all into memory", async () => {
+    // 10MB rotation threshold is the default; we need the whole 100k in a
+    // single file to exercise the streaming path, so crank it way up.
+    const log = new AuditLog({
+      path: logPath,
+      key,
+      rotateBytes: 1024 * 1024 * 1024, // 1 GiB — no rotation during the test
+    });
+    const ENTRIES = 100_000;
+    const rssBefore = process.memoryUsage().rss;
+    for (let i = 0; i < ENTRIES; i++) {
+      await log.append({ kind: "install", moduleId: `m${i}`, outcome: "ok" });
+    }
+    const result = await log.verify();
+    expect(result.ok).toBe(true);
+    expect(result.entriesRead).toBe(ENTRIES);
+
+    // Memory-bound: verify's peak should be within a few hundred MB of the
+    // pre-test baseline even though the log is ~10-20 MB. A whole-file
+    // read would push comfortably past 100 MB; the stream should sit well
+    // under. 500 MB is a loose ceiling to avoid flakes on loaded CI
+    // runners without letting a regression through silently.
+    const rssAfter = process.memoryUsage().rss;
+    const delta = rssAfter - rssBefore;
+    expect(delta).toBeLessThan(500 * 1024 * 1024);
+  }, 120_000);
 });

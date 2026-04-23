@@ -59,7 +59,11 @@ async function doClear() {
 function renderFatal(message) {
   lastError = message;
   statusEl.hidden = true;
-  contentEl.innerHTML = `<div class="error">${escapeHtml(message)}</div>`;
+  contentEl.replaceChildren();
+  const div = document.createElement("div");
+  div.className = "error";
+  div.textContent = message;
+  contentEl.appendChild(div);
 }
 
 function renderEntries(result) {
@@ -75,8 +79,7 @@ function renderEntries(result) {
       meta?.proxyStatus === "connected"
         ? "Waiting for network activity\u2026"
         : "No captures yet.";
-    contentEl.innerHTML = "";
-    contentEl.appendChild(empty);
+    contentEl.replaceChildren(empty);
     return;
   }
 
@@ -85,22 +88,26 @@ function renderEntries(result) {
 
   const table = document.createElement("table");
   const thead = document.createElement("thead");
-  thead.innerHTML = `
-    <tr>
-      <th class="col-method">Method</th>
-      <th class="col-status">Status</th>
-      <th class="col-dur">Duration</th>
-      <th class="col-url">URL</th>
-    </tr>
-  `;
+  const headerRow = document.createElement("tr");
+  for (const [cls, label] of [
+    ["col-method", "Method"],
+    ["col-status", "Status"],
+    ["col-dur", "Duration"],
+    ["col-url", "URL"],
+  ]) {
+    const th = document.createElement("th");
+    th.className = cls;
+    th.textContent = label;
+    headerRow.appendChild(th);
+  }
+  thead.appendChild(headerRow);
   const tbody = document.createElement("tbody");
   for (const entry of rows) {
     tbody.appendChild(renderRow(entry));
   }
   table.appendChild(thead);
   table.appendChild(tbody);
-  contentEl.innerHTML = "";
-  contentEl.appendChild(table);
+  contentEl.replaceChildren(table);
 }
 
 function renderRow(entry) {
@@ -165,17 +172,32 @@ function renderStatus(meta, entryCount) {
       : meta.proxyStatus === "disconnected" || meta.proxyStatus === "no-target"
         ? "status-value status-value--warn"
         : "status-value";
-  statusEl.innerHTML = `
-    <span class="status-label">Proxy:</span>
-    <span class="${proxyClass}">${escapeHtml(meta.proxyStatus || "unknown")}</span>
-    <span class="status-label">Entries:</span>
-    <span class="status-value">${entryCount}</span>
-    <span class="status-label">Evicted:</span>
-    <span class="status-value">${meta.evictedCount ?? 0}</span>
-    <span class="status-label">Bodies:</span>
-    <span class="status-value">${escapeHtml(meta.bodyCapture || "unknown")}</span>
-  `;
+  const children = [
+    labelSpan("Proxy:"),
+    valueSpan(meta.proxyStatus || "unknown", proxyClass),
+    labelSpan("Entries:"),
+    valueSpan(String(entryCount)),
+    labelSpan("Evicted:"),
+    valueSpan(String(meta.evictedCount ?? 0)),
+    labelSpan("Bodies:"),
+    valueSpan(meta.bodyCapture || "unknown"),
+  ];
+  statusEl.replaceChildren(...children);
   statusEl.hidden = false;
+}
+
+function labelSpan(text) {
+  const span = document.createElement("span");
+  span.className = "status-label";
+  span.textContent = text;
+  return span;
+}
+
+function valueSpan(text, cls = "status-value") {
+  const span = document.createElement("span");
+  span.className = cls;
+  span.textContent = text;
+  return span;
 }
 
 function truncate(s, max) {
@@ -184,15 +206,6 @@ function truncate(s, max) {
   const base = q >= 0 ? s.slice(0, q) : s;
   if (base.length <= max) return `${base}\u2026`;
   return `${base.slice(0, max - 1)}\u2026`;
-}
-
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }
 
 function startPolling() {

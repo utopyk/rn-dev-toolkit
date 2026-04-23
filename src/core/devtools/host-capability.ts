@@ -31,7 +31,41 @@ import type {
 } from "./types.js";
 
 export const DEVTOOLS_CAPABILITY_ID = "devtools" as const;
+
+/**
+ * Legacy umbrella permission. Retained as the registry's baseline so the
+ * v1 manifest shape keeps working; `host-rpc`'s alias expansion widens it
+ * to `devtools:capture:read + :mutate` for the grace period. Third-party
+ * modules shipping against Phase 10+ should declare the granular
+ * permissions directly — `DEVTOOLS_CAPABILITY_READ_PERMISSION` and/or
+ * `DEVTOOLS_CAPABILITY_MUTATE_PERMISSION`.
+ */
 export const DEVTOOLS_CAPABILITY_PERMISSION = "devtools:capture" as const;
+
+/** Required to `status()` / `list()` / `get()` — read-only access. */
+export const DEVTOOLS_CAPABILITY_READ_PERMISSION =
+  "devtools:capture:read" as const;
+
+/**
+ * Required to `clear()` / `selectTarget()` — mutates the capture buffer
+ * or switches the CDP target for every subscriber on the worktree.
+ */
+export const DEVTOOLS_CAPABILITY_MUTATE_PERMISSION =
+  "devtools:capture:mutate" as const;
+
+/**
+ * Per-method permission map. Registered alongside the capability so the
+ * host-rpc layer can do the second-level check without the capability
+ * impl knowing about the caller. Keyed by the method names on
+ * `DevtoolsHostCapability`.
+ */
+export const DEVTOOLS_METHOD_PERMISSIONS: Readonly<Record<string, string>> = {
+  status: DEVTOOLS_CAPABILITY_READ_PERMISSION,
+  list: DEVTOOLS_CAPABILITY_READ_PERMISSION,
+  get: DEVTOOLS_CAPABILITY_READ_PERMISSION,
+  selectTarget: DEVTOOLS_CAPABILITY_MUTATE_PERMISSION,
+  clear: DEVTOOLS_CAPABILITY_MUTATE_PERMISSION,
+};
 
 export interface DevtoolsListArgs {
   worktreeKey?: string;

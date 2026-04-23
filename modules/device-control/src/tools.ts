@@ -99,16 +99,26 @@ async function resolvePlatform(
 // screenshot / tap / swipe / type / launch / logs / install / uninstall
 // ---------------------------------------------------------------------------
 
+export interface ScreenshotArgs {
+  udid: string;
+}
+
 export async function screenshot(
-  args: { udid: string },
+  args: ScreenshotArgs,
   deps: ToolDeps,
 ): Promise<{ pngBase64: string }> {
   const adapter = await adapterFor(args.udid, deps);
   return adapter.screenshot(args.udid);
 }
 
+export interface TapArgs {
+  udid: string;
+  x: number;
+  y: number;
+}
+
 export async function tap(
-  args: { udid: string; x: number; y: number },
+  args: TapArgs,
   deps: ToolDeps,
 ): Promise<{ ok: true }> {
   const adapter = await adapterFor(args.udid, deps);
@@ -116,15 +126,17 @@ export async function tap(
   return { ok: true };
 }
 
+export interface SwipeArgs {
+  udid: string;
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  durationMs?: number;
+}
+
 export async function swipe(
-  args: {
-    udid: string;
-    x1: number;
-    y1: number;
-    x2: number;
-    y2: number;
-    durationMs?: number;
-  },
+  args: SwipeArgs,
   deps: ToolDeps,
 ): Promise<{ ok: true }> {
   const adapter = await adapterFor(args.udid, deps);
@@ -132,8 +144,13 @@ export async function swipe(
   return { ok: true };
 }
 
+export interface TypeTextArgs {
+  udid: string;
+  text: string;
+}
+
 export async function typeText(
-  args: { udid: string; text: string },
+  args: TypeTextArgs,
   deps: ToolDeps,
 ): Promise<{ ok: true }> {
   const adapter = await adapterFor(args.udid, deps);
@@ -141,34 +158,42 @@ export async function typeText(
   return { ok: true };
 }
 
+export interface LaunchAppArgs {
+  udid: string;
+  applicationId?: string;
+  bundleId?: string;
+}
+
 export async function launchApp(
-  args: { udid: string; applicationId?: string; bundleId?: string },
+  args: LaunchAppArgs,
   deps: ToolDeps,
 ): Promise<{ ok: true }> {
   const adapter = await adapterFor(args.udid, deps);
-  const appId =
-    adapter.platform === "android" ? args.applicationId : args.bundleId;
-  if (!appId) {
-    throw new Error(
-      adapter.platform === "android"
-        ? "launch-app requires { applicationId } for Android devices"
-        : "launch-app requires { bundleId } for iOS devices",
-    );
-  }
+  const appId = resolveAppId(adapter, args, "launch-app");
   await adapter.launchApp(args.udid, appId);
   return { ok: true };
 }
 
+export interface LogsTailArgs {
+  udid: string;
+  lines?: number;
+}
+
 export async function logsTail(
-  args: { udid: string; lines?: number },
+  args: LogsTailArgs,
   deps: ToolDeps,
 ): Promise<{ lines: string[] }> {
   const adapter = await adapterFor(args.udid, deps);
   return adapter.logsTail(args.udid, args.lines ?? 200);
 }
 
+export interface InstallApkArgs {
+  udid: string;
+  apkPath: string;
+}
+
 export async function installApk(
-  args: { udid: string; apkPath: string },
+  args: InstallApkArgs,
   deps: ToolDeps,
 ): Promise<{ ok: true }> {
   const adapter = await adapterFor(args.udid, deps);
@@ -179,20 +204,41 @@ export async function installApk(
   return { ok: true };
 }
 
+export interface UninstallAppArgs {
+  udid: string;
+  applicationId?: string;
+  bundleId?: string;
+}
+
 export async function uninstallApp(
-  args: { udid: string; applicationId?: string; bundleId?: string },
+  args: UninstallAppArgs,
   deps: ToolDeps,
 ): Promise<{ ok: true }> {
   const adapter = await adapterFor(args.udid, deps);
+  const appId = resolveAppId(adapter, args, "uninstall-app");
+  await adapter.uninstallApp(args.udid, appId);
+  return { ok: true };
+}
+
+/**
+ * Pick the right app identifier field for the adapter's platform and
+ * throw a platform-specific error when it's missing. Shared between
+ * launchApp + uninstallApp (Phase 10 P2-9 — Simplicity P1-5 from
+ * Phase 7 review).
+ */
+function resolveAppId(
+  adapter: DeviceAdapter,
+  args: { applicationId?: string; bundleId?: string },
+  toolName: string,
+): string {
   const appId =
     adapter.platform === "android" ? args.applicationId : args.bundleId;
   if (!appId) {
     throw new Error(
       adapter.platform === "android"
-        ? "uninstall-app requires { applicationId } for Android devices"
-        : "uninstall-app requires { bundleId } for iOS devices",
+        ? `${toolName} requires { applicationId } for Android devices`
+        : `${toolName} requires { bundleId } for iOS devices`,
     );
   }
-  await adapter.uninstallApp(args.udid, appId);
-  return { ok: true };
+  return appId;
 }

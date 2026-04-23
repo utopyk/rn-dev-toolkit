@@ -1,4 +1,10 @@
-export { ModuleRegistry } from "./registry.js";
+export {
+  ModuleRegistry,
+  SENSITIVE_PERMISSION_PREFIXES,
+  isSensitivePermission,
+  S6_WARNING_PATTERN,
+  S6_WARNING_EXAMPLE,
+} from "./registry.js";
 export { devSpaceModule } from "./built-in/dev-space.js";
 export { settingsModule } from "./built-in/settings.js";
 export { lintTestModule } from "./built-in/lint-test.js";

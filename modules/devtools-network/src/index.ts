@@ -19,7 +19,7 @@
 
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   runModule,
   type ModuleManifest,
@@ -137,11 +137,16 @@ async function loadManifest(entryDir: string): Promise<ModuleManifest> {
   return JSON.parse(raw) as ModuleManifest;
 }
 
+// Canonical Node-ESM idiom: compare the file:// URL of our own module
+// against the CLI-entry path. Phase 10 P3-16 — replaces the regex-on-
+// argv[1] check from the initial extraction. Works no matter where the
+// module is relocated; the old check hard-coded "devtools-network" as
+// a path segment.
 const invokedAsEntry =
   typeof process !== "undefined" &&
   Array.isArray(process.argv) &&
   typeof process.argv[1] === "string" &&
-  /devtools-network[\\/](dist|src)[\\/]index\.(js|ts)$/.test(process.argv[1]);
+  import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (invokedAsEntry) {
   const entryDir = dirname(fileURLToPath(import.meta.url));

@@ -53,7 +53,7 @@ describe("bootstrapElectronModuleSystem", () => {
     expect(publishedBus).toBe(result.moduleEvents);
   });
 
-  it("registers the four built-in manifests + Marketplace on the registry", async () => {
+  it("registers the built-in manifests + Marketplace on the registry", async () => {
     const { bootstrapElectronModuleSystem } = await loadBootstrapFreshModule();
     const result = bootstrapElectronModuleSystem({ worktreeKey: "wt-test" });
 
@@ -62,7 +62,7 @@ describe("bootstrapElectronModuleSystem", () => {
       .map((m) => m.manifest.id)
       .sort();
     expect(ids).toEqual(
-      ["dev-space", "lint-test", "marketplace", "metro-logs", "settings"].sort(),
+      ["dev-space", "lint-test", "marketplace", "settings"].sort(),
     );
     for (const reg of result.moduleRegistry.getAllManifests()) {
       expect(reg.kind).toBe("built-in-privileged");

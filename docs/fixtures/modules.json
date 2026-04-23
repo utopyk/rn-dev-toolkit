@@ -20,6 +20,16 @@
       "author": "rn-dev",
       "permissions": ["devtools:capture"],
       "homepage": "https://github.com/rn-dev/rn-dev-modules/tree/main/devtools-network"
+    },
+    {
+      "id": "metro-logs",
+      "npmPackage": "@rn-dev-modules/metro-logs",
+      "version": "0.1.0",
+      "tarballSha256": "7712ee1b2a78cd0dd348a74e102ba41c16e009c9287fdb9433871386bc32e710",
+      "description": "Agent-native Metro bundler log capture — tail, filter, and clear Metro stdout/stderr over MCP.",
+      "author": "rn-dev",
+      "permissions": ["metro:logs:read", "metro:logs:mutate"],
+      "homepage": "https://github.com/rn-dev/rn-dev-modules/tree/main/metro-logs"
     }
   ]
 }

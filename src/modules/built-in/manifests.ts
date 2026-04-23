@@ -26,35 +26,6 @@ export const devSpaceManifest: ModuleManifest = {
   activationEvents: ["onStartup"],
 };
 
-export const metroLogsManifest: ModuleManifest = {
-  id: "metro-logs",
-  version: "0.1.0",
-  hostRange: ">=0.1.0",
-  scope: "global",
-  contributes: {
-    tui: {
-      views: [{ id: "metro-logs", title: "Metro Logs", icon: "\ud83d\udce1" }],
-    },
-    config: {
-      schema: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          follow: {
-            type: "boolean",
-            description: "Auto-scroll the log viewer as new lines arrive.",
-          },
-          filter: {
-            type: "string",
-            description: "Substring filter applied to each log line.",
-          },
-        },
-      },
-    },
-  },
-  activationEvents: ["onStartup"],
-};
-
 export const lintTestManifest: ModuleManifest = {
   id: "lint-test",
   version: "0.1.0",

@@ -23,7 +23,6 @@ import { ModuleRegistry } from "./registry.js";
 import {
   devSpaceManifest,
   lintTestManifest,
-  metroLogsManifest,
   settingsManifest,
 } from "./built-in/manifests.js";
 import { registerMarketplaceBuiltIn } from "./built-in/marketplace.js";
@@ -98,7 +97,6 @@ export function createModuleSystem(opts: CreateModuleSystemOptions): ModuleSyste
 
   const moduleRegistry = opts.moduleRegistry ?? new ModuleRegistry();
   moduleRegistry.registerBuiltIn(devSpaceManifest);
-  moduleRegistry.registerBuiltIn(metroLogsManifest);
   moduleRegistry.registerBuiltIn(lintTestManifest);
   moduleRegistry.registerBuiltIn(settingsManifest);
   registerMarketplaceBuiltIn({ moduleRegistry, capabilities });

@@ -1,5 +1,5 @@
 import { execSync } from "child_process";
-import { existsSync, readFileSync, readdirSync } from "fs";
+import { existsSync } from "fs";
 import { join } from "path";
 import type { ProfileStore } from "../core/profile.js";
 import type { ArtifactStore } from "../core/artifact.js";
@@ -19,7 +19,11 @@ import { CleanManager } from "../core/clean.js";
  * CLI-driven flags for MCP server. Phase 9 removed the built-in
  * devtools-network surface (`--enable-devtools-mcp` / `--mcp-capture-bodies`);
  * that functionality now ships via `@rn-dev-modules/devtools-network` with
- * `captureBodies` as a per-module config value.
+ * `captureBodies` as a per-module config value. Phase 11 retired the
+ * legacy `rn-dev/metro-logs` tool (reading `.rn-dev/logs/*.log` from
+ * disk); that surface now lives on the `@rn-dev-modules/metro-logs`
+ * module and reads from the in-memory ring buffer via the `metro-logs`
+ * host capability.
  */
 export interface McpFlags {
   /**
@@ -99,6 +103,59 @@ function detectPm(projectRoot: string): "npm" | "yarn" | "pnpm" {
   if (existsSync(join(projectRoot, "yarn.lock"))) return "yarn";
   if (existsSync(join(projectRoot, "pnpm-lock.yaml"))) return "pnpm";
   return "npm";
+}
+
+// ---------------------------------------------------------------------------
+// modules-available — shape + guards
+//
+// Phase 11 Kieran P2-c — validate every field we project out of the
+// `marketplace/list` reply rather than dropping `Record<string, unknown>`
+// straight onto the MCP wire. The reply is typed upstream, but this
+// seam crosses from host IPC → MCP output, and a schema drift must
+// not leak undefined fields to agent consumers. Missing required
+// fields → entire entry dropped; missing optional fields → omitted.
+// ---------------------------------------------------------------------------
+
+interface ModulesAvailableEntry {
+  id: string;
+  description: string;
+  permissions: string[];
+  installed: boolean;
+  author?: string;
+  version?: string;
+  homepage?: string;
+  installedVersion?: string;
+  installedState?: string;
+}
+
+function toAvailableEntry(raw: unknown): ModulesAvailableEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r["id"] !== "string" || r["id"].length === 0) return null;
+  if (typeof r["description"] !== "string") return null;
+  if (typeof r["installed"] !== "boolean") return null;
+  const permsRaw = r["permissions"];
+  if (!Array.isArray(permsRaw)) return null;
+  const permissions = permsRaw.filter(
+    (p): p is string => typeof p === "string",
+  );
+  if (permissions.length !== permsRaw.length) return null;
+  const out: ModulesAvailableEntry = {
+    id: r["id"],
+    description: r["description"],
+    permissions,
+    installed: r["installed"],
+  };
+  if (typeof r["author"] === "string") out.author = r["author"];
+  if (typeof r["version"] === "string") out.version = r["version"];
+  if (typeof r["homepage"] === "string") out.homepage = r["homepage"];
+  if (typeof r["installedVersion"] === "string") {
+    out.installedVersion = r["installedVersion"];
+  }
+  if (typeof r["installedState"] === "string") {
+    out.installedState = r["installedState"];
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,48 +371,6 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
           }
         }
         return { status: "not-running" };
-      },
-    },
-    {
-      name: "rn-dev/metro-logs",
-      description: "Get recent Metro log output",
-      inputSchema: {
-        type: "object",
-        properties: {
-          lines: {
-            type: "number",
-            description: "Number of recent lines (default 50)",
-          },
-        },
-      },
-      handler: async (args) => {
-        const numLines = (args.lines as number) ?? 50;
-        const logsDir = join(ctx.projectRoot, ".rn-dev", "logs");
-
-        if (!existsSync(logsDir)) {
-          return { error: "No log directory found", lines: [] };
-        }
-
-        try {
-          const files = readdirSync(logsDir)
-            .filter((f) => f.startsWith("metro-") && f.endsWith(".log"))
-            .sort()
-            .reverse();
-
-          if (files.length === 0) {
-            return { lines: [], message: "No metro log files found" };
-          }
-
-          const content = readFileSync(join(logsDir, files[0]), "utf-8");
-          const allLines = content.split("\n").filter((l) => l.trim());
-          const recent = allLines.slice(-numLines);
-          return { lines: recent, file: files[0] };
-        } catch (err) {
-          return {
-            error: err instanceof Error ? err.message : String(err),
-            lines: [],
-          };
-        }
       },
     },
     // Build & Clean
@@ -1135,8 +1150,13 @@ function buildModulesLifecycleTools(ctx: McpContext): ToolDefinition[] {
             ],
           };
         }
+        // Phase 11 Kieran P2-c — tighten payload parsing. The IPC payload
+        // is typed as `Record<string, unknown>` on the wire; a rogue
+        // daemon reply (or a schema drift we haven't noticed) must not
+        // leak undefined fields into the MCP output. Guard every field
+        // and drop entries that fail the shape check.
         const rawEntries = Array.isArray(payload["entries"])
-          ? (payload["entries"] as Array<Record<string, unknown>>)
+          ? (payload["entries"] as unknown[])
           : [];
         const filter =
           typeof args?.["filter"] === "string"
@@ -1144,30 +1164,25 @@ function buildModulesLifecycleTools(ctx: McpContext): ToolDefinition[] {
             : "";
         const installedOnly = args?.["installedOnly"] === true;
         const entries = rawEntries
+          .map((raw): ModulesAvailableEntry | null => toAvailableEntry(raw))
+          .filter((e): e is ModulesAvailableEntry => e !== null)
           .filter((e) => {
-            if (installedOnly && e["installed"] !== true) return false;
+            if (installedOnly && !e.installed) return false;
             if (!filter) return true;
-            const id = typeof e["id"] === "string" ? e["id"].toLowerCase() : "";
-            const desc =
-              typeof e["description"] === "string"
-                ? (e["description"] as string).toLowerCase()
-                : "";
-            return id.includes(filter) || desc.includes(filter);
-          })
-          .map((e) => ({
-            id: e["id"],
-            description: e["description"],
-            author: e["author"],
-            version: e["version"],
-            permissions: e["permissions"],
-            homepage: e["homepage"],
-            installed: e["installed"],
-            installedVersion: e["installedVersion"],
-            installedState: e["installedState"],
-          }));
+            return (
+              e.id.toLowerCase().includes(filter) ||
+              e.description.toLowerCase().includes(filter)
+            );
+          });
         return okResult({
-          registryUrl: payload["registryUrl"],
-          registrySha256: payload["registrySha256"],
+          registryUrl:
+            typeof payload["registryUrl"] === "string"
+              ? payload["registryUrl"]
+              : undefined,
+          registrySha256:
+            typeof payload["registrySha256"] === "string"
+              ? payload["registrySha256"]
+              : undefined,
           entries,
         });
       },

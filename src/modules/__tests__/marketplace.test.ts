@@ -8,7 +8,7 @@ import {
 } from "../built-in/marketplace.js";
 import {
   devSpaceManifest,
-  metroLogsManifest,
+  lintTestManifest,
 } from "../built-in/manifests.js";
 import { ModuleRegistry } from "../registry.js";
 import type { MarketplaceCapability } from "../built-in/marketplace.js";
@@ -17,12 +17,12 @@ describe("marketplace — createMarketplaceCapability", () => {
   it("list() mirrors the module registry — built-ins surface with kind built-in-privileged", () => {
     const registry = new ModuleRegistry();
     registry.registerBuiltIn(devSpaceManifest);
-    registry.registerBuiltIn(metroLogsManifest);
+    registry.registerBuiltIn(lintTestManifest);
 
     const cap = createMarketplaceCapability(registry);
     const list = cap.list();
 
-    expect(list.map((e) => e.id).sort()).toEqual(["dev-space", "metro-logs"]);
+    expect(list.map((e) => e.id).sort()).toEqual(["dev-space", "lint-test"]);
     expect(list.every((e) => e.kind === "built-in-privileged")).toBe(true);
     expect(list.every((e) => e.isBuiltIn)).toBe(true);
     expect(list.every((e) => e.state === "active")).toBe(true);

@@ -9,6 +9,13 @@ import { ProfileStore } from "../core/profile.js";
 import { ArtifactStore } from "../core/artifact.js";
 import { MetroManager } from "../core/metro.js";
 import { DevToolsManager } from "../core/devtools.js";
+import { MetroLogsStore } from "../core/metro-logs/buffer.js";
+import {
+  METRO_LOGS_CAPABILITY_ID,
+  METRO_LOGS_CAPABILITY_READ_PERMISSION,
+  METRO_LOGS_METHOD_PERMISSIONS,
+  createMetroLogsHostCapability,
+} from "../core/metro-logs/host-capability.js";
 import { CleanManager } from "../core/clean.js";
 import { FileWatcher } from "../core/watcher.js";
 import { IpcServer } from "../core/ipc.js";
@@ -27,7 +34,6 @@ import {
   devSpaceModule,
   settingsModule,
   lintTestModule,
-  metroLogsModule,
   isSensitivePermission,
 } from "../modules/index.js";
 import {
@@ -88,7 +94,6 @@ export async function startFlow(options: StartOptions): Promise<void> {
   const registry = new ModuleRegistry();
   registry.register(devSpaceModule);
   registry.register(lintTestModule);
-  registry.register(metroLogsModule);
   registry.register(settingsModule);
 
   // 6. Determine if we need the wizard
@@ -483,6 +488,23 @@ async function startServicesAsync(
 
   // 7. Start Metro
   emit(`\u23f3 Starting Metro on port ${port}...`);
+
+  // 7a. Metro log ring buffer — backs the metro-logs 3p module's host
+  // capability. Must be attached BEFORE `metro.start()` so the very first
+  // log event from Metro lands in the ring. Status events bump the
+  // buffer epoch on restart so agent cursors don't bleed across
+  // sessions. The store owns the status vocabulary — `setMetroStatus`
+  // normalizes a raw string via an internal `Set`, closing the
+  // prototype-walk hole a plain `Record<string, ...>` lookup would
+  // have (Phase 11 Security review P1).
+  const metroLogsStore = new MetroLogsStore();
+  metro.on("log", (event: { worktreeKey: string; line: string; stream: "stdout" | "stderr" }) => {
+    metroLogsStore.append(event.worktreeKey, event.stream, event.line);
+  });
+  metro.on("status", (event: { worktreeKey: string; status: string }) => {
+    metroLogsStore.setMetroStatus(event.worktreeKey, event.status);
+  });
+
   metro.start({
     worktreeKey,
     projectRoot: effectiveRoot,
@@ -542,6 +564,7 @@ async function startServicesAsync(
     metro,
     artifactStore,
     devtools,
+    metroLogsStore,
     worktreeKey,
   });
   const { moduleHost } = createModuleSystem({
@@ -577,7 +600,7 @@ async function startServicesAsync(
     );
     if (sensitive.length > 0) {
       emit(
-        `⚠ Module "${mod.manifest.id}" holds sensitive permission${sensitive.length === 1 ? "" : "s"}: ${sensitive.join(", ")} — traffic and device capture may be exposed over MCP.`,
+        `⚠ Module "${mod.manifest.id}" holds sensitive permission${sensitive.length === 1 ? "" : "s"}: ${sensitive.join(", ")} — untrusted external content (network traffic, device output, Metro log lines) may be exposed over MCP.`,
       );
     }
   }
@@ -628,11 +651,20 @@ interface HostCapabilityDeps {
   metro: MetroManager;
   artifactStore: ArtifactStore;
   devtools: DevToolsManager;
+  metroLogsStore: MetroLogsStore;
   worktreeKey: string;
 }
 
 function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry {
   const capabilities = new CapabilityRegistry();
+  // TODO(phase-12): wrap `deps.metro` in a typed host-capability
+  // façade like `metro-logs` and `devtools` do, instead of handing
+  // the raw `MetroManager` to 3p modules. A module with
+  // `exec:react-native` currently reaches every public method on the
+  // class (start / stop / killProcessOnPort / the EventEmitter
+  // surface). The other two capabilities hide this behind a purpose-
+  // built interface; `metro` is the outlier. Flagged in Phase 11
+  // Architecture review P1-A.
   capabilities.register("metro", deps.metro, {
     requiredPermission: "exec:react-native",
   });
@@ -645,6 +677,14 @@ function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry 
     {
       requiredPermission: DEVTOOLS_CAPABILITY_READ_PERMISSION,
       methodPermissions: DEVTOOLS_METHOD_PERMISSIONS,
+    },
+  );
+  capabilities.register(
+    METRO_LOGS_CAPABILITY_ID,
+    createMetroLogsHostCapability(deps.metroLogsStore, deps.worktreeKey),
+    {
+      requiredPermission: METRO_LOGS_CAPABILITY_READ_PERMISSION,
+      methodPermissions: METRO_LOGS_METHOD_PERMISSIONS,
     },
   );
   return capabilities;

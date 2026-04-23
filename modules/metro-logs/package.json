@@ -1,0 +1,22 @@
+{
+  "name": "@rn-dev-modules/metro-logs",
+  "version": "0.1.0",
+  "description": "Agent-native Metro bundler log capture — tail, filter, and clear Metro stdout/stderr over MCP.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "files": [
+    "dist/",
+    "panel/",
+    "rn-dev-module.json"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@rn-dev/module-sdk": "*"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

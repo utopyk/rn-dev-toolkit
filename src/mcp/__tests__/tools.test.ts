@@ -62,9 +62,9 @@ function makeMockIpcClient(
 // ---------------------------------------------------------------------------
 
 describe("createToolDefinitions()", () => {
-  it("returns 31 tool definitions (23 legacy + 5 modules/* lifecycle + 2 modules/config/* + modules-available)", () => {
+  it("returns 30 tool definitions (22 legacy + 5 modules/* lifecycle + 2 modules/config/* + modules-available; Phase 11 retired legacy `rn-dev/metro-logs`)", () => {
     const tools = createToolDefinitions(makeMockContext());
-    expect(tools).toHaveLength(31);
+    expect(tools).toHaveLength(30);
   });
 
   it("each tool has name, description, inputSchema, and handler", () => {
@@ -158,7 +158,6 @@ describe("createToolDefinitions()", () => {
       "rn-dev/reload",
       "rn-dev/dev-menu",
       "rn-dev/metro-status",
-      "rn-dev/metro-logs",
       "rn-dev/clean",
       "rn-dev/build",
       "rn-dev/install-deps",
@@ -332,6 +331,74 @@ describe("createToolDefinitions()", () => {
       const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
 
       const result = (await tool.handler({ installedOnly: true })) as ToolResult;
+      const body = result.structuredContent as {
+        entries: Array<Record<string, unknown>>;
+      };
+      expect(body.entries).toHaveLength(1);
+      expect(body.entries[0]?.["id"]).toBe("devtools-network");
+    });
+
+    it("surfaces a metro-logs entry (Phase 11 agent-native discoverability regression)", async () => {
+      // After Phase 11, metro-logs is an installable 3p module — agents
+      // must be able to find it via modules-available so they can prompt
+      // the user to install without guessing package names.
+      const withMetroLogs = {
+        ...marketplacePayload,
+        entries: [
+          ...marketplacePayload.entries,
+          {
+            id: "metro-logs",
+            description:
+              "Agent-native Metro bundler log capture — tail, filter, and clear Metro stdout/stderr over MCP.",
+            author: "rn-dev",
+            version: "0.1.0",
+            permissions: ["metro:logs:read", "metro:logs:mutate"],
+            tarballSha256: "c".repeat(64),
+            npmPackage: "@rn-dev-modules/metro-logs",
+            homepage: "https://example.invalid/ml",
+            installed: false,
+          },
+        ],
+      };
+      const ctx = makeMockContext({
+        ipcClient: makeMockIpcClient(() => withMetroLogs),
+      });
+      const tools = createToolDefinitions(ctx);
+      const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
+
+      const result = (await tool.handler({ filter: "metro" })) as ToolResult;
+      const body = result.structuredContent as {
+        entries: Array<Record<string, unknown>>;
+      };
+      expect(body.entries).toHaveLength(1);
+      expect(body.entries[0]).toMatchObject({
+        id: "metro-logs",
+        installed: false,
+        permissions: ["metro:logs:read", "metro:logs:mutate"],
+      });
+    });
+
+    it("drops entries that fail the shape guard (Phase 11 Kieran P2-c)", async () => {
+      const malformed = {
+        ...marketplacePayload,
+        entries: [
+          marketplacePayload.entries[0], // valid devtools-network
+          { id: 42, description: "bad id type" }, // dropped: id not a string
+          { id: "no-perms", description: "missing permissions" }, // dropped: no permissions
+          {
+            id: "mixed-perms",
+            description: "permissions has a non-string",
+            permissions: ["exec:adb", 7],
+            installed: false,
+          }, // dropped: non-string permission
+        ],
+      };
+      const ctx = makeMockContext({
+        ipcClient: makeMockIpcClient(() => malformed),
+      });
+      const tools = createToolDefinitions(ctx);
+      const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
+      const result = (await tool.handler({})) as ToolResult;
       const body = result.structuredContent as {
         entries: Array<Record<string, unknown>>;
       };

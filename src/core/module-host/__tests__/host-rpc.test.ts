@@ -1,13 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import type { ModuleManifest } from "@rn-dev/module-sdk";
-import { CapabilityRegistry } from "../capabilities.js";
-import { ModuleRpc } from "../rpc.js";
 import {
-  attachHostRpc,
-  HostRpcErrorCode,
+  CapabilityRegistry,
   resetPermissionAliasWarningsForTests,
-} from "../host-rpc.js";
+} from "../capabilities.js";
+import { ModuleRpc } from "../rpc.js";
+import { attachHostRpc, HostRpcErrorCode } from "../host-rpc.js";
 
 // ---------------------------------------------------------------------------
 // Harness — in-memory host/module rpc pair (matches rpc.test.ts)

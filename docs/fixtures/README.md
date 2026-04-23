@@ -5,8 +5,11 @@ Local stand-ins for the curated `modules.json` registry while the
 
 ## Files
 
-- `modules.json` — one-entry registry pointing at `device-control`.
+- `modules.json` — registry pointing at `device-control`,
+  `devtools-network`, and `metro-logs`.
 - `device-control-0.1.0.tgz` — packed `@rn-dev-modules/device-control` tarball.
+- `devtools-network-0.1.0.tgz` — packed `@rn-dev-modules/devtools-network` tarball.
+- `metro-logs-0.1.0.tgz` — packed `@rn-dev-modules/metro-logs` tarball.
 
 ## Smoke-testing the install flow
 

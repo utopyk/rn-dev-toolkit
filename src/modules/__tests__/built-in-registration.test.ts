@@ -6,7 +6,6 @@ import {
 import {
   devSpaceManifest,
   lintTestManifest,
-  metroLogsManifest,
   settingsManifest,
 } from "../built-in/manifests.js";
 import type { ModuleManifest } from "@rn-dev/module-sdk";
@@ -23,9 +22,9 @@ describe("registerBuiltIn — stamps kind + sentinel path + isBuiltIn", () => {
 
   it("sets modulePath to the <built-in:<id>> sentinel", () => {
     const registry = new ModuleRegistry();
-    const registered = registry.registerBuiltIn(metroLogsManifest);
+    const registered = registry.registerBuiltIn(settingsManifest);
 
-    expect(registered.modulePath).toBe(builtInModulePath("metro-logs"));
+    expect(registered.modulePath).toBe(builtInModulePath("settings"));
     // Arch #4 — consumers now branch on `kind`, not on the modulePath string.
     // The sentinel remains for display; the predicate has been removed.
     expect(registered.kind).toBe("built-in-privileged");
@@ -82,27 +81,27 @@ describe("registerBuiltIn — stamps kind + sentinel path + isBuiltIn", () => {
 });
 
 describe("built-in manifests — shape + contributes blocks", () => {
-  it("each of the 4 existing built-ins registers without error", () => {
+  it("each of the 3 existing built-ins registers without error", () => {
+    // Phase 11: `metro-logs` moved out of built-ins into the
+    // `@rn-dev-modules/metro-logs` 3p module — the three remaining
+    // built-ins below are the ones kept in-process for Phase 11+.
     const registry = new ModuleRegistry();
     registry.registerBuiltIn(devSpaceManifest);
-    registry.registerBuiltIn(metroLogsManifest);
     registry.registerBuiltIn(lintTestManifest);
     registry.registerBuiltIn(settingsManifest);
 
     expect(
       registry.getAllManifests().map((m) => m.manifest.id).sort(),
-    ).toEqual(["dev-space", "lint-test", "metro-logs", "settings"]);
+    ).toEqual(["dev-space", "lint-test", "settings"]);
   });
 
-  it("metro-logs + settings contribute a config schema", () => {
-    expect(metroLogsManifest.contributes?.config?.schema).toBeDefined();
+  it("settings contributes a config schema", () => {
     expect(settingsManifest.contributes?.config?.schema).toBeDefined();
   });
 
   it("every built-in contributes a TUI view keyed by the module id", () => {
     const manifests = [
       devSpaceManifest,
-      metroLogsManifest,
       lintTestManifest,
       settingsManifest,
     ];

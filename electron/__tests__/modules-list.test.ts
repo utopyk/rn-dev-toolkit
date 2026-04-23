@@ -12,7 +12,6 @@ import { ModuleRegistry } from "../../src/modules/registry.js";
 import { listRows } from "../../src/app/modules-ipc.js";
 import {
   devSpaceManifest,
-  metroLogsManifest,
   lintTestManifest,
   settingsManifest,
 } from "../../src/modules/built-in/manifests.js";
@@ -22,7 +21,6 @@ function setupDeps() {
   const capabilities = new CapabilityRegistry();
   const registry = new ModuleRegistry();
   registry.registerBuiltIn(devSpaceManifest);
-  registry.registerBuiltIn(metroLogsManifest);
   registry.registerBuiltIn(lintTestManifest);
   registry.registerBuiltIn(settingsManifest);
   registerMarketplaceBuiltIn({ moduleRegistry: registry, capabilities });
@@ -39,7 +37,7 @@ describe("listRows (modules:list projection)", () => {
     const rows = listRows({ registry, manager });
     const ids = rows.map((r) => r.id).sort();
     expect(ids).toEqual(
-      ["dev-space", "lint-test", "marketplace", "metro-logs", "settings"].sort(),
+      ["dev-space", "lint-test", "marketplace", "settings"].sort(),
     );
   });
 

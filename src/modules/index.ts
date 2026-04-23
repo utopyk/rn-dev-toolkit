@@ -8,11 +8,9 @@ export {
 export { devSpaceModule } from "./built-in/dev-space.js";
 export { settingsModule } from "./built-in/settings.js";
 export { lintTestModule } from "./built-in/lint-test.js";
-export { metroLogsModule } from "./built-in/metro-logs.js";
 export {
   devSpaceManifest,
   lintTestManifest,
-  metroLogsManifest,
   settingsManifest,
 } from "./built-in/manifests.js";
 export {

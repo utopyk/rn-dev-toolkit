@@ -56,6 +56,13 @@
         "@rn-dev/module-sdk": "*",
       },
     },
+    "modules/metro-logs": {
+      "name": "@rn-dev-modules/metro-logs",
+      "version": "0.1.0",
+      "dependencies": {
+        "@rn-dev/module-sdk": "*",
+      },
+    },
     "packages/module-sdk": {
       "name": "@rn-dev/module-sdk",
       "version": "0.1.0",
@@ -263,6 +270,8 @@
     "@rn-dev-modules/device-control": ["@rn-dev-modules/device-control@workspace:modules/device-control"],
 
     "@rn-dev-modules/devtools-network": ["@rn-dev-modules/devtools-network@workspace:modules/devtools-network"],
+
+    "@rn-dev-modules/metro-logs": ["@rn-dev-modules/metro-logs@workspace:modules/metro-logs"],
 
     "@rn-dev/module-sdk": ["@rn-dev/module-sdk@workspace:packages/module-sdk"],
 

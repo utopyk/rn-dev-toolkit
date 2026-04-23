@@ -3,11 +3,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
+import { AuditLog } from "../audit-log.js";
+// Phase 11 Simplicity P2 — canonicalize + AuditCanonicalizationError
+// live in `../canonicalize.js` now (pure helper, no audit-log coupling).
+// The test-only `_canonicalizeForTests` re-export has been retired.
 import {
   AuditCanonicalizationError,
-  AuditLog,
-  _canonicalizeForTests,
-} from "../audit-log.js";
+  canonicalize,
+} from "../canonicalize.js";
 
 describe("AuditLog", () => {
   let tmp: string;
@@ -240,23 +243,23 @@ describe("AuditLog", () => {
     it("throws AuditCanonicalizationError on a direct self-reference", () => {
       const obj: Record<string, unknown> = { a: 1 };
       obj["self"] = obj;
-      expect(() => _canonicalizeForTests(obj)).toThrow(
+      expect(() => canonicalize(obj)).toThrow(
         AuditCanonicalizationError,
       );
-      expect(() => _canonicalizeForTests(obj)).toThrow(/cycle/);
+      expect(() => canonicalize(obj)).toThrow(/cycle/);
     });
 
     it("throws on an indirect cycle through an array", () => {
       const a: unknown[] = [];
       const b: Record<string, unknown> = { inner: a };
       a.push(b);
-      expect(() => _canonicalizeForTests({ root: a })).toThrow(
+      expect(() => canonicalize({ root: a })).toThrow(
         AuditCanonicalizationError,
       );
     });
 
     it("still works for the non-cyclic shapes canonicalize sees from append()", () => {
-      const out = _canonicalizeForTests({
+      const out = canonicalize({
         b: 2,
         a: [1, { x: "y" }],
       });

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { toDto, toListDto } from "../devtools-dto.js";
-import type { NetworkEntry, CaptureMeta } from "../../core/devtools/types.js";
+import { toDto, toListDto } from "../dto.js";
+import type { NetworkEntry, CaptureMeta } from "../types.js";
 
 const META: CaptureMeta = {
   worktreeKey: "w",
@@ -56,7 +56,7 @@ describe("toDto", () => {
     }
   });
 
-  it("pass-through redacts already-absent bodies (no info leak)", () => {
+  it("pass-through preserves already-absent bodies (no info leak)", () => {
     const entry: NetworkEntry = {
       ...finishedEntry(),
       responseBody: { kind: "absent", reason: "204-or-304" },

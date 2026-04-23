@@ -1,20 +1,12 @@
 import { describe, it, expect } from "vitest";
 import { parseFlags } from "../server.js";
 
-describe("parseFlags — DevTools flags (unchanged)", () => {
+describe("parseFlags — defaults", () => {
   it("defaults every flag to false / empty", () => {
     const flags = parseFlags([]);
-    expect(flags.enableDevtoolsMcp).toBe(false);
-    expect(flags.mcpCaptureBodies).toBe(false);
     expect(flags.enabledModules.size).toBe(0);
     expect(flags.disabledModules.size).toBe(0);
     expect(flags.allowDestructiveTools).toBe(false);
-  });
-
-  it("detects --enable-devtools-mcp and --mcp-capture-bodies", () => {
-    const flags = parseFlags(["--enable-devtools-mcp", "--mcp-capture-bodies"]);
-    expect(flags.enableDevtoolsMcp).toBe(true);
-    expect(flags.mcpCaptureBodies).toBe(true);
   });
 });
 

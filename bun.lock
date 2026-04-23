@@ -44,7 +44,14 @@
     },
     "modules/device-control": {
       "name": "@rn-dev-modules/device-control",
-      "version": "0.0.0",
+      "version": "0.1.0",
+      "dependencies": {
+        "@rn-dev/module-sdk": "*",
+      },
+    },
+    "modules/devtools-network": {
+      "name": "@rn-dev-modules/devtools-network",
+      "version": "0.1.0",
       "dependencies": {
         "@rn-dev/module-sdk": "*",
       },
@@ -254,6 +261,8 @@
     "@pkgjs/parseargs": ["@pkgjs/parseargs@0.11.0", "", {}, "sha512-+1VkjdD0QBLPodGrJUeqarH8VAIvQODIbwh9XpP5Syisf7YoQgsJKPNFoqqLQlu+VQ/tVSshMR6loPMn8U+dPg=="],
 
     "@rn-dev-modules/device-control": ["@rn-dev-modules/device-control@workspace:modules/device-control"],
+
+    "@rn-dev-modules/devtools-network": ["@rn-dev-modules/devtools-network@workspace:modules/devtools-network"],
 
     "@rn-dev/module-sdk": ["@rn-dev/module-sdk@workspace:packages/module-sdk"],
 

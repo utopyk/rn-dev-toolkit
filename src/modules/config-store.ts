@@ -120,12 +120,21 @@ export class ModuleConfigStore {
   /**
    * Atomically write `config` for `moduleId`. Caller is responsible for
    * validation — see `validate()`. Creates the module's root dir if needed.
+   *
+   * Modes: module dir `0o700`, config file `0o600`. Module configs carry
+   * security-sensitive toggles (e.g. `captureBodies`); the file lives
+   * under `~/.rn-dev/modules/<id>/` and must not be world-readable by
+   * default. Best-effort — POSIX only; Windows ACLs are whatever `fs`
+   * gives us there.
    */
   write(moduleId: string, config: Record<string, unknown>): void {
     const path = this.pathFor(moduleId);
-    mkdirSync(dirname(path), { recursive: true });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+    writeFileSync(tmp, `${JSON.stringify(config, null, 2)}\n`, {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
     try {
       renameSync(tmp, path);
     } catch (err) {

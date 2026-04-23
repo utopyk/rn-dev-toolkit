@@ -70,8 +70,6 @@ function makeCtx(socketPath: string): McpContext {
 
 function flags(): McpFlags {
   return {
-    enableDevtoolsMcp: false,
-    mcpCaptureBodies: false,
     enabledModules: new Set(),
     disabledModules: new Set(),
     allowDestructiveTools: false,

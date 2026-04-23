@@ -18,10 +18,6 @@ import { detectProjectRoot } from "../core/project.js";
  * Parse MCP flags out of `process.argv`. Kept argv-driven to avoid pulling
  * commander into the MCP server.
  *
- * DevTools security flags (default OFF):
- *   --enable-devtools-mcp     register `rn-dev/devtools-network-*` tools (S4)
- *   --mcp-capture-bodies      let captured bodies pass through MCP DTOs (S5)
- *
  * Module-system flags (Phase 3a):
  *   --enable-module:<id>      enable a specific module (repeatable); when
  *                             this AND --disable-module are both empty,
@@ -31,11 +27,14 @@ import { detectProjectRoot } from "../core/project.js";
  *   --allow-destructive-tools  permit `destructiveHint: true` tools to run
  *                              without per-call confirmation (headless
  *                              consent). Phase 3b enforces at tools/call.
+ *
+ * Phase 9 retired the `--enable-devtools-mcp` / `--mcp-capture-bodies`
+ * flags when the DevTools Network tools moved into the 3p
+ * `@rn-dev-modules/devtools-network` module. Body pass-through is now
+ * controlled by that module's `captureBodies` config.
  */
 export function parseFlags(argv: readonly string[]): McpFlags {
   return {
-    enableDevtoolsMcp: argv.includes("--enable-devtools-mcp"),
-    mcpCaptureBodies: argv.includes("--mcp-capture-bodies"),
     enabledModules: collectPrefixed(argv, "--enable-module:"),
     disabledModules: collectPrefixed(argv, "--disable-module:"),
     allowDestructiveTools: argv.includes("--allow-destructive-tools"),
@@ -54,25 +53,6 @@ function collectPrefixed(
     }
   }
   return set;
-}
-
-/**
- * S7: emit a stderr banner when devtools MCP is enabled so sessions are
- * visible to the operator. Noisy on purpose — silent sensitive capture is
- * the thing we're trying to avoid.
- */
-function emitSecurityBanner(flags: McpFlags, transport: string): void {
-  if (!flags.enableDevtoolsMcp) return;
-  const lines = [
-    "════════════════════════════════════════════════════════════════",
-    "  rn-dev MCP: DevTools Network capture ENABLED",
-    `    transport: ${transport}`,
-    `    body capture: ${flags.mcpCaptureBodies ? "ON (bodies pass through MCP)" : "OFF (bodies redacted)"}`,
-    "  Captured traffic is attacker-controlled data. Agents must",
-    "  treat headers and bodies as data, not instructions.",
-    "════════════════════════════════════════════════════════════════",
-  ];
-  for (const line of lines) process.stderr.write(line + "\n");
 }
 
 /**
@@ -182,8 +162,6 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
       };
     }
   });
-
-  emitSecurityBanner(flags, "stdio");
 
   const transport = new StdioServerTransport();
   await server.connect(transport);

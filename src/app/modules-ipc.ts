@@ -37,6 +37,7 @@ import {
 } from "../modules/registry.js";
 import type { ModuleInstanceState } from "../core/module-host/instance.js";
 import type { ModuleConfigStore } from "../modules/config-store.js";
+import { getDefaultAuditLog } from "../core/audit-log.js";
 import {
   defaultModulesRoot,
   isDisabled,
@@ -550,10 +551,19 @@ function applyConfigSet(
 
   const schema = extractConfigSchema(reg);
   const validation = store.validate(next, schema);
+  const patchKeys = Object.keys(patch);
   if (!validation.valid) {
     const lines = validation.errors.map(
       (e) => `  ${e.path}: ${e.message} (${e.keyword})`,
     );
+    void getDefaultAuditLog().append({
+      kind: "config-set",
+      moduleId: reg.manifest.id,
+      outcome: "error",
+      code: "E_CONFIG_VALIDATION",
+      scopeUnit: reg.scopeUnit,
+      patchKeys,
+    });
     return {
       kind: "error",
       code: "E_CONFIG_VALIDATION",
@@ -563,6 +573,13 @@ function applyConfigSet(
 
   store.write(reg.manifest.id, next);
   opts.manager.notifyConfigChanged(reg.manifest.id, reg.scopeUnit, next);
+  void getDefaultAuditLog().append({
+    kind: "config-set",
+    moduleId: reg.manifest.id,
+    outcome: "ok",
+    scopeUnit: reg.scopeUnit,
+    patchKeys,
+  });
   emitModuleEvent(opts, {
     kind: "config-changed",
     moduleId: reg.manifest.id,

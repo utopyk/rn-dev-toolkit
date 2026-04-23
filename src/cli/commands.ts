@@ -307,14 +307,6 @@ export function createProgram(): Command {
   program
     .command("mcp")
     .description("Start MCP server (stdio transport)")
-    .option(
-      "--enable-devtools-mcp",
-      "Register rn-dev/devtools-network-* tools (S4). Captured traffic over MCP is powerful — read the security note in the README before enabling."
-    )
-    .option(
-      "--mcp-capture-bodies",
-      "Pass captured request/response bodies through the MCP DTO layer (S5). Without this, bodies are returned redacted even when --enable-devtools-mcp is on. Only meaningful alongside --enable-devtools-mcp."
-    )
     .action(async () => {
       const { startMcpServer } = await import("../mcp/index.js");
       await startMcpServer();

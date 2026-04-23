@@ -61,8 +61,6 @@ function makeFlags(
   overrides: Partial<McpFlags> = {},
 ): McpFlags {
   return {
-    enableDevtoolsMcp: false,
-    mcpCaptureBodies: false,
     enabledModules: new Set<string>(),
     disabledModules: new Set<string>(),
     allowDestructiveTools: false,

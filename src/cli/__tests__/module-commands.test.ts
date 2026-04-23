@@ -16,7 +16,7 @@ function buildProgram(): Command {
 }
 
 describe("registerModuleCommands", () => {
-  it("registers exactly the six Phase 7 sub-commands", () => {
+  it("registers every Phase 7 + Phase 8 sub-command", () => {
     const program = buildProgram();
     const moduleCmd = program.commands.find((c) => c.name() === "module");
     expect(moduleCmd).toBeDefined();
@@ -26,6 +26,7 @@ describe("registerModuleCommands", () => {
       "enable",
       "install",
       "list",
+      "rescan",
       "restart",
       "uninstall",
     ]);

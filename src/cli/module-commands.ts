@@ -146,8 +146,10 @@ export function registerModuleCommands(program: Command): void {
         process.exit(1);
       }
 
-      // Standalone path — no daemon is running, so we install directly
-      // and print a hint about the next startup picking up the module.
+      // Standalone path — no daemon is running, so we install directly.
+      // The module becomes available at the next `rn-dev start`. With a
+      // live daemon, the modules/install IPC above triggers the daemon's
+      // rescan + emits tools/listChanged without restarting.
       const registry = new ModuleRegistry();
       const result = await installModule({
         entry,
@@ -164,7 +166,7 @@ export function registerModuleCommands(program: Command): void {
         `installed ${result.module.manifest.id} v${result.module.manifest.version} at ${result.installPath}`,
       );
       console.log(
-        "note: no daemon was running — start one with `rn-dev start` to load the new module.",
+        "note: no daemon was running — the module will load on the next `rn-dev start`.",
       );
     });
 
@@ -241,6 +243,40 @@ export function registerModuleCommands(program: Command): void {
         process.exit(1);
       }
       console.log(`disabled ${moduleId}`);
+    });
+
+  module
+    .command("rescan")
+    .description(
+      "Rescan ~/.rn-dev/modules/ against the running daemon's registry (diff + sync)",
+    )
+    .action(async () => {
+      const client = await getDaemonClientOrExit();
+      const reply = await send(client, {
+        type: "command",
+        action: "modules/rescan",
+        payload: {},
+        id: newId(),
+      });
+      const payload = reply.payload as {
+        kind?: string;
+        added?: string[];
+        removed?: string[];
+        updated?: string[];
+        rejected?: string[];
+      };
+      if (payload?.kind !== "ok") {
+        console.error("rescan failed");
+        process.exit(1);
+      }
+      const { added = [], removed = [], updated = [], rejected = [] } = payload;
+      console.log(
+        `rescan: +${added.length} added · -${removed.length} removed · ~${updated.length} updated · ${rejected.length} rejected`,
+      );
+      if (added.length > 0) console.log(`  added:   ${added.join(", ")}`);
+      if (removed.length > 0) console.log(`  removed: ${removed.join(", ")}`);
+      if (updated.length > 0) console.log(`  updated: ${updated.join(", ")}`);
+      for (const r of rejected) console.log(`  ${r}`);
     });
 
   module

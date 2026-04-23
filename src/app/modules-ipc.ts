@@ -31,9 +31,9 @@ import type { IpcMessage, IpcServer, IpcMessageEvent } from "../core/ipc.js";
 import type {
   ModuleHostManager,
 } from "../core/module-host/manager.js";
-import type {
+import {
   ModuleRegistry,
-  RegisteredModule,
+  type RegisteredModule,
 } from "../modules/registry.js";
 import type { ModuleInstanceState } from "../core/module-host/instance.js";
 import type { ModuleConfigStore } from "../modules/config-store.js";
@@ -150,6 +150,7 @@ export type ModulesIpcAction =
   | "modules/enable"
   | "modules/disable"
   | "modules/subscribe"
+  | "modules/rescan"
   | "modules/config/get"
   | "modules/config/set"
   | "modules/install"
@@ -165,6 +166,7 @@ const MODULES_ACTIONS: ReadonlySet<string> = new Set<ModulesIpcAction>([
   "modules/enable",
   "modules/disable",
   "modules/subscribe",
+  "modules/rescan",
   "modules/config/get",
   "modules/config/set",
   "modules/install",
@@ -247,6 +249,8 @@ export async function dispatchModulesAction(
         opts,
         msg.payload as ModuleConfigSetRequest,
       );
+    case "modules/rescan":
+      return rescanAction(opts);
     case "modules/install":
       return installAction(opts, msg.payload as ModuleInstallRequest);
     case "modules/uninstall":
@@ -914,6 +918,118 @@ export async function marketplaceInfo(
     installed: existing !== undefined,
     installedVersion: existing?.manifest.version,
     registrySha256: reg.sha256,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// modules/rescan — diff the live ModuleRegistry against a fresh scan of
+// `~/.rn-dev/modules/` + apply adds/removes/updates. Fires `install` /
+// `uninstall` events so MCP + Electron subscribers converge without a
+// daemon restart — closes the loop Phase 7's CLI install opened.
+// ---------------------------------------------------------------------------
+
+export interface ModuleRescanResult {
+  kind: "ok";
+  /** Module ids, sorted — platform-stable order across filesystems. */
+  added: string[];
+  removed: string[];
+  updated: string[];
+  /** `"${path}: ${code} - ${message}"` per rejected manifest. */
+  rejected: string[];
+}
+
+export async function rescanAction(
+  opts: ModulesIpcOptions,
+): Promise<ModuleRescanResult> {
+  const scopeUnit = opts.scopeUnit ?? "global";
+  const hostVersion = opts.hostVersion ?? "0.0.0";
+  const scan = ModuleRegistry.scanUserGlobalModules({
+    hostVersion,
+    scopeUnit,
+    ...(opts.modulesDir !== undefined ? { modulesDir: opts.modulesDir } : {}),
+  });
+
+  const onDisk = new Map<string, RegisteredModule>();
+  for (const m of scan.modules) onDisk.set(m.manifest.id, m);
+
+  const registered = new Map<string, RegisteredModule>();
+  for (const m of opts.registry.getAllManifests()) {
+    if (!m.isBuiltIn) registered.set(m.manifest.id, m);
+  }
+
+  const added: string[] = [];
+  const removed: string[] = [];
+  const updated: string[] = [];
+
+  // Adds + updates — on disk, may or may not be in registry.
+  for (const [id, candidate] of onDisk) {
+    const existing = registered.get(id);
+    if (!existing) {
+      opts.registry.registerManifest(candidate);
+      added.push(id);
+      emitModuleEvent(opts, {
+        kind: "install",
+        moduleId: id,
+        scopeUnit: candidate.scopeUnit,
+        version: candidate.manifest.version,
+      });
+      continue;
+    }
+    if (existing.manifest.version !== candidate.manifest.version) {
+      // Tear down the running subprocess (if any) + re-register with
+      // the new manifest. Agents see tools/listChanged because we fire
+      // an uninstall + install pair.
+      try {
+        await opts.manager.shutdown(existing.manifest.id, existing.scopeUnit);
+      } catch {
+        /* acceptable — module may not have been acquired */
+      }
+      opts.registry.unregisterManifest(existing.manifest.id, existing.scopeUnit);
+      opts.registry.registerManifest(candidate);
+      updated.push(id);
+      emitModuleEvent(opts, {
+        kind: "uninstall",
+        moduleId: id,
+        scopeUnit: existing.scopeUnit,
+      });
+      emitModuleEvent(opts, {
+        kind: "install",
+        moduleId: id,
+        scopeUnit: candidate.scopeUnit,
+        version: candidate.manifest.version,
+      });
+    }
+  }
+
+  // Removes — in registry, not on disk. Shut down any live subprocess
+  // before unregistering so acquire() never finds a dangling manifest.
+  for (const [id, existing] of registered) {
+    if (onDisk.has(id)) continue;
+    try {
+      await opts.manager.shutdown(existing.manifest.id, existing.scopeUnit);
+    } catch {
+      /* acceptable */
+    }
+    opts.registry.unregisterManifest(existing.manifest.id, existing.scopeUnit);
+    removed.push(id);
+    emitModuleEvent(opts, {
+      kind: "uninstall",
+      moduleId: id,
+      scopeUnit: existing.scopeUnit,
+    });
+  }
+
+  return {
+    kind: "ok",
+    // Sort — `readdirSync` iteration order is filesystem-dependent,
+    // and the result arrays otherwise become flaky across platforms +
+    // leak into tests that assert exact order.
+    added: [...added].sort(),
+    removed: [...removed].sort(),
+    updated: [...updated].sort(),
+    rejected: scan.rejected
+      .map((r) => `${r.manifestPath}: ${r.code} - ${r.message}`)
+      .sort(),
   };
 }
 

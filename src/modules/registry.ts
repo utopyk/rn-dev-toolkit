@@ -237,6 +237,31 @@ export class ModuleRegistry {
    * policy are returned in `rejected[]` and skipped — never thrown.
    */
   loadUserGlobalModules(options: LoadManifestsOptions): LoadManifestsResult {
+    const scan = ModuleRegistry.scanUserGlobalModules(options);
+    const result: LoadManifestsResult = { modules: [], rejected: scan.rejected };
+    for (const candidate of scan.modules) {
+      try {
+        this.registerManifest(candidate);
+        result.modules.push(candidate);
+      } catch (err) {
+        result.rejected.push({
+          manifestPath: join(candidate.modulePath, "rn-dev-module.json"),
+          code: ModuleErrorCode.E_INVALID_MANIFEST,
+          message:
+            err instanceof Error ? err.message : "duplicate registration",
+        });
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Phase 8 — scan a modules directory WITHOUT mutating the registry.
+   * Returns the freshly-validated `RegisteredModule[]` + rejections, so
+   * callers (e.g. `modules/rescan`) can diff against the live registry
+   * before deciding which to register, unregister, or reload.
+   */
+  static scanUserGlobalModules(options: LoadManifestsOptions): LoadManifestsResult {
     const modulesDir =
       options.modulesDir ?? join(homedir(), ".rn-dev", "modules");
     const scopeUnit = options.scopeUnit ?? "global";
@@ -276,17 +301,7 @@ export class ModuleRegistry {
       });
 
       if (loaded.kind === "ok") {
-        try {
-          this.registerManifest(loaded.module);
-          result.modules.push(loaded.module);
-        } catch (err) {
-          result.rejected.push({
-            manifestPath,
-            code: ModuleErrorCode.E_INVALID_MANIFEST,
-            message:
-              err instanceof Error ? err.message : "duplicate registration",
-          });
-        }
+        result.modules.push(loaded.module);
       } else {
         result.rejected.push(loaded.rejection);
       }

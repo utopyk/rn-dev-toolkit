@@ -16,7 +16,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  num,
+  boundedInt,
   ringCursor,
   runModule,
   str,
@@ -25,6 +25,7 @@ import {
   type ModuleToolContext,
 } from "@rn-dev/module-sdk";
 import {
+  MAX_LIST_LIMIT,
   clear,
   list,
   status,
@@ -39,9 +40,11 @@ export const MODULE_ID = "metro-logs" as const;
 // ---------------------------------------------------------------------------
 // Arg narrowing
 //
-// General-purpose narrowers (`str`, `num`, `ringCursor`, `Args`) live in
-// the SDK — imported via `@rn-dev/module-sdk`. Module-specific narrowers
-// (the `"stdout" | "stderr"` `stream` union) stay local.
+// General-purpose narrowers (`str`, `boundedInt`, `ringCursor`, `Args`)
+// live in the SDK — imported via `@rn-dev/module-sdk`. Module-specific
+// narrowers (the `"stdout" | "stderr"` `stream` union) stay local.
+// The narrowers here produce a bounds-checked `ListArgs`; `tools.ts`
+// handlers trust the narrowed shape and don't re-validate.
 // ---------------------------------------------------------------------------
 
 function stream(args: Args): MetroLogStream | undefined {
@@ -60,7 +63,7 @@ function toListArgs(args: Args): ListArgs {
   const sub = str(args, "substring");
   const str2 = stream(args);
   const since = ringCursor(args);
-  const limit = num(args, "limit");
+  const limit = boundedInt(args, "limit", { min: 1, max: MAX_LIST_LIMIT });
   if (wk !== undefined) out.worktree = wk;
   if (sub !== undefined) out.substring = sub;
   if (str2 !== undefined) out.stream = str2;

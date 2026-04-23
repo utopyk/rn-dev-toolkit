@@ -17,14 +17,20 @@ import {
 } from "./host-capability.js";
 import type {
   MetroLogsCursor,
-  MetroLogsFilter,
   MetroLogsListResult,
   MetroLogsMeta,
   MetroLogsStatus,
   MetroLogStream,
 } from "./types.js";
 
-const MAX_LIMIT = 1000;
+/**
+ * Maximum `list.limit` allowed at the wire boundary. Matches the host's
+ * `MAX_LIST_LIMIT` in `src/core/metro-logs/buffer.ts`; the host applies
+ * its own clamp as defense-in-depth, but the wire layer rejects values
+ * outside this range so an agent gets `undefined` → host-default
+ * behavior rather than a silently-truncated limit.
+ */
+export const MAX_LIST_LIMIT = 1000;
 
 function resolveCapability(ctx: ModuleToolContext): MetroLogsHostCapability {
   const cap = ctx.host.capability<MetroLogsHostCapability>(
@@ -38,47 +44,11 @@ function resolveCapability(ctx: ModuleToolContext): MetroLogsHostCapability {
   return cap;
 }
 
-function isCursor(value: unknown): value is MetroLogsCursor {
-  if (!value || typeof value !== "object") return false;
-  const v = value as { bufferEpoch?: unknown; sequence?: unknown };
-  return (
-    typeof v.bufferEpoch === "number" &&
-    Number.isFinite(v.bufferEpoch) &&
-    typeof v.sequence === "number" &&
-    Number.isFinite(v.sequence)
-  );
-}
-
-function isStream(value: unknown): value is MetroLogStream {
-  return value === "stdout" || value === "stderr";
-}
-
-export function extractFilter(args: ListArgs): MetroLogsFilter | undefined {
-  const filter: MetroLogsFilter = {};
-  if (typeof args.substring === "string" && args.substring.length > 0) {
-    filter.substring = args.substring;
-  }
-  if (isStream(args.stream)) {
-    filter.stream = args.stream;
-  }
-  if (isCursor(args.since)) {
-    filter.since = args.since;
-  }
-  if (
-    typeof args.limit === "number" &&
-    Number.isInteger(args.limit) &&
-    args.limit > 0 &&
-    args.limit <= MAX_LIMIT
-  ) {
-    filter.limit = args.limit;
-  }
-  return Object.keys(filter).length > 0 ? filter : undefined;
-}
-
 // ---------------------------------------------------------------------------
-// Input shapes — mirror the manifest's `inputSchema`. MCP validates
-// upstream, but handlers still narrow defensively at runtime
-// (a module can be poked directly over the vscode-jsonrpc socket).
+// Input shapes — mirror the manifest's `inputSchema`. These are the
+// already-narrowed types produced by `index.ts::toListArgs` et al.
+// MCP validates upstream, `index.ts` narrows defensively at the wire
+// boundary, and handlers below trust both layers.
 // ---------------------------------------------------------------------------
 
 export interface StatusArgs {
@@ -114,9 +84,17 @@ export async function list(
   ctx: ModuleToolContext,
 ): Promise<MetroLogsListResult> {
   const cap = resolveCapability(ctx);
+  // Explicit literal rebuild (not `{ worktree, ...filter } = args`) so
+  // that a future non-filter field on `ListArgs` doesn't silently leak
+  // to the capability via the structural rest-spread — TS's excess-
+  // property check only fires on fresh object literals, not on
+  // computed rest objects. Named destructure also drops any
+  // `__proto__` own-data-property a wire payload may carry (JSON.parse
+  // creates it as own data, not prototype link).
+  const { worktree, substring, stream, since, limit } = args;
   return cap.list({
-    worktreeKey: args.worktree,
-    filter: extractFilter(args),
+    worktreeKey: worktree,
+    filter: { substring, stream, since, limit },
   });
 }
 

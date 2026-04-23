@@ -16,9 +16,17 @@ import {
   type DevToolsListDto,
   type NetworkEntryDto,
 } from "./dto.js";
-import type { NetworkCursor, NetworkFilter } from "./types.js";
+import type { NetworkCursor } from "./types.js";
 
 export type { NetworkCursor } from "./types.js";
+
+/**
+ * Maximum `list.limit` allowed at the wire boundary. Mirrors the host's
+ * own defensive clamp; the wire layer rejects out-of-range values so an
+ * agent gets `undefined` → host-default behavior rather than silent
+ * truncation.
+ */
+export const MAX_LIST_LIMIT = 1000;
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -46,57 +54,11 @@ function readCaptureBodies(ctx: ModuleToolContext): boolean {
   return raw === true;
 }
 
-const MAX_LIMIT = 1000;
-
-function isCursor(value: unknown): value is NetworkCursor {
-  if (!value || typeof value !== "object") return false;
-  const v = value as { bufferEpoch?: unknown; sequence?: unknown };
-  return (
-    typeof v.bufferEpoch === "number" &&
-    Number.isFinite(v.bufferEpoch) &&
-    typeof v.sequence === "number" &&
-    Number.isFinite(v.sequence)
-  );
-}
-
-function extractFilter(args: ListArgs): NetworkFilter | undefined {
-  const filter: NetworkFilter = {};
-  if (typeof args.urlRegex === "string") filter.urlRegex = args.urlRegex;
-  if (Array.isArray(args.methods)) {
-    const methods = args.methods.filter(
-      (m): m is string => typeof m === "string" && m.length > 0,
-    );
-    if (methods.length > 0) filter.methods = methods;
-  }
-  if (
-    Array.isArray(args.statusRange) &&
-    args.statusRange.length === 2 &&
-    typeof args.statusRange[0] === "number" &&
-    typeof args.statusRange[1] === "number" &&
-    Number.isFinite(args.statusRange[0]) &&
-    Number.isFinite(args.statusRange[1])
-  ) {
-    filter.statusRange = [args.statusRange[0], args.statusRange[1]];
-  }
-  if (isCursor(args.since)) {
-    filter.since = args.since;
-  }
-  if (
-    typeof args.limit === "number" &&
-    Number.isInteger(args.limit) &&
-    args.limit > 0 &&
-    args.limit <= MAX_LIMIT
-  ) {
-    filter.limit = args.limit;
-  }
-  return Object.keys(filter).length > 0 ? filter : undefined;
-}
-
 // ---------------------------------------------------------------------------
 // Input shapes — typed precisely at the boundary. The manifest's
 // `inputSchema` is the source of truth; these mirror it. MCP validates
-// against the schema before dispatch, but handlers still narrow defensively
-// at runtime (see `extractFilter`).
+// against the schema, `index.ts` narrows defensively at the wire
+// boundary via SDK helpers, and handlers below trust both layers.
 // ---------------------------------------------------------------------------
 
 export interface StatusArgs {
@@ -149,9 +111,17 @@ export async function list(
   ctx: ModuleToolContext
 ): Promise<DevToolsListDto> {
   const cap = resolveCapability(ctx);
+  // Explicit literal rebuild (not `{ worktree, ...filter } = args`) so
+  // that a future non-filter field on `ListArgs` doesn't silently leak
+  // to the capability via the structural rest-spread — TS's excess-
+  // property check only fires on fresh object literals, not on
+  // computed rest objects. Named destructure also drops any
+  // `__proto__` own-data-property a wire payload may carry (JSON.parse
+  // creates it as own data, not prototype link).
+  const { worktree, urlRegex, methods, statusRange, since, limit } = args;
   const result = await cap.list({
-    worktreeKey: args.worktree,
-    filter: extractFilter(args),
+    worktreeKey: worktree,
+    filter: { urlRegex, methods, statusRange, since, limit },
   });
   return toListDto(result, { captureBodies: readCaptureBodies(ctx) });
 }

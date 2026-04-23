@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  boundedInt,
   num,
   requireNum,
   requireStr,
@@ -103,6 +104,49 @@ describe("requireNum", () => {
     expect(() =>
       requireNum({ x: Number.NaN }, "x", "tap"),
     ).toThrow("tap: x is required");
+  });
+});
+
+describe("boundedInt", () => {
+  const opts = { min: 1, max: 1000 };
+
+  it("returns the value when it is an integer within bounds", () => {
+    expect(boundedInt({ limit: 500 }, "limit", opts)).toBe(500);
+    expect(boundedInt({ limit: 1 }, "limit", opts)).toBe(1);
+    expect(boundedInt({ limit: 1000 }, "limit", opts)).toBe(1000);
+  });
+
+  it("returns undefined for non-integer values", () => {
+    expect(boundedInt({ limit: 1.5 }, "limit", opts)).toBeUndefined();
+    expect(boundedInt({ limit: Number.NaN }, "limit", opts)).toBeUndefined();
+    expect(
+      boundedInt({ limit: Number.POSITIVE_INFINITY }, "limit", opts),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined when below min", () => {
+    expect(boundedInt({ limit: 0 }, "limit", opts)).toBeUndefined();
+    expect(boundedInt({ limit: -5 }, "limit", opts)).toBeUndefined();
+  });
+
+  it("returns undefined when above max", () => {
+    expect(boundedInt({ limit: 1001 }, "limit", opts)).toBeUndefined();
+    expect(boundedInt({ limit: 10_000 }, "limit", opts)).toBeUndefined();
+  });
+
+  it("returns undefined when the key is missing", () => {
+    expect(boundedInt({}, "limit", opts)).toBeUndefined();
+  });
+
+  it("returns undefined when the value is the wrong type", () => {
+    expect(boundedInt({ limit: "500" }, "limit", opts)).toBeUndefined();
+    expect(boundedInt({ limit: null }, "limit", opts)).toBeUndefined();
+  });
+
+  it("throws when min > max (caller-config bug, not wire data)", () => {
+    expect(() =>
+      boundedInt({ limit: 5 }, "limit", { min: 10, max: 1 }),
+    ).toThrow("boundedInt: min (10) > max (1)");
   });
 });
 

@@ -31,6 +31,7 @@ export type {
   ToolHandler,
 } from "./module-runtime.js";
 export {
+  boundedInt,
   num,
   requireNum,
   requireStr,

@@ -31,12 +31,39 @@ export function str(args: Args, key: string): string | undefined {
  * Finite number at `args[key]`, else `undefined`. Accepts negatives and
  * non-integers — the caller is responsible for tighter gating (e.g.
  * `Number.isInteger`, range checks) when the wire field requires it.
- * Pattern to mirror: the `limit`-bounds check in each module's
- * `extractFilter` (integer, `> 0`, `<= MAX_LIMIT`).
+ * For bounded integer fields like pagination `limit`, prefer
+ * `boundedInt` instead.
  */
 export function num(args: Args, key: string): number | undefined {
   const v = args[key];
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * Bounded integer at `args[key]`. Returns the value only if it is a
+ * finite integer within the inclusive `[min, max]` range; `undefined`
+ * otherwise (wrong type, non-integer, out of range). Pagination knobs
+ * like `limit` use this to fold type + range checks into one call,
+ * replacing the `Number.isInteger && > 0 && <= MAX` inline pattern that
+ * used to live in each module's `extractFilter`.
+ */
+export function boundedInt(
+  args: Args,
+  key: string,
+  opts: { min: number; max: number },
+): number | undefined {
+  if (opts.min > opts.max) {
+    // Caller-config bug, not wire-data. Fail loud so a dynamically-
+    // computed `max` that drops below `min` surfaces at test time
+    // rather than silently returning `undefined` for every input.
+    throw new Error(
+      `boundedInt: min (${opts.min}) > max (${opts.max})`,
+    );
+  }
+  const v = args[key];
+  if (typeof v !== "number" || !Number.isInteger(v)) return undefined;
+  if (v < opts.min || v > opts.max) return undefined;
+  return v;
 }
 
 /**

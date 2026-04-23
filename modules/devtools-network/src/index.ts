@@ -21,7 +21,7 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
-  num,
+  boundedInt,
   requireStr,
   ringCursor,
   runModule,
@@ -32,6 +32,7 @@ import {
   type ModuleToolContext,
 } from "@rn-dev/module-sdk";
 import {
+  MAX_LIST_LIMIT,
   clear,
   get,
   list,
@@ -49,10 +50,12 @@ export const MODULE_ID = "devtools-network" as const;
 // ---------------------------------------------------------------------------
 // Arg narrowing
 //
-// General-purpose narrowers (`str`, `num`, `strArr`, `ringCursor`,
+// General-purpose narrowers (`str`, `boundedInt`, `strArr`, `ringCursor`,
 // `requireStr`, `Args`) live in the SDK — imported via
 // `@rn-dev/module-sdk`. The `statusRange` tuple narrower is specific to
 // HTTP status-range filters, so it stays local.
+// The narrowers here produce a bounds-checked `ListArgs`; `tools.ts`
+// handlers trust the narrowed shape and don't re-validate.
 // ---------------------------------------------------------------------------
 
 function statusRange(args: Args): [number, number] | undefined {
@@ -76,7 +79,7 @@ function toListArgs(args: Args): ListArgs {
   const methods = strArr(args, "methods");
   const range = statusRange(args);
   const since = ringCursor(args);
-  const limit = num(args, "limit");
+  const limit = boundedInt(args, "limit", { min: 1, max: MAX_LIST_LIMIT });
   if (wk !== undefined) out.worktree = wk;
   if (urlRegex !== undefined) out.urlRegex = urlRegex;
   if (methods !== undefined) out.methods = methods;

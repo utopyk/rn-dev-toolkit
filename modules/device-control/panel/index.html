@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Devices — device-control</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font-family:
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Roboto,
+          sans-serif;
+        background: #0f1115;
+        color: #e5e7eb;
+        font-size: 13px;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 15px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      .bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      button {
+        background: #1f2937;
+        color: #e5e7eb;
+        border: 1px solid #374151;
+        padding: 6px 12px;
+        border-radius: 4px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      button:hover {
+        background: #374151;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .card {
+        background: #1a1d23;
+        border: 1px solid #2a2f38;
+        border-radius: 6px;
+        padding: 12px;
+      }
+      .card-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+      .name {
+        font-weight: 600;
+        color: #f3f4f6;
+      }
+      .udid {
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        color: #9ca3af;
+        font-size: 11px;
+        margin-top: 2px;
+      }
+      .badge {
+        padding: 2px 7px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.03em;
+      }
+      .badge--android {
+        background: rgba(52, 211, 153, 0.15);
+        color: #34d399;
+      }
+      .badge--ios {
+        background: rgba(96, 165, 250, 0.15);
+        color: #60a5fa;
+      }
+      .badge--state-booted {
+        background: rgba(52, 211, 153, 0.15);
+        color: #34d399;
+      }
+      .badge--state-unavailable {
+        background: rgba(251, 146, 60, 0.15);
+        color: #fb923c;
+      }
+      .badge--state-unknown {
+        background: rgba(156, 163, 175, 0.15);
+        color: #9ca3af;
+      }
+      .actions {
+        margin-top: 10px;
+        display: flex;
+        gap: 6px;
+      }
+      .preview {
+        margin-top: 10px;
+        width: 100%;
+        max-height: 480px;
+        border-radius: 4px;
+        border: 1px solid #2a2f38;
+        object-fit: contain;
+        display: block;
+      }
+      .empty {
+        padding: 16px;
+        text-align: center;
+        color: #9ca3af;
+        border: 1px dashed #374151;
+        border-radius: 6px;
+      }
+      .warning {
+        padding: 10px 12px;
+        margin-bottom: 12px;
+        background: rgba(251, 146, 60, 0.08);
+        border: 1px solid rgba(251, 146, 60, 0.25);
+        color: #fb923c;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+      .error {
+        padding: 10px 12px;
+        margin-top: 10px;
+        background: rgba(248, 113, 113, 0.08);
+        border: 1px solid rgba(248, 113, 113, 0.25);
+        color: #f87171;
+        border-radius: 4px;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <h1>Devices</h1>
+      <div>
+        <button id="refresh">Refresh</button>
+      </div>
+    </div>
+    <div id="warnings"></div>
+    <div id="content">
+      <div class="empty">Loading…</div>
+    </div>
+    <script src="./panel.js"></script>
+  </body>
+</html>

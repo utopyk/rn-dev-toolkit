@@ -1,14 +1,16 @@
 {
   "name": "@rn-dev-modules/device-control",
-  "version": "0.0.0",
-  "description": "Drive Android emulators and iOS simulators from rn-dev — the first third-party module",
+  "version": "0.1.0",
+  "description": "Agent-native device control — adb/simctl, screenshots, taps, flows.",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "files": [
-    "src/",
+    "dist/",
+    "panel/",
     "rn-dev-module.json"
   ],
   "scripts": {
+    "build": "bun run build.ts",
     "test": "vitest run"
   },
   "dependencies": {

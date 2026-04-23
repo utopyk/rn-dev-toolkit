@@ -5,6 +5,7 @@ import { CleanManager } from "../core/clean.js";
 import { createDefaultPreflightEngine } from "../core/preflight.js";
 import { listDevices } from "../core/device.js";
 import { IpcClient } from "../core/ipc.js";
+import { registerModuleCommands } from "./module-commands.js";
 import path from "path";
 import gradientString from "gradient-string";
 import type { Platform, RunMode } from "../core/types.js";
@@ -298,6 +299,9 @@ export function createProgram(): Command {
         process.exit(1);
       }
     });
+
+  // Module system (install / uninstall / list / enable / disable / restart)
+  registerModuleCommands(program);
 
   // MCP server
   program

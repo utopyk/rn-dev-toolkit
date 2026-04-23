@@ -269,7 +269,7 @@ export class ModuleRegistry {
         continue;
       }
 
-      const loaded = this.loadManifestFile(manifestPath, {
+      const loaded = ModuleRegistry.loadSingleManifest(manifestPath, {
         hostVersion: options.hostVersion,
         scopeUnit,
         isBuiltIn: false,
@@ -357,10 +357,13 @@ export class ModuleRegistry {
   }
 
   // -------------------------------------------------------------------------
-  // Internal: single-manifest load + validation pipeline
+  // Single-manifest load + validation pipeline (Phase 7: exposed for the
+  // Marketplace installer, which previously round-tripped through a scratch
+  // ModuleRegistry + loadUserGlobalModules to get one manifest validated.
+  // Static so callers don't need to construct a registry just to validate.)
   // -------------------------------------------------------------------------
 
-  private loadManifestFile(
+  static loadSingleManifest(
     manifestPath: string,
     opts: { hostVersion: string; scopeUnit: string; isBuiltIn: boolean },
   ):

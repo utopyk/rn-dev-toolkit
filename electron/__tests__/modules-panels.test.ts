@@ -7,6 +7,7 @@ import {
   createBoundsCache,
   deactivatePanel,
   listPanels,
+  resolveCallTool,
   resolveHostCall,
   setPanelBounds,
 } from "../ipc/modules-panels.js";
@@ -395,5 +396,104 @@ describe("setPanelBounds", () => {
     );
     expect(bounds.get("a:p")).toEqual({ x: 10, y: 20, width: 300, height: 400 });
     expect(fb.calls).toEqual(["applyBounds"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveCallTool — destructive gate (Phase 7 P0)
+// ---------------------------------------------------------------------------
+
+describe("resolveCallTool", () => {
+  function mgrOnly(): ModuleHostManager {
+    return new ModuleHostManager({
+      hostVersion: "0.1.0",
+      capabilities: new CapabilityRegistry(),
+    });
+  }
+
+  function manifestWithTools(
+    tools: Array<{ name: string; destructiveHint?: boolean }>,
+  ): ModuleManifest {
+    return {
+      id: "dev-ctl",
+      version: "0.1.0",
+      hostRange: ">=0.1.0",
+      scope: "global",
+      contributes: {
+        mcp: {
+          tools: tools.map((t) => ({
+            name: t.name,
+            description: "",
+            inputSchema: { type: "object" },
+            ...(t.destructiveHint ? { destructiveHint: true } : {}),
+          })),
+        },
+      },
+    };
+  }
+
+  it("rejects destructiveHint tools without { confirmed: true }", async () => {
+    const registry = registryWith(
+      registeredWith(
+        manifestWithTools([
+          { name: "dev-ctl__uninstall-app", destructiveHint: true },
+        ]),
+        "global",
+      ),
+    );
+    const reply = await resolveCallTool(mgrOnly(), registry, "dev-ctl", {
+      tool: "uninstall-app",
+      args: {},
+    });
+    expect(reply.kind).toBe("error");
+    if (reply.kind === "error") {
+      expect(reply.code).toBe("E_DESTRUCTIVE_REQUIRES_CONFIRM");
+    }
+  });
+
+  it("accepts destructiveHint tools with { confirmed: true } (falls through to call)", async () => {
+    // We don't have a live subprocess, so the call itself will fail —
+    // but with MODULE_UNAVAILABLE, not E_DESTRUCTIVE_REQUIRES_CONFIRM.
+    // That's the proof that the destructive gate let us through.
+    const registry = registryWith(
+      registeredWith(
+        manifestWithTools([
+          { name: "dev-ctl__uninstall-app", destructiveHint: true },
+        ]),
+        "global",
+      ),
+    );
+    const reply = await resolveCallTool(mgrOnly(), registry, "dev-ctl", {
+      tool: "uninstall-app",
+      args: {},
+      confirmed: true,
+    });
+    expect(reply.kind).toBe("error");
+    if (reply.kind === "error") {
+      expect(reply.code).not.toBe("E_DESTRUCTIVE_REQUIRES_CONFIRM");
+    }
+  });
+
+  it("non-destructive tools don't require confirmation", async () => {
+    const registry = registryWith(
+      registeredWith(manifestWithTools([{ name: "dev-ctl__list" }]), "global"),
+    );
+    const reply = await resolveCallTool(mgrOnly(), registry, "dev-ctl", {
+      tool: "list",
+      args: {},
+    });
+    expect(reply.kind).toBe("error");
+    if (reply.kind === "error") {
+      expect(reply.code).not.toBe("E_DESTRUCTIVE_REQUIRES_CONFIRM");
+    }
+  });
+
+  it("rejects empty payload with E_MODULE_CALL_FAILED", async () => {
+    const registry = registryWith();
+    const reply = await resolveCallTool(mgrOnly(), registry, "dev-ctl", null);
+    expect(reply.kind).toBe("error");
+    if (reply.kind === "error") {
+      expect(reply.code).toBe("E_MODULE_CALL_FAILED");
+    }
   });
 });

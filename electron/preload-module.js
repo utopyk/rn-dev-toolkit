@@ -92,4 +92,26 @@ for (const entry of hostApi) {
 }
 api.capabilities = Object.freeze(capabilities);
 
+// Phase 7 — `rnDev.callTool(name, args?, { confirmed? })` invokes one
+// of the panel's own module's subprocess tools. The moduleId is bound
+// by the main process via `PanelSenderRegistry.registerPanel`; the
+// payload carries only the tool + args. Cross-module tool invocation is
+// explicitly NOT supported from the panel surface — use
+// `rnDev.capabilities.<id>.<method>()` for cross-module RPC.
+//
+// Destructive tools (`destructiveHint: true` in the manifest) REQUIRE
+// `{ confirmed: true }`. Walk a user-visible confirmation before
+// passing the flag — the main process rejects otherwise with
+// `E_DESTRUCTIVE_REQUIRES_CONFIRM`.
+api.callTool = async function callTool(tool, args, opts) {
+  if (typeof tool !== 'string' || tool.length === 0) {
+    throw new Error('rnDev.callTool: first argument must be a non-empty tool name');
+  }
+  return ipcRenderer.invoke('modules:call-tool', {
+    tool,
+    args: args && typeof args === 'object' ? args : {},
+    confirmed: opts && opts.confirmed === true,
+  });
+};
+
 contextBridge.exposeInMainWorld('rnDev', api);

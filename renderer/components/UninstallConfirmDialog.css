@@ -1,0 +1,117 @@
+.uninstall-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.uninstall-dialog {
+  background: var(--color-bg-panel, #1e1e28);
+  color: var(--color-fg, #eaeaea);
+  border: 1px solid var(--color-border, #3a3a48);
+  border-radius: 10px;
+  width: min(520px, 100%);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+}
+
+.uninstall-header {
+  padding: 20px 24px 12px;
+  border-bottom: 1px solid var(--color-border, #3a3a48);
+}
+
+.uninstall-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.uninstall-subtitle {
+  margin: 4px 0 0;
+  font-size: 13px;
+  opacity: 0.75;
+}
+
+.uninstall-body {
+  padding: 16px 24px;
+}
+
+.uninstall-details {
+  margin: 0;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.uninstall-details li {
+  margin-bottom: 6px;
+}
+
+.uninstall-details code {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.uninstall-detail-label {
+  font-weight: 600;
+  opacity: 0.85;
+}
+
+.uninstall-note {
+  margin: 12px 0 0;
+  font-size: 12px;
+  opacity: 0.7;
+  line-height: 1.5;
+}
+
+.uninstall-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 12px 24px 20px;
+  border-top: 1px solid var(--color-border, #3a3a48);
+}
+
+.uninstall-button {
+  padding: 8px 16px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 120ms ease, border 120ms ease;
+}
+
+.uninstall-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.uninstall-button--cancel {
+  background: transparent;
+  border-color: var(--color-border, #3a3a48);
+  color: var(--color-fg, #eaeaea);
+}
+
+.uninstall-button--cancel:not(:disabled):hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.uninstall-button--destructive {
+  background: #be4c4c;
+  border-color: #a03a3a;
+  color: #fff;
+}
+
+.uninstall-button--destructive:not(:disabled):hover {
+  background: #a83e3e;
+}

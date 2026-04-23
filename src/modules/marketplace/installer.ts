@@ -267,34 +267,34 @@ export async function installModule(opts: InstallOptions): Promise<InstallResult
     }
   }
 
-  // 7. Validate the manifest. `loadUserGlobalModules` on the install root's
-  //    parent (which is our modulesDir) picks it up + validates; we isolate
-  //    to the single entry by passing `modulesDir = installPath's parent`
-  //    but that also picks up siblings — so instead we invoke the full
-  //    pipeline via a scratch ModuleRegistry + loadUserGlobalModules pointed
-  //    at a staging dir, then copy the RegisteredModule into the caller's
-  //    registry. (Simpler: call loadUserGlobalModules on modulesDir, find
-  //    the entry for our id. Any rejections unrelated to our id we ignore.)
-  const scratch = new ModuleRegistry();
-  const loadResult = scratch.loadUserGlobalModules({
-    hostVersion: opts.hostVersion,
-    scopeUnit,
-    modulesDir,
-  });
-  const ours = loadResult.modules.find((m) => m.manifest.id === opts.entry.id);
-  if (!ours) {
-    const rejected = loadResult.rejected.find((r) =>
-      r.manifestPath.startsWith(installPath),
-    );
+  // 7. Validate the manifest via the registry's single-manifest pipeline.
+  //    Phase 7: previously rebuilt a scratch ModuleRegistry + loaded the
+  //    whole modulesDir (which surfaced unrelated sibling rejections).
+  //    `loadSingleManifest` targets the freshly-extracted manifest
+  //    directly, so a broken sibling module can't poison this install.
+  const manifestPath = join(installPath, "rn-dev-module.json");
+  if (!existsSync(manifestPath)) {
     rollback(installPath);
     return {
       kind: "error",
       code: "E_INVALID_MANIFEST",
-      message: rejected
-        ? `manifest rejected (${rejected.code}): ${rejected.message}`
-        : `no rn-dev-module.json found at ${installPath}`,
+      message: `no rn-dev-module.json found at ${installPath}`,
     };
   }
+  const loaded = ModuleRegistry.loadSingleManifest(manifestPath, {
+    hostVersion: opts.hostVersion,
+    scopeUnit,
+    isBuiltIn: false,
+  });
+  if (loaded.kind === "err") {
+    rollback(installPath);
+    return {
+      kind: "error",
+      code: "E_INVALID_MANIFEST",
+      message: `manifest rejected (${loaded.rejection.code}): ${loaded.rejection.message}`,
+    };
+  }
+  const ours = loaded.module;
 
   // 8. Guard against id spoofing — the registry entry's id MUST match the
   //    manifest's id. Otherwise an attacker with a registry-compromised entry

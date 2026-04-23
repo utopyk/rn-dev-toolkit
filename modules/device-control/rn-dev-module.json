@@ -1,0 +1,156 @@
+{
+  "$schema": "../../packages/module-sdk/manifest.schema.json",
+  "id": "device-control",
+  "version": "0.1.0",
+  "hostRange": ">=0.1.0",
+  "scope": "global",
+  "contributes": {
+    "mcp": {
+      "tools": [
+        {
+          "name": "device-control__list",
+          "description": "List connected Android devices/emulators and booted iOS simulators. Returns udid, name, platform, and state for each.",
+          "inputSchema": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "platform": {
+                "type": "string",
+                "enum": ["android", "ios", "both"],
+                "description": "Filter to a single platform. Defaults to both."
+              }
+            }
+          },
+          "readOnlyHint": true
+        },
+        {
+          "name": "device-control__screenshot",
+          "description": "Capture a screenshot from the specified device. Returns { pngBase64: string } that agents can decode or render. Android uses `screencap`; iOS uses `simctl io ... screenshot`.",
+          "inputSchema": {
+            "type": "object",
+            "required": ["udid"],
+            "additionalProperties": false,
+            "properties": {
+              "udid": { "type": "string", "minLength": 1 }
+            }
+          },
+          "readOnlyHint": true
+        },
+        {
+          "name": "device-control__tap",
+          "description": "Tap the device screen at the given (x, y). Coordinates are device pixels.",
+          "inputSchema": {
+            "type": "object",
+            "required": ["udid", "x", "y"],
+            "additionalProperties": false,
+            "properties": {
+              "udid": { "type": "string", "minLength": 1 },
+              "x": { "type": "number" },
+              "y": { "type": "number" }
+            }
+          }
+        },
+        {
+          "name": "device-control__swipe",
+          "description": "Swipe from (x1, y1) to (x2, y2) over `durationMs` milliseconds.",
+          "inputSchema": {
+            "type": "object",
+            "required": ["udid", "x1", "y1", "x2", "y2"],
+            "additionalProperties": false,
+            "properties": {
+              "udid": { "type": "string", "minLength": 1 },
+              "x1": { "type": "number" },
+              "y1": { "type": "number" },
+              "x2": { "type": "number" },
+              "y2": { "type": "number" },
+              "durationMs": { "type": "integer", "minimum": 1, "maximum": 10000 }
+            }
+          }
+        },
+        {
+          "name": "device-control__type",
+          "description": "Type text into the currently focused input on the device.",
+          "inputSchema": {
+            "type": "object",
+            "required": ["udid", "text"],
+            "additionalProperties": false,
+            "properties": {
+              "udid": { "type": "string", "minLength": 1 },
+              "text": { "type": "string" }
+            }
+          }
+        },
+        {
+          "name": "device-control__launch-app",
+          "description": "Launch an app. Android: `applicationId` (package name). iOS: `bundleId`.",
+          "inputSchema": {
+            "type": "object",
+            "required": ["udid"],
+            "additionalProperties": false,
+            "properties": {
+              "udid": { "type": "string", "minLength": 1 },
+              "applicationId": { "type": "string" },
+              "bundleId": { "type": "string" }
+            }
+          }
+        },
+        {
+          "name": "device-control__logs-tail",
+          "description": "Return the most recent N log lines from the device. Android: `adb logcat -d`. iOS: `xcrun simctl spawn <udid> log show --last 1m`.",
+          "inputSchema": {
+            "type": "object",
+            "required": ["udid"],
+            "additionalProperties": false,
+            "properties": {
+              "udid": { "type": "string", "minLength": 1 },
+              "lines": { "type": "integer", "minimum": 1, "maximum": 2000 }
+            }
+          },
+          "readOnlyHint": true
+        },
+        {
+          "name": "device-control__install-apk",
+          "description": "Install an APK onto an Android device. Destructive — modifies installed apps.",
+          "inputSchema": {
+            "type": "object",
+            "required": ["udid", "apkPath"],
+            "additionalProperties": false,
+            "properties": {
+              "udid": { "type": "string", "minLength": 1 },
+              "apkPath": { "type": "string", "minLength": 1 }
+            }
+          },
+          "destructiveHint": true
+        },
+        {
+          "name": "device-control__uninstall-app",
+          "description": "Uninstall an app from the device. Destructive — removes app data. Android: `applicationId`. iOS: `bundleId`.",
+          "inputSchema": {
+            "type": "object",
+            "required": ["udid"],
+            "additionalProperties": false,
+            "properties": {
+              "udid": { "type": "string", "minLength": 1 },
+              "applicationId": { "type": "string" },
+              "bundleId": { "type": "string" }
+            }
+          },
+          "destructiveHint": true
+        }
+      ]
+    },
+    "electron": {
+      "panels": [
+        {
+          "id": "devices",
+          "title": "Devices",
+          "icon": "device-mobile",
+          "webviewEntry": "panel/index.html",
+          "hostApi": []
+        }
+      ]
+    }
+  },
+  "permissions": ["exec:adb", "exec:simctl", "network:outbound"],
+  "activationEvents": ["onStartup"]
+}

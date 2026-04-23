@@ -8,9 +8,11 @@ import {
   activatePanel,
   deactivatePanel,
   listPanels,
+  resolveCallTool,
   resolveHostCall,
   setPanelBounds,
   type ActivatePanelPayload,
+  type CallToolPayload,
   type DeactivatePanelPayload,
   type HostCallPayload,
   type ModulesPanelsIpcDeps,
@@ -112,6 +114,37 @@ export function registerModulesPanelsIpc(
     },
   );
 
+  // Phase 7 — `modules:call-tool` lets a panel invoke one of its OWN
+  // module's subprocess tools without going through the daemon socket.
+  // Sender identity pins the moduleId: the panel's webContents is bound
+  // to a moduleId by `PanelSenderRegistry.registerPanel`, and we reject
+  // any request whose resolved identity isn't a panel (the host UI has
+  // no intrinsic moduleId to act on behalf of).
+  ipcMain.handle(
+    "modules:call-tool",
+    async (event, payload: CallToolPayload) => {
+      const deps = getDeps();
+      if (!deps) {
+        return {
+          kind: "error" as const,
+          code: "MODULE_UNAVAILABLE" as const,
+          message: "modules-panels: services not ready yet",
+        };
+      }
+      const senderReg = getSenderRegistry?.();
+      const identity = senderReg?.resolve(event.sender);
+      if (!identity || identity.kind !== "panel") {
+        return {
+          kind: "error" as const,
+          code: "MODULE_UNAVAILABLE" as const,
+          message:
+            "modules:call-tool must be invoked from a module panel — the host UI cannot call module tools directly.",
+        };
+      }
+      return resolveCallTool(deps.manager, deps.registry, identity.moduleId, payload);
+    },
+  );
+
   ipcMain.handle("modules:host-call", (event, payload: HostCallPayload) => {
     const deps = getDeps();
     if (!deps) {
@@ -161,6 +194,7 @@ export function registerModulesPanelsIpc(
       ipcMain.removeHandler("modules:activate-panel");
       ipcMain.removeHandler("modules:deactivate-panel");
       ipcMain.removeHandler("modules:set-panel-bounds");
+      ipcMain.removeHandler("modules:call-tool");
       ipcMain.removeHandler("modules:host-call");
     },
     getActiveBounds: () => {

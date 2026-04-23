@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "modules": [
+    {
+      "id": "device-control",
+      "npmPackage": "@rn-dev-modules/device-control",
+      "version": "0.1.0",
+      "tarballSha256": "f9ef8097a9a498eb8397302bb16d9878ad3699f9539aa151e4fff6b7d5867fbd",
+      "description": "Agent-native device control — adb/simctl, screenshots, taps, flows.",
+      "author": "rn-dev",
+      "permissions": ["exec:adb", "exec:simctl", "network:outbound"],
+      "homepage": "https://github.com/rn-dev/rn-dev-modules/tree/main/device-control"
+    }
+  ]
+}

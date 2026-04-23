@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useIpcInvoke, useIpcOn } from '../hooks/useIpc';
 import { ConsentDialog, type ConsentRegistryEntry } from '../components/ConsentDialog';
+import { UninstallConfirmDialog } from '../components/UninstallConfirmDialog';
 import './Marketplace.css';
 
 interface MarketplaceRow {
@@ -83,6 +84,7 @@ export function Marketplace(): React.JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [registryError, setRegistryError] = useState<string | null>(null);
   const [consentEntry, setConsentEntry] = useState<MarketplaceEntry | null>(null);
+  const [uninstallTarget, setUninstallTarget] = useState<MarketplaceRow | null>(null);
   const [pendingAction, setPendingAction] = useState<{ kind: 'install' | 'uninstall'; moduleId: string } | null>(null);
   const [actionResult, setActionResult] = useState<{ kind: 'ok' | 'error'; message: string } | null>(null);
 
@@ -170,31 +172,31 @@ export function Marketplace(): React.JSX.Element {
     [consentEntry, invoke, refresh],
   );
 
-  const handleUninstallClick = useCallback(
-    async (row: MarketplaceRow) => {
-      if (row.isBuiltIn) return;
-      // eslint-disable-next-line no-alert
-      if (!confirm(`Uninstall ${row.id}? This removes the module's files and stops its subprocess.`)) {
-        return;
-      }
-      setPendingAction({ kind: 'uninstall', moduleId: row.id });
-      setActionResult(null);
-      const reply = await invoke<UninstallReply>('modules:uninstall', {
-        moduleId: row.id,
+  const handleUninstallClick = useCallback((row: MarketplaceRow) => {
+    if (row.isBuiltIn) return;
+    setUninstallTarget(row);
+  }, []);
+
+  const handleConfirmUninstall = useCallback(async () => {
+    if (!uninstallTarget) return;
+    const target = uninstallTarget;
+    setPendingAction({ kind: 'uninstall', moduleId: target.id });
+    setActionResult(null);
+    const reply = await invoke<UninstallReply>('modules:uninstall', {
+      moduleId: target.id,
+    });
+    setPendingAction(null);
+    setUninstallTarget(null);
+    if (reply.kind === 'ok') {
+      setActionResult({ kind: 'ok', message: `Uninstalled ${target.id}` });
+    } else {
+      setActionResult({
+        kind: 'error',
+        message: `Uninstall failed (${reply.code}): ${reply.message}`,
       });
-      setPendingAction(null);
-      if (reply.kind === 'ok') {
-        setActionResult({ kind: 'ok', message: `Uninstalled ${row.id}` });
-      } else {
-        setActionResult({
-          kind: 'error',
-          message: `Uninstall failed (${reply.code}): ${reply.message}`,
-        });
-      }
-      refresh();
-    },
-    [invoke, refresh],
-  );
+    }
+    refresh();
+  }, [invoke, refresh, uninstallTarget]);
 
   if (loadError) {
     return (
@@ -367,6 +369,18 @@ export function Marketplace(): React.JSX.Element {
           registrySha256={registrySha256}
           onCancel={() => setConsentEntry(null)}
           onConfirm={handleConfirmInstall}
+        />
+      )}
+
+      {uninstallTarget && (
+        <UninstallConfirmDialog
+          moduleId={uninstallTarget.id}
+          pending={
+            pendingAction?.kind === 'uninstall' &&
+            pendingAction.moduleId === uninstallTarget.id
+          }
+          onCancel={() => setUninstallTarget(null)}
+          onConfirm={handleConfirmUninstall}
         />
       )}
     </div>

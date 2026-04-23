@@ -109,6 +109,17 @@ export interface ModulesIpcOptions {
  */
 export interface ModulesEvent {
   kind:
+    /**
+     * `install` / `uninstall` are emitted from the Marketplace install flow.
+     * They are distinct from `enabled` / `disabled` (which fire on the
+     * `modules/enable` + `modules/disable` disabled-flag toggle) because the
+     * renderer + MCP agents may want to react differently — e.g. Marketplace
+     * rebuilds its "Available" section on install but not on enable.
+     * Both still trigger `notifications/tools/list_changed` on the MCP side
+     * because the tool snapshot has likely moved either way.
+     */
+    | "install"
+    | "uninstall"
     | "enabled"
     | "disabled"
     | "restarted"
@@ -127,6 +138,8 @@ export interface ModulesEvent {
    * subscribers rebuild their views without a second round-trip.
    */
   config?: Record<string, unknown>;
+  /** Present on install — the version that just landed. */
+  version?: string;
 }
 
 export type ModulesIpcAction =
@@ -568,7 +581,7 @@ function extractConfigSchema(
   return contributes?.config?.schema;
 }
 
-async function callModuleTool(
+export async function callModuleTool(
   opts: ModulesIpcOptions,
   payload: ModuleCallRequest | null,
 ): Promise<ModuleCallSuccess | ModuleCallError> {
@@ -951,9 +964,10 @@ export async function installAction(
   }
 
   emitModuleEvent(opts, {
-    kind: "enabled",
+    kind: "install",
     moduleId: result.module.manifest.id,
     scopeUnit: result.module.scopeUnit,
+    version: result.module.manifest.version,
   });
 
   return {
@@ -991,7 +1005,7 @@ export async function uninstallAction(
   }
 
   emitModuleEvent(opts, {
-    kind: "disabled",
+    kind: "uninstall",
     moduleId: payload.moduleId,
     scopeUnit: payload.scopeUnit ?? opts.scopeUnit ?? "global",
   });

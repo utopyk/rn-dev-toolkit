@@ -22,6 +22,11 @@ import type {
   RegisteredModule,
 } from "../../src/modules/registry.js";
 import type { PanelBridge, PanelBounds } from "../panel-bridge.js";
+import {
+  callModuleTool,
+  type ModuleCallError,
+  type ModuleCallSuccess,
+} from "../../src/app/modules-ipc.js";
 
 // ---------------------------------------------------------------------------
 // Wire-format types
@@ -75,6 +80,42 @@ export type HostCallReply =
         | "HOST_CALL_FAILED";
       message: string;
     };
+
+/**
+ * Payload for `modules:call-tool` — panels invoking their own subprocess
+ * tools. Different from `modules:host-call` (which resolves against the
+ * host `CapabilityRegistry` for cross-module capabilities). `moduleId`
+ * is the panel's bound module — the Electron registrar derives it from
+ * the sender identity, not from the renderer.
+ */
+export interface CallToolPayload {
+  /**
+   * Tool name WITHOUT the `<moduleId>__` prefix. Matches the manifest's
+   * declared tool after `runModule` strips the prefix.
+   */
+  tool: string;
+  args: Record<string, unknown>;
+  /** Per-call override for the cold-start SLO; rarely set. */
+  callTimeoutMs?: number;
+  /**
+   * Pass `true` when the panel has walked a user-visible confirmation
+   * for a `destructiveHint: true` tool. `resolveCallTool` rejects
+   * destructive tools without this token — the MCP-side proxy enforces
+   * the same gate via `permissionsAccepted[tool]`, so Phase 7 keeps
+   * agent-native parity with the panel surface.
+   */
+  confirmed?: boolean;
+}
+
+export type CallToolError =
+  | ModuleCallError
+  | {
+      kind: "error";
+      code: "E_DESTRUCTIVE_REQUIRES_CONFIRM";
+      message: string;
+    };
+
+export type CallToolReply = ModuleCallSuccess | CallToolError;
 
 // ---------------------------------------------------------------------------
 // Pure resolution logic — exported for unit tests
@@ -190,6 +231,65 @@ function findRegistered(
   moduleId: string,
 ): RegisteredModule | undefined {
   return registry.getAllManifests().find((r) => r.manifest.id === moduleId);
+}
+
+/**
+ * Pure resolution for `modules:call-tool` — a panel invoking one of its
+ * own module's subprocess tools. The moduleId comes from the sender's
+ * panel registration (caller-supplied), not from the renderer payload, so
+ * a panel can't ask another module to run a tool on its behalf.
+ *
+ * Reuses the `callModuleTool` helper from `modules-ipc.ts` so the
+ * MCP-side `modules/call` dispatch and the panel-side `modules:call-tool`
+ * funnel through the same acquire → sendRequest → release flow.
+ *
+ * Destructive-tool gate (P0, Phase 7 review): tools declared with
+ * `destructiveHint: true` in the manifest REQUIRE `payload.confirmed ===
+ * true`. The MCP-proxy side (`src/mcp/module-proxy.ts`) applies the
+ * equivalent gate via `permissionsAccepted[toolName]`. Without this,
+ * a panel XSS or a misbehaving in-panel button could silently
+ * uninstall apps / wipe device data.
+ */
+export async function resolveCallTool(
+  manager: ModuleHostManager,
+  registry: ModuleRegistry,
+  moduleId: string,
+  payload: CallToolPayload | null,
+): Promise<CallToolReply> {
+  if (!payload || typeof payload.tool !== "string") {
+    return {
+      kind: "error",
+      code: "E_MODULE_CALL_FAILED",
+      message: "modules:call-tool requires { tool, args? }",
+    };
+  }
+
+  const reg = registry.getAllManifests().find((r) => r.manifest.id === moduleId);
+  const toolDecl = reg?.manifest.contributes?.mcp?.tools?.find((t) => {
+    // Match both the prefixed wire name and the bare name — panels
+    // typically pass the bare form (`"uninstall-app"`), tests may
+    // pass either.
+    return t.name === payload.tool || t.name === `${moduleId}__${payload.tool}`;
+  });
+  if (toolDecl?.destructiveHint === true && payload.confirmed !== true) {
+    return {
+      kind: "error",
+      code: "E_DESTRUCTIVE_REQUIRES_CONFIRM",
+      message: `Tool "${payload.tool}" is marked destructiveHint: true. Re-invoke with { confirmed: true } after walking a user-visible confirmation.`,
+    };
+  }
+
+  return callModuleTool(
+    { manager, registry },
+    {
+      moduleId,
+      tool: payload.tool,
+      args: payload.args ?? {},
+      ...(payload.callTimeoutMs !== undefined
+        ? { callTimeoutMs: payload.callTimeoutMs }
+        : {}),
+    },
+  );
 }
 
 // ---------------------------------------------------------------------------

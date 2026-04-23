@@ -30,3 +30,12 @@ export type {
   RunModuleOptions,
   ToolHandler,
 } from "./module-runtime.js";
+export {
+  num,
+  requireNum,
+  requireStr,
+  ringCursor,
+  str,
+  strArr,
+  type Args,
+} from "./args.js";

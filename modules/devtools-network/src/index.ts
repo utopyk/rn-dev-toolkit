@@ -21,7 +21,13 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  num,
+  requireStr,
+  ringCursor,
   runModule,
+  str,
+  strArr,
+  type Args,
   type ModuleManifest,
   type ModuleToolContext,
 } from "@rn-dev/module-sdk";
@@ -34,7 +40,6 @@ import {
   type ClearArgs,
   type GetArgs,
   type ListArgs,
-  type NetworkCursor,
   type SelectTargetArgs,
   type StatusArgs,
 } from "./tools.js";
@@ -44,28 +49,11 @@ export const MODULE_ID = "devtools-network" as const;
 // ---------------------------------------------------------------------------
 // Arg narrowing
 //
-// The SDK types every tool handler's args as `Record<string, unknown>` so
-// the wire contract stays typed only at the JSON-Schema boundary. The
-// module's handler functions want precise shapes. Each `toXArgs` coerces
-// the incoming `Record<string, unknown>` into the module's handler shape,
-// pulling fields defensively with runtime narrowing. MCP validates the
-// schema upstream, but a direct unix-socket poke or a schema mismatch
-// must not blow up the handler — narrow, then dispatch.
+// General-purpose narrowers (`str`, `num`, `strArr`, `ringCursor`,
+// `requireStr`, `Args`) live in the SDK — imported via
+// `@rn-dev/module-sdk`. The `statusRange` tuple narrower is specific to
+// HTTP status-range filters, so it stays local.
 // ---------------------------------------------------------------------------
-
-type Args = Record<string, unknown>;
-
-function str(args: Args, key: string): string | undefined {
-  const v = args[key];
-  return typeof v === "string" && v.length > 0 ? v : undefined;
-}
-
-function strArr(args: Args, key: string): string[] | undefined {
-  const v = args[key];
-  if (!Array.isArray(v)) return undefined;
-  const out = v.filter((s): s is string => typeof s === "string" && s.length > 0);
-  return out.length > 0 ? out : undefined;
-}
 
 function statusRange(args: Args): [number, number] | undefined {
   const v = args["statusRange"];
@@ -75,19 +63,6 @@ function statusRange(args: Args): [number, number] | undefined {
   if (typeof a !== "number" || !Number.isFinite(a)) return undefined;
   if (typeof b !== "number" || !Number.isFinite(b)) return undefined;
   return [a, b];
-}
-
-function cursor(args: Args): NetworkCursor | undefined {
-  const v = args["since"];
-  if (!v || typeof v !== "object") return undefined;
-  const c = v as { bufferEpoch?: unknown; sequence?: unknown };
-  if (typeof c.bufferEpoch !== "number" || !Number.isFinite(c.bufferEpoch)) {
-    return undefined;
-  }
-  if (typeof c.sequence !== "number" || !Number.isFinite(c.sequence)) {
-    return undefined;
-  }
-  return { bufferEpoch: c.bufferEpoch, sequence: c.sequence };
 }
 
 function toStatusArgs(args: Args): StatusArgs {
@@ -100,31 +75,29 @@ function toListArgs(args: Args): ListArgs {
   const urlRegex = str(args, "urlRegex");
   const methods = strArr(args, "methods");
   const range = statusRange(args);
-  const since = cursor(args);
-  const limit = args["limit"];
+  const since = ringCursor(args);
+  const limit = num(args, "limit");
   if (wk !== undefined) out.worktree = wk;
   if (urlRegex !== undefined) out.urlRegex = urlRegex;
   if (methods !== undefined) out.methods = methods;
   if (range !== undefined) out.statusRange = range;
   if (since !== undefined) out.since = since;
-  if (typeof limit === "number") out.limit = limit;
+  if (limit !== undefined) out.limit = limit;
   return out;
 }
 
 function toGetArgs(args: Args): GetArgs {
-  const requestId = str(args, "requestId");
-  if (requestId === undefined) {
-    throw new Error("devtools-network__get: requestId is required");
-  }
-  return { worktree: str(args, "worktree"), requestId };
+  return {
+    worktree: str(args, "worktree"),
+    requestId: requireStr(args, "requestId", "devtools-network__get"),
+  };
 }
 
 function toSelectTargetArgs(args: Args): SelectTargetArgs {
-  const targetId = str(args, "targetId");
-  if (targetId === undefined) {
-    throw new Error("devtools-network__select-target: targetId is required");
-  }
-  return { worktree: str(args, "worktree"), targetId };
+  return {
+    worktree: str(args, "worktree"),
+    targetId: requireStr(args, "targetId", "devtools-network__select-target"),
+  };
 }
 
 function toClearArgs(args: Args): ClearArgs {

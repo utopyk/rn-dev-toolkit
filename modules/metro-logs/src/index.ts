@@ -16,7 +16,11 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  num,
+  ringCursor,
   runModule,
+  str,
+  type Args,
   type ModuleManifest,
   type ModuleToolContext,
 } from "@rn-dev/module-sdk";
@@ -28,43 +32,22 @@ import {
   type ListArgs,
   type StatusArgs,
 } from "./tools.js";
-import type { MetroLogsCursor, MetroLogStream } from "./types.js";
+import type { MetroLogStream } from "./types.js";
 
 export const MODULE_ID = "metro-logs" as const;
 
 // ---------------------------------------------------------------------------
 // Arg narrowing
 //
-// Runtime narrowers for the JSON-Schema-validated wire args. MCP
-// validates against the manifest's inputSchema before dispatch, but a
-// direct unix-socket poke or a schema mismatch must not blow up the
-// handler. Mirrors the Phase 10 P2-10 typed-wrapper pattern.
+// General-purpose narrowers (`str`, `num`, `ringCursor`, `Args`) live in
+// the SDK — imported via `@rn-dev/module-sdk`. Module-specific narrowers
+// (the `"stdout" | "stderr"` `stream` union) stay local.
 // ---------------------------------------------------------------------------
-
-type Args = Record<string, unknown>;
-
-function str(args: Args, key: string): string | undefined {
-  const v = args[key];
-  return typeof v === "string" && v.length > 0 ? v : undefined;
-}
 
 function stream(args: Args): MetroLogStream | undefined {
   const v = args["stream"];
   if (v === "stdout" || v === "stderr") return v;
   return undefined;
-}
-
-function cursor(args: Args): MetroLogsCursor | undefined {
-  const v = args["since"];
-  if (!v || typeof v !== "object") return undefined;
-  const c = v as { bufferEpoch?: unknown; sequence?: unknown };
-  if (typeof c.bufferEpoch !== "number" || !Number.isFinite(c.bufferEpoch)) {
-    return undefined;
-  }
-  if (typeof c.sequence !== "number" || !Number.isFinite(c.sequence)) {
-    return undefined;
-  }
-  return { bufferEpoch: c.bufferEpoch, sequence: c.sequence };
 }
 
 function toStatusArgs(args: Args): StatusArgs {
@@ -76,13 +59,13 @@ function toListArgs(args: Args): ListArgs {
   const wk = str(args, "worktree");
   const sub = str(args, "substring");
   const str2 = stream(args);
-  const since = cursor(args);
-  const limit = args["limit"];
+  const since = ringCursor(args);
+  const limit = num(args, "limit");
   if (wk !== undefined) out.worktree = wk;
   if (sub !== undefined) out.substring = sub;
   if (str2 !== undefined) out.stream = str2;
   if (since !== undefined) out.since = since;
-  if (typeof limit === "number") out.limit = limit;
+  if (limit !== undefined) out.limit = limit;
   return out;
 }
 

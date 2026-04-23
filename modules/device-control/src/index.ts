@@ -14,7 +14,12 @@ import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
+  num,
+  requireNum,
+  requireStr,
   runModule,
+  str,
+  type Args,
   type ModuleManifest,
 } from "@rn-dev/module-sdk";
 import type { DeviceAdapter, Platform } from "./adapter.js";
@@ -61,45 +66,7 @@ async function loadManifest(entryDir: string): Promise<ModuleManifest> {
   return JSON.parse(raw) as ModuleManifest;
 }
 
-// ---------------------------------------------------------------------------
-// Arg narrowing — Phase 10 P2-10.
-//
-// The SDK types every tool handler's args as `Record<string, unknown>` so
-// the wire contract stays typed only at the JSON-Schema boundary. The
-// module's handler functions want precise shapes. Each `toXArgs` coerces
-// the incoming record, pulling fields defensively with runtime narrowing.
-// MCP validates the schema upstream, but a direct unix-socket poke or a
-// schema mismatch must not blow up the handler — narrow, then dispatch.
-// Mirrors the pattern established in modules/devtools-network/src/index.ts.
-// ---------------------------------------------------------------------------
-
-type Args = Record<string, unknown>;
-
-function str(args: Args, key: string): string | undefined {
-  const v = args[key];
-  return typeof v === "string" && v.length > 0 ? v : undefined;
-}
-
-function num(args: Args, key: string): number | undefined {
-  const v = args[key];
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
-}
-
-function requireStr(args: Args, key: string, tool: string): string {
-  const v = str(args, key);
-  if (v === undefined) {
-    throw new Error(`${tool}: ${key} is required`);
-  }
-  return v;
-}
-
-function requireNum(args: Args, key: string, tool: string): number {
-  const v = num(args, key);
-  if (v === undefined) {
-    throw new Error(`${tool}: ${key} is required`);
-  }
-  return v;
-}
+// Arg narrowing: all primitives imported from `@rn-dev/module-sdk`.
 
 function toListArgs(args: Args): ListArgs {
   const p = args["platform"];

@@ -312,5 +312,34 @@ export function createProgram(): Command {
       await startMcpServer();
     });
 
+  // Daemon (infra — hidden from --help). Spawned by clients via
+  // `connectToDaemon(worktree)`; also invokable directly for debugging.
+  program
+    .command("daemon <worktree>", { hidden: true })
+    .description("Start the per-worktree daemon (infra)")
+    .option("--foreground", "Stay attached; skip the self-detach dance")
+    .action(async (worktree: string, options: { foreground?: boolean }) => {
+      const { runDaemon } = await import("../daemon/index.js");
+      await runDaemon({ worktree, foreground: options.foreground === true });
+    });
+
+  program
+    .command("daemon-shutdown <worktree>", { hidden: true })
+    .description("Gracefully shut down the per-worktree daemon (infra)")
+    .action(async (worktree: string) => {
+      const sockPath = path.join(worktree, ".rn-dev", "sock");
+      const client = new IpcClient(sockPath);
+      if (!(await client.isServerRunning())) {
+        console.error(`No rn-dev daemon running at ${sockPath}`);
+        process.exit(1);
+      }
+      await client.send({
+        type: "command",
+        action: "daemon/shutdown",
+        id: Date.now().toString(),
+      });
+      console.log("Shutdown sent");
+    });
+
   return program;
 }

@@ -1,0 +1,7 @@
+{
+  "name": "minimal-rn-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Stub React Native project used as a worktree argument by daemon integration tests. Not a real RN app; just enough for the daemon to treat its directory as a valid worktree.",
+  "main": "index.js"
+}

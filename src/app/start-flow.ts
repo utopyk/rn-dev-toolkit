@@ -5,14 +5,6 @@ import { createRoot } from "@opentui/react";
 
 import { detectProjectRoot, getCurrentBranch } from "../core/project.js";
 import { ProfileStore } from "../core/profile.js";
-import { ArtifactStore } from "../core/artifact.js";
-import { MetroManager } from "../core/metro.js";
-import { DevToolsManager } from "../core/devtools.js";
-import { FileWatcher } from "../core/watcher.js";
-import { IpcServer } from "../core/ipc.js";
-import type { ModuleHostManager } from "../core/module-host/manager.js";
-import { bootSessionServices } from "../core/session/boot.js";
-import { readHostVersion } from "../core/host-version.js";
 import { loadTheme, getThemeEffects } from "../ui/theme-provider.js";
 import {
   ModuleRegistry,
@@ -23,6 +15,10 @@ import {
 import { firstRunSetup } from "./first-run.js";
 import { App } from "./App.js";
 import { serviceBus } from "./service-bus.js";
+import {
+  connectToDaemonSession,
+  type DaemonSession,
+} from "./client/session.js";
 import type { Profile, Platform, RunMode } from "../core/types.js";
 
 // ---------------------------------------------------------------------------
@@ -41,6 +37,16 @@ export interface StartOptions {
 
 // ---------------------------------------------------------------------------
 // startFlow — the main orchestrator for `rn-dev start`
+//
+// Phase 13.3 — the TUI is now a thin client of the per-worktree daemon.
+// `connectToDaemonSession` auto-spawns the daemon if needed, runs
+// session/start, and opens a single events/subscribe stream that feeds
+// MetroClient / DevToolsClient / BuilderClient / WatcherClient adapters.
+// Those adapters are what the React UI consumes via the serviceBus.
+//
+// The daemon holds Metro / DevTools / Builder / Watcher + module host.
+// Quitting the TUI does NOT tear the session down (the merge-gate test
+// in `src/app/__tests__/tui-client.test.ts` pins that).
 // ---------------------------------------------------------------------------
 
 export async function startFlow(options: StartOptions): Promise<void> {
@@ -54,12 +60,12 @@ export async function startFlow(options: StartOptions): Promise<void> {
   // 2. First-run check
   await firstRunSetup(projectRoot);
 
-  // 3. Initialize stores
+  // 3. Initialize profile store. The artifact store + module registry
+  //    now live in the daemon; the TUI only needs the profile store
+  //    (and below, a TUI-local ModuleRegistry for rendering the
+  //    Ink-style module tabs).
   const profileStore = new ProfileStore(
     path.join(projectRoot, ".rn-dev", "profiles")
-  );
-  const artifactStore = new ArtifactStore(
-    path.join(projectRoot, ".rn-dev", "artifacts")
   );
 
   // 4. Load theme
@@ -67,10 +73,11 @@ export async function startFlow(options: StartOptions): Promise<void> {
   const theme = loadTheme(themeName);
   const effects = getThemeEffects(themeName);
 
-  // 5. Register legacy Ink-style modules onto a registry the TUI renders from.
-  //    Manifest-shape built-ins + Marketplace + user-global 3p modules are
-  //    layered on later inside `startServicesAsync` via `createModuleSystem`,
-  //    once the capability registry + host version are resolved.
+  // 5. Register legacy Ink-style modules for TUI rendering. The daemon
+  //    has its own manifest-shape module registry; this one is
+  //    TUI-only and only carries the built-in Ink tabs. (Manifest-shape
+  //    modules don't guarantee a TUI view per CLAUDE.md, so not
+  //    mirroring the daemon's registry here is acceptable for 13.3.)
   const registry = new ModuleRegistry();
   registry.register(devSpaceModule);
   registry.register(lintTestModule);
@@ -90,35 +97,23 @@ export async function startFlow(options: StartOptions): Promise<void> {
     }
     profile = loaded;
   } else {
-    // Try to find default profile for current worktree+branch
     const branch = (await getCurrentBranch(projectRoot)) ?? "main";
     const worktree: string | null = null;
     const defaultProfile = profileStore.findDefault(worktree, branch);
     if (defaultProfile) {
       profile = defaultProfile;
     } else {
-      // No profile found — need wizard
       needsWizard = true;
     }
   }
 
-  // Apply CLI overrides if we already have a profile
-  if (profile) {
-    if (options.platform) profile.platform = options.platform as Platform;
-    if (options.mode) profile.mode = options.mode as RunMode;
-    if (options.port) profile.metroPort = options.port;
-  }
+  if (profile) applyCliOverrides(profile, options);
 
-  // 7. Declare service references (populated after initial render)
-  let metro: MetroManager | undefined;
-  let devtools: DevToolsManager | undefined;
-  let watcher: FileWatcher | null = null;
-  let ipc: IpcServer | undefined;
-  let worktreeKey: string | undefined;
-  let startupLog: string[] = [];
-  let builder: import("../core/builder.js").Builder | undefined;
+  // 7. Track the live DaemonSession so cleanup can stop it and avoid
+  //    leaving the daemon pinned to a stopping → stopped edge.
+  let session: DaemonSession | null = null;
 
-  // 8. Create OpenTUI renderer FIRST so TUI appears immediately
+  // 8. Create OpenTUI renderer FIRST so the TUI appears immediately.
   const vignetteEffect = new VignetteEffect(effects.vignetteStrength);
 
   const renderer = await createCliRenderer({
@@ -134,25 +129,24 @@ export async function startFlow(options: StartOptions): Promise<void> {
 
   const root = createRoot(renderer);
 
-  // Helper to render the app with given props
   function renderApp(appProps: Record<string, unknown>): void {
-    root.render(React.createElement(App, appProps));
+    root.render(
+      React.createElement(
+        App,
+        appProps as unknown as React.ComponentProps<typeof App>,
+      ),
+    );
   }
 
-  // 9. Render single OpenTUI instance — either wizard or TUI
+  // 9. Render the initial App — wizard or TUI scaffold.
   renderApp({
     theme,
     registry,
     wizardMode: needsWizard,
     projectRoot,
     profile,
-    metro,
-    watcher,
-    worktreeKey,
-    startupLog,
-    builder,
+    startupLog: [] as string[],
     onWizardComplete: async (wizardProfile: Profile) => {
-      // Save the profile
       const fullProfile: Profile = {
         name: wizardProfile.name ?? `profile-${Date.now()}`,
         isDefault: wizardProfile.isDefault ?? true,
@@ -174,114 +168,65 @@ export async function startFlow(options: StartOptions): Promise<void> {
         projectRoot,
       };
 
-      // Apply CLI overrides
-      if (options.platform)
-        fullProfile.platform = options.platform as Platform;
-      if (options.mode) fullProfile.mode = options.mode as RunMode;
-      if (options.port) fullProfile.metroPort = options.port;
+      applyCliOverrides(fullProfile, options);
 
       profileStore.save(fullProfile);
 
-      // Start services with the new profile
-      const result = await startServices(
-        fullProfile,
-        projectRoot,
-        artifactStore,
-        registry,
-      );
+      const ready = await connectAndWire(fullProfile, projectRoot);
+      session = ready;
 
-      // Re-render with profile and services
       renderApp({
         theme,
         registry,
         wizardMode: false,
         profile: fullProfile,
-        metro: result.metro,
-        watcher: result.watcher,
-        worktreeKey: result.worktreeKey,
-        startupLog: result.startupLog,
-        builder: result.builder,
+        metro: ready.metro,
+        watcher: ready.watcher,
+        worktreeKey: ready.worktreeKey,
+        startupLog: [] as string[],
+        builder: ready.builder,
       });
 
-      // Trigger build after re-render (quick mode skips this — the already-
-      // installed app connects to Metro directly).
-      if (fullProfile.mode !== "quick") {
-        const platformsToBuild: Array<"ios" | "android"> =
-          fullProfile.platform === "both" ? ["ios", "android"] : [fullProfile.platform];
-
-        for (const plat of platformsToBuild) {
-          const devId = plat === "ios" ? fullProfile.devices?.ios : fullProfile.devices?.android;
-          result.builder.build({
-            projectRoot: fullProfile.worktree ?? projectRoot,
-            platform: plat,
-            deviceId: devId ?? undefined,
-            port: fullProfile.metroPort,
-            variant: fullProfile.buildVariant,
-            env: fullProfile.env,
-          });
-        }
-      }
+      triggerBuildsIfNeeded(ready, fullProfile, projectRoot);
     },
     onWizardCancel: () => {
       process.exit(0);
     },
   });
 
-  // 10. Start services async on the main thread (all shell calls use Bun.spawn, never blocks)
+  // 10. Connect to the daemon as a client and wire the adapters into
+  //     the serviceBus. React components update via serviceBus events
+  //     — the initial render above is just the scaffolding.
   if (profile && !needsWizard) {
-    startServicesAsync(profile, projectRoot, artifactStore, registry).then((result) => {
-      metro = result.metro;
-      devtools = result.devtools;
-      watcher = result.watcher;
-      ipc = result.ipc;
-      worktreeKey = result.worktreeKey;
-      builder = result.builder;
-
-      // Trigger build after a short delay so React's useEffect has time
-      // to subscribe to builder events before they start firing. Quick
-      // mode skips this entirely — the existing installed app connects
-      // to Metro directly.
-      if (profile.mode !== "quick") {
-        setTimeout(() => {
-          const platformsToBuild: Array<"ios" | "android"> =
-            profile.platform === "both" ? ["ios", "android"] : [profile.platform];
-
-          for (const plat of platformsToBuild) {
-            const devId = plat === "ios" ? profile.devices?.ios : profile.devices?.android;
-            result.builder.build({
-              projectRoot: profile.worktree ?? projectRoot,
-              platform: plat,
-              deviceId: devId ?? undefined,
-              port: profile.metroPort,
-              variant: profile.buildVariant,
-              env: profile.env,
-            });
-          }
-        }, 200);
-      }
-    }).catch((err) => {
-      serviceBus.log(`\u2716 Service startup error: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    connectAndWire(profile, projectRoot)
+      .then((ready) => {
+        session = ready;
+        triggerBuildsIfNeeded(ready, profile!, projectRoot);
+      })
+      .catch((err) => {
+        serviceBus.log(
+          `\u2716 Daemon connect failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      });
   }
 
-  // 11. Handle cleanup on exit — must destroy renderer to restore terminal
+  // 11. Cleanup on exit — stop the session so the daemon returns to
+  //     the idle state cleanly. Session cleanup is best-effort: if
+  //     the daemon is unreachable we still want to restore the
+  //     terminal and exit.
   const cleanup = (): void => {
-    // Dispose devtools BEFORE metro so its metro.on('status') listener is
-    // released cleanly (see DevToolsManager.dispose).
-    devtools?.dispose().catch(() => { /* best-effort on shutdown */ });
-    metro?.stopAll();
-    watcher?.stop();
-    ipc?.stop();
+    session?.stop().catch(() => {
+      /* daemon unreachable on shutdown — non-fatal */
+    });
     try {
       root.unmount();
       renderer.destroy();
     } catch {
-      // renderer may already be destroyed
+      /* renderer may already be destroyed */
     }
-    // Explicitly disable mouse reporting and restore terminal
     process.stdout.write("\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l");
-    process.stdout.write("\x1b[?25h");  // show cursor
-    process.stdout.write("\x1b[?1049l"); // exit alternate screen
+    process.stdout.write("\x1b[?25h");
+    process.stdout.write("\x1b[?1049l");
   };
 
   process.on("SIGINT", () => {
@@ -294,99 +239,63 @@ export async function startFlow(options: StartOptions): Promise<void> {
     process.exit(0);
   });
 
-  // Also handle the 'q' key quit from AppContext
   process.on("exit", () => {
     cleanup();
   });
 }
 
 // ---------------------------------------------------------------------------
-// Helper: start all services async (runs on main thread, never blocks)
+// Helper: connect to the daemon + publish adapter refs on the serviceBus
 // ---------------------------------------------------------------------------
 
-async function startServicesAsync(
-  profile: Profile,
-  projectRoot: string,
-  artifactStore: ArtifactStore,
-  moduleRegistry: ModuleRegistry,
-): Promise<{
-  metro: MetroManager;
-  devtools: DevToolsManager;
-  watcher: FileWatcher | null;
-  ipc: IpcServer;
-  worktreeKey: string;
-  builder: import("../core/builder.js").Builder;
-  moduleHost: ModuleHostManager;
-  moduleRegistry: ModuleRegistry;
-}> {
-  const emit = (line: string) => serviceBus.log(line);
-
-  // IPC server — owned by the TUI caller so the `.rn-dev/sock` path is
-  // derived from the TUI's project root, not the daemon's worktree.
-  const ipc = new IpcServer(path.join(projectRoot, ".rn-dev", "sock"));
-  await ipc.start();
-
-  const hostVersion = readHostVersion();
-  const services = await bootSessionServices({
-    profile,
-    projectRoot,
-    artifactStore,
-    moduleRegistry,
-    emit,
-    hostVersion,
-    ipc,
-  });
-
-  // TUI-specific fan-out into the React-propagation service bus. The
-  // daemon path does not use serviceBus; it emits events over
-  // events/subscribe instead.
-  serviceBus.setMetro(services.metro);
-  serviceBus.setWorktreeKey(services.worktreeKey);
-  if (services.watcher) serviceBus.setWatcher(services.watcher);
-  serviceBus.setDevTools(services.devtools);
-  serviceBus.setBuilder(services.builder);
-  serviceBus.setHostVersion(hostVersion);
-  serviceBus.setModuleHost(services.moduleHost);
-  serviceBus.setModuleRegistry(services.moduleRegistry);
-  serviceBus.setModuleEventsBus(services.moduleEvents);
-
-  return {
-    metro: services.metro,
-    devtools: services.devtools,
-    watcher: services.watcher,
-    ipc,
-    worktreeKey: services.worktreeKey,
-    builder: services.builder,
-    moduleHost: services.moduleHost,
-    moduleRegistry: services.moduleRegistry,
-  };
+function applyCliOverrides(profile: Profile, options: StartOptions): void {
+  if (options.platform) profile.platform = options.platform as Platform;
+  if (options.mode) profile.mode = options.mode as RunMode;
+  if (options.port) profile.metroPort = options.port;
 }
 
-// ---------------------------------------------------------------------------
-// Helper: start services (used by wizard onComplete flow)
-// ---------------------------------------------------------------------------
-
-async function startServices(
+async function connectAndWire(
   profile: Profile,
   projectRoot: string,
-  artifactStore: ArtifactStore,
-  moduleRegistry: ModuleRegistry,
-): Promise<{
-  metro: MetroManager;
-  devtools: DevToolsManager;
-  watcher: FileWatcher | null;
-  ipc: IpcServer;
-  worktreeKey: string;
-  startupLog: string[];
-  builder: import("../core/builder.js").Builder;
-  moduleHost: ModuleHostManager;
-  moduleRegistry: ModuleRegistry;
-}> {
-  const result = await startServicesAsync(
-    profile,
-    projectRoot,
-    artifactStore,
-    moduleRegistry,
-  );
-  return { ...result, startupLog: [] };
+): Promise<DaemonSession> {
+  const ready = await connectToDaemonSession(projectRoot, profile);
+  serviceBus.setMetro(ready.metro);
+  serviceBus.setDevTools(ready.devtools);
+  serviceBus.setBuilder(ready.builder);
+  serviceBus.setWatcher(ready.watcher);
+  serviceBus.setWorktreeKey(ready.worktreeKey);
+  return ready;
+}
+
+function triggerBuildsIfNeeded(
+  session: DaemonSession,
+  profile: Profile,
+  projectRoot: string,
+): void {
+  // Quick mode skips builds — the existing installed app connects to
+  // Metro directly.
+  if (profile.mode === "quick") return;
+
+  const platformsToBuild: Array<"ios" | "android"> =
+    profile.platform === "both"
+      ? ["ios", "android"]
+      : [profile.platform as "ios" | "android"];
+
+  // Small delay so React's useEffect subscribes to builder events
+  // before the daemon starts emitting them. Same rationale as the
+  // pre-13.3 TUI path.
+  setTimeout(() => {
+    for (const plat of platformsToBuild) {
+      const devId =
+        plat === "ios" ? profile.devices?.ios : profile.devices?.android;
+      void session.builder.build({
+        projectRoot: profile.worktree ?? projectRoot,
+        platform: plat,
+        deviceId: devId ?? undefined,
+        port: profile.metroPort,
+        variant: profile.buildVariant,
+        env: profile.env,
+      });
+    }
+  }, 200);
 }

@@ -54,6 +54,29 @@ export class Builder extends EventEmitter {
   private detectedXcresultPath: string | null = null;
 
   build(options: BuildOptions): void {
+    // Concurrency guard: Phase 13.3 Security P1-2 — before this, every
+    // call to build() overwrote `this.process` with a fresh subprocess
+    // and orphaned the previous one. A client looping `builder/build`
+    // over the daemon socket could fork-bomb xcodebuild/gradle
+    // children and OOM the host. Refuse to start a second build while
+    // one is live; emit a `done` with a meaningful error so listeners
+    // aren't left hanging.
+    if (this.process && this.process.exitCode === null) {
+      this.emit("done", {
+        success: false,
+        platform: options.platform,
+        errors: [
+          {
+            source: options.platform === "ios" ? "xcodebuild" : "gradle",
+            summary:
+              "build already in progress — refusing to start a second build on the same Builder",
+            rawOutput: "",
+          },
+        ],
+      });
+      return;
+    }
+
     const { projectRoot, platform, deviceId, port, variant, env } = options;
 
     const args = [`run-${platform}`, "--port", String(port), "--verbose"];

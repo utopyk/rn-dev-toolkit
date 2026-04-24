@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { IpcClient } from "../core/ipc.js";
 
@@ -78,19 +78,45 @@ export function unlinkStale(path: string): void {
   }
 }
 
+/**
+ * Fork a detached daemon subprocess and return its pid. Used by both
+ * `connectToDaemon` (client side — we need a daemon to talk to) and
+ * `runDaemon` when invoked without `--foreground` (daemon side —
+ * detach from the parent shell).
+ *
+ * Validates daemonEntry + worktree up front so both call sites share
+ * the same error discipline — previously `runDaemon::detachAndExit`
+ * duplicated these checks with slightly different phrasing (deferred
+ * Simplicity #2 from Phase 13.2; collapsed in PR #17).
+ */
 export function spawnDetachedDaemon(
   worktree: string,
   daemonEntry?: string,
-): void {
+): ChildProcess {
   const entry = daemonEntry ?? process.argv[1];
   if (typeof entry !== "string" || entry.length === 0) {
     throw new Error(
-      "connectToDaemon: cannot locate CLI entry (pass daemonEntry option or ensure process.argv[1] is set)",
+      "spawnDetachedDaemon: cannot locate CLI entry (pass daemonEntry option or ensure process.argv[1] is set)",
     );
   }
   if (!existsSync(entry)) {
     throw new Error(
-      `connectToDaemon: CLI entry ${entry} does not exist on disk`,
+      `spawnDetachedDaemon: CLI entry ${entry} does not exist on disk`,
+    );
+  }
+  try {
+    const wtStat = statSync(worktree);
+    if (!wtStat.isDirectory()) {
+      throw new Error(
+        `spawnDetachedDaemon: worktree ${worktree} is not a directory`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("spawnDetachedDaemon:")) {
+      throw err;
+    }
+    throw new Error(
+      `spawnDetachedDaemon: worktree ${worktree} does not exist`,
     );
   }
 
@@ -104,6 +130,7 @@ export function spawnDetachedDaemon(
     },
   );
   child.unref();
+  return child;
 }
 
 export async function waitForSocket(

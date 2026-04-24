@@ -18,6 +18,18 @@ export type ValidateProfileResult =
   | { ok: true; profile: Profile }
   | { ok: false; code: string; message: string };
 
+/**
+ * Shared guard result for the lower-level validators (path / env dict).
+ * These are exported so other daemon RPC handlers — `builder/build`
+ * accepts `projectRoot` + `env` on the same threat surface as
+ * `session/start` — can reuse the same checks instead of re-inventing
+ * looser variants. Every new RPC that takes a path or env dict from
+ * the wire MUST go through these.
+ */
+export type GuardCheckResult =
+  | { ok: true }
+  | { ok: false; code: string; message: string };
+
 const VALID_PLATFORMS: ReadonlySet<Platform> = new Set<Platform>([
   "ios",
   "android",
@@ -114,7 +126,7 @@ export function validateProfile(input: unknown): ValidateProfileResult {
     return fail("E_PROFILE_ONSAVE", "profile.onSave must be an array");
   }
 
-  const envCheck = checkEnv(p.env);
+  const envCheck = checkEnv(p.env, "profile.env");
   if (!envCheck.ok) return envCheck;
 
   const projectRootCheck = checkAbsolutePath(p.projectRoot, "profile.projectRoot");
@@ -127,15 +139,21 @@ export function validateProfile(input: unknown): ValidateProfileResult {
 function checkOptionalPath(
   value: unknown,
   field: string,
-): ValidateProfileResult | { ok: true } {
+): GuardCheckResult {
   if (value === null || value === undefined) return { ok: true };
   return checkAbsolutePath(value, field);
 }
 
-function checkAbsolutePath(
+/**
+ * Validate an absolute path string accepted over the IPC socket.
+ * Rejects empty, oversized, relative, or control-char-laden values.
+ * Shared by `profile.projectRoot` / `profile.worktree` (session/start)
+ * and `builder/build.projectRoot` (client RPC).
+ */
+export function checkAbsolutePath(
   value: unknown,
   field: string,
-): ValidateProfileResult | { ok: true } {
+): GuardCheckResult {
   if (typeof value !== "string") {
     return fail("E_PROFILE_PATH_NOT_STRING", `${field} must be a string`);
   }
@@ -157,9 +175,7 @@ function checkAbsolutePath(
   return { ok: true };
 }
 
-function checkDevices(
-  value: unknown,
-): ValidateProfileResult | { ok: true } {
+function checkDevices(value: unknown): GuardCheckResult {
   if (value === undefined || value === null) return { ok: true };
   if (typeof value !== "object") {
     return fail("E_PROFILE_DEVICES", "profile.devices must be an object");
@@ -174,9 +190,7 @@ function checkDevices(
   return { ok: true };
 }
 
-function checkPreflight(
-  value: unknown,
-): ValidateProfileResult | { ok: true } {
+function checkPreflight(value: unknown): GuardCheckResult {
   if (!value || typeof value !== "object") {
     return fail("E_PROFILE_PREFLIGHT", "profile.preflight must be an object");
   }
@@ -196,36 +210,47 @@ function checkPreflight(
   return { ok: true };
 }
 
-function checkEnv(value: unknown): ValidateProfileResult | { ok: true } {
+/**
+ * Validate an env-dict accepted over the IPC socket. Enforces the
+ * `LD_` / `DYLD_` / `NODE_OPTIONS` / `PATH` / `IFS` / `PS4` denylist
+ * that prevents a wire-level caller from injecting code into spawned
+ * subprocesses.
+ *
+ * Shared by `profile.env` (session/start) and `builder/build.env`
+ * (client RPC). The two RPCs MUST use the same denylist — Security
+ * P0-1 on PR #17 found that `builder/build` originally accepted env
+ * with no checks, reopening LD_PRELOAD as an RCE pivot.
+ */
+export function checkEnv(value: unknown, field: string): GuardCheckResult {
   if (value === undefined || value === null) return { ok: true };
   if (typeof value !== "object" || Array.isArray(value)) {
-    return fail("E_PROFILE_ENV", "profile.env must be an object");
+    return fail("E_PROFILE_ENV", `${field} must be an object`);
   }
   for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
     if (!ENV_KEY_PATTERN.test(k)) {
       return fail(
         "E_PROFILE_ENV_KEY",
-        `profile.env key "${k}" must match /^[A-Za-z_][A-Za-z0-9_]*$/`,
+        `${field} key "${k}" must match /^[A-Za-z_][A-Za-z0-9_]*$/`,
       );
     }
     for (const banned of ENV_KEY_DENYLIST) {
       if (typeof banned === "string" ? banned === k : banned.test(k)) {
         return fail(
           "E_PROFILE_ENV_BANNED",
-          `profile.env key "${k}" is on the denylist (LD_*, DYLD_*, NODE_OPTIONS, PATH, etc.)`,
+          `${field} key "${k}" is on the denylist (LD_*, DYLD_*, NODE_OPTIONS, PATH, etc.)`,
         );
       }
     }
     if (typeof v !== "string") {
       return fail(
         "E_PROFILE_ENV_VALUE_TYPE",
-        `profile.env["${k}"] must be a string`,
+        `${field}["${k}"] must be a string`,
       );
     }
     if (v.includes("\0")) {
       return fail(
         "E_PROFILE_ENV_VALUE_NUL",
-        `profile.env["${k}"] must not contain NUL`,
+        `${field}["${k}"] must not contain NUL`,
       );
     }
   }

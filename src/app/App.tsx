@@ -5,8 +5,9 @@ import { MainLayout } from "../ui/layout/index.js";
 import { WizardContainer } from "../ui/wizard/index.js";
 import { AppProvider, useAppContext } from "./AppContext.js";
 import type { Profile, Theme } from "../core/types.js";
-import type { MetroManager } from "../core/metro.js";
-import type { FileWatcher } from "../core/watcher.js";
+import type { MetroClient } from "./client/metro-adapter.js";
+import type { WatcherClient } from "./client/watcher-adapter.js";
+import type { BuilderClient } from "./client/builder-adapter.js";
 import type { ModuleRegistry } from "../modules/index.js";
 
 // ---------------------------------------------------------------------------
@@ -21,11 +22,11 @@ interface AppProps {
   onWizardComplete?: (profile: Profile) => void;
   onWizardCancel?: () => void;
   profile?: Profile;
-  metro?: MetroManager;
-  watcher?: FileWatcher | null;
+  metro?: MetroClient;
+  watcher?: WatcherClient | null;
   worktreeKey?: string;
   startupLog?: string[];
-  builder?: import("../core/builder.js").Builder;
+  builder?: BuilderClient;
 }
 
 // ---------------------------------------------------------------------------
@@ -79,15 +80,18 @@ export function App({
   const [metroStatus, setMetroStatus] = useState<
     "starting" | "running" | "error" | "stopped"
   >("starting");
-  const [watcherEnabled, setWatcherEnabled] = useState(!!watcher);
+  // The watcher's live isRunning state is read via the client adapter
+  // on demand (see AppContext `w` shortcut). This prop is just a
+  // mount-time bool for MainLayout's initial chrome.
+  const watcherEnabled = !!watcher;
 
-  // Subscribe to metro status changes
+  // Subscribe to metro status changes from the daemon's
+  // `metro/status` event stream.
   useEffect(() => {
     if (!metro) return;
     const handler = ({
       status,
     }: {
-      worktreeKey: string;
       status: "starting" | "running" | "error" | "stopped";
     }): void => {
       setMetroStatus(status);
@@ -98,13 +102,22 @@ export function App({
     };
   }, [metro]);
 
+  // Seed metroStatus once on mount: the client adapter's getInstance
+  // round-trips to the daemon, so we fire it asynchronously and guard
+  // against the component unmounting before the reply lands.
   useEffect(() => {
-    if (!metro || !worktreeKey) return;
-    const instance = metro.getInstance(worktreeKey);
-    if (instance) {
-      setMetroStatus(instance.status);
-    }
-  }, [metro, worktreeKey]);
+    if (!metro) return;
+    let cancelled = false;
+    void (async () => {
+      const instance = await metro.getInstance();
+      if (!cancelled && instance) {
+        setMetroStatus(instance.status);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [metro]);
 
   const handleWizardComplete = useCallback(
     (partial: Partial<Profile>) => {

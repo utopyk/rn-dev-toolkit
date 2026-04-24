@@ -54,9 +54,14 @@ export type SessionEvent =
   | MetroStatusEvent
   | MetroLogEvent
   | DevtoolsStatusEvent
+  | DevtoolsDeltaEvent
   | ModulesStateChangedEvent
   | ModulesCrashedEvent
   | ModulesFailedEvent
+  | BuilderLineEvent
+  | BuilderProgressEvent
+  | BuilderDoneEvent
+  | WatcherActionCompleteEvent
   | SessionLogEvent;
 
 export interface SessionStatusEvent {
@@ -107,6 +112,71 @@ export interface ModulesFailedEvent {
   kind: "modules/failed";
   worktreeKey: string;
   data: { moduleId: string; scopeUnit: string; reason: string };
+}
+
+/**
+ * Coalesced network-capture delta fired by DevToolsManager every 100ms
+ * while a target session is attached. The payload carries identifiers
+ * only — clients re-query `devtools/listNetwork` to resolve entries.
+ */
+export interface DevtoolsDeltaEvent {
+  kind: "devtools/delta";
+  worktreeKey: string;
+  data: {
+    addedIds: readonly string[];
+    updatedIds: readonly string[];
+    evictedIds: readonly string[];
+  };
+}
+
+export interface BuilderLineEvent {
+  kind: "builder/line";
+  worktreeKey: string;
+  data: { text: string; stream: "stdout" | "stderr"; replace?: boolean };
+}
+
+export interface BuilderProgressEvent {
+  kind: "builder/progress";
+  worktreeKey: string;
+  data: { phase: string };
+}
+
+export interface BuilderDoneEvent {
+  kind: "builder/done";
+  worktreeKey: string;
+  data: {
+    success: boolean;
+    errors: BuilderErrorSnapshot[];
+    platform?: "ios" | "android";
+  };
+}
+
+/**
+ * Shape pushed over the wire for BuildError. Mirrors core/types.ts
+ * BuildError minus the heavy `rawOutput` — clients use builder/line
+ * events for the full output stream and don't need it twice.
+ */
+export interface BuilderErrorSnapshot {
+  source: "xcodebuild" | "gradle";
+  summary: string;
+  file?: string;
+  line?: number;
+  reason?: string;
+  suggestion?: string;
+}
+
+export interface WatcherActionCompleteEvent {
+  kind: "watcher/action-complete";
+  worktreeKey: string;
+  data: {
+    name: string;
+    result: {
+      action: string;
+      success: boolean;
+      output: string;
+      durationMs: number;
+    };
+  };
 }
 
 export interface SessionLogEvent {

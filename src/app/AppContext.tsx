@@ -1,9 +1,9 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import type { Profile } from "../core/types.js";
-import type { MetroManager } from "../core/metro.js";
-import type { FileWatcher } from "../core/watcher.js";
-import type { Builder } from "../core/builder.js";
-import type { DevToolsManager } from "../core/devtools.js";
+import type { MetroClient } from "./client/metro-adapter.js";
+import type { WatcherClient } from "./client/watcher-adapter.js";
+import type { BuilderClient } from "./client/builder-adapter.js";
+import type { DevToolsClient } from "./client/devtools-adapter.js";
 import type {
   CaptureMeta,
   NetworkEntry,
@@ -65,11 +65,11 @@ export function useAppContext(): AppContextValue {
 
 interface AppProviderProps {
   profile: Profile;
-  metro?: MetroManager;
-  watcher?: FileWatcher | null;
+  metro?: MetroClient;
+  watcher?: WatcherClient | null;
   worktreeKey?: string;
   startupLog?: string[];
-  builder?: Builder;
+  builder?: BuilderClient;
   wizardContent?: React.ReactNode;
   children: React.ReactNode;
 }
@@ -92,11 +92,11 @@ export function AppProvider({
   const [modal, setModal] = useState<ModalConfig | null>(null);
 
   // Live service references updated via service bus
-  const [liveMetro, setLiveMetro] = useState<MetroManager | undefined>(metro);
-  const [liveBuilder, setLiveBuilder] = useState<Builder | undefined>(builder);
-  const [liveWatcher, setLiveWatcher] = useState<FileWatcher | null | undefined>(watcher);
+  const [liveMetro, setLiveMetro] = useState<MetroClient | undefined>(metro);
+  const [liveBuilder, setLiveBuilder] = useState<BuilderClient | undefined>(builder);
+  const [liveWatcher, setLiveWatcher] = useState<WatcherClient | null | undefined>(watcher);
   const [liveWorktreeKey, setLiveWorktreeKey] = useState<string | undefined>(worktreeKey);
-  const [liveDevTools, setLiveDevTools] = useState<DevToolsManager | undefined>(undefined);
+  const [liveDevTools, setLiveDevTools] = useState<DevToolsClient | undefined>(undefined);
 
   // DevTools state — driven by the manager's 'delta' and 'status' events.
   const [networkEntries, setNetworkEntries] = useState<readonly NetworkEntry[]>([]);
@@ -109,11 +109,11 @@ export function AppProvider({
     const onLog = (text: string) => {
       setToolOutputLines((prev) => [...prev, text].slice(-500));
     };
-    const onMetro = (m: MetroManager) => setLiveMetro(m);
-    const onBuilder = (b: any) => setLiveBuilder(b);
-    const onWatcher = (w: FileWatcher) => setLiveWatcher(w);
+    const onMetro = (m: MetroClient) => setLiveMetro(m);
+    const onBuilder = (b: BuilderClient) => setLiveBuilder(b);
+    const onWatcher = (w: WatcherClient) => setLiveWatcher(w);
     const onWorktreeKey = (k: string) => setLiveWorktreeKey(k);
-    const onDevTools = (m: DevToolsManager) => setLiveDevTools(m);
+    const onDevTools = (m: DevToolsClient) => setLiveDevTools(m);
 
     serviceBus.on("log", onLog);
     serviceBus.on("metro", onMetro);
@@ -132,55 +132,65 @@ export function AppProvider({
     };
   }, []);
 
-  // Subscribe to DevToolsManager delta + status events. The manager's own
-  // query APIs (listNetwork, status) are the source of truth — we re-snapshot
-  // on every delta flush rather than maintaining a parallel entry list.
+  // Subscribe to DevToolsClient delta + status events. The daemon's own
+  // query RPCs (listNetwork, status) are the source of truth — we
+  // re-snapshot on every delta flush rather than maintaining a parallel
+  // entry list. Refresh is async now (round-trips to daemon) so we
+  // guard against the effect re-running while an in-flight fetch is
+  // still resolving.
   useEffect(() => {
-    if (!liveDevTools || !liveWorktreeKey) return;
+    if (!liveDevTools) return;
     const manager = liveDevTools;
-    const worktreeKey = liveWorktreeKey;
+    let cancelled = false;
 
-    const refresh = () => {
-      const list = manager.listNetwork(worktreeKey);
-      setNetworkEntries(list.entries);
-      setDevtoolsMeta(list.meta);
-      const status = manager.status(worktreeKey);
-      setDevtoolsTargets(status.targets);
-      setDevtoolsSelectedTargetId(status.meta.selectedTargetId);
+    const refresh = async (): Promise<void> => {
+      try {
+        const [list, status] = await Promise.all([
+          manager.listNetwork(),
+          manager.status(),
+        ]);
+        if (cancelled) return;
+        setNetworkEntries(list.entries);
+        setDevtoolsMeta(list.meta);
+        setDevtoolsTargets(status.targets);
+        setDevtoolsSelectedTargetId(status.meta.selectedTargetId);
+      } catch {
+        // daemon RPC failures are transient; the next delta/status
+        // event schedules a new refresh
+      }
     };
 
-    // Seed with whatever is already captured (the module may mount after the
-    // manager has been running for a while).
-    refresh();
+    // Seed with whatever is already captured (the module may mount
+    // after the daemon has been running for a while).
+    void refresh();
 
-    const onDelta = (payload: { worktreeKey: string }) => {
-      if (payload.worktreeKey !== worktreeKey) return;
-      refresh();
+    const onDelta = (): void => {
+      void refresh();
     };
-    const onStatus = (payload: { worktreeKey: string }) => {
-      if (payload.worktreeKey !== worktreeKey) return;
-      refresh();
+    const onStatus = (): void => {
+      void refresh();
     };
 
     manager.on("delta", onDelta);
     manager.on("status", onStatus);
     return () => {
+      cancelled = true;
       manager.off("delta", onDelta);
       manager.off("status", onStatus);
     };
-  }, [liveDevTools, liveWorktreeKey]);
+  }, [liveDevTools]);
 
   const devtoolsClear = useCallback(() => {
-    if (!liveDevTools || !liveWorktreeKey) return;
-    liveDevTools.clear(liveWorktreeKey);
-  }, [liveDevTools, liveWorktreeKey]);
+    if (!liveDevTools) return;
+    void liveDevTools.clear();
+  }, [liveDevTools]);
 
   const devtoolsSelectTarget = useCallback(
     async (targetId: string) => {
-      if (!liveDevTools || !liveWorktreeKey) return;
-      await liveDevTools.selectTarget(liveWorktreeKey, targetId);
+      if (!liveDevTools) return;
+      await liveDevTools.selectTarget(targetId);
     },
-    [liveDevTools, liveWorktreeKey]
+    [liveDevTools]
   );
 
   const showModal = useCallback((config: ModalConfig) => {
@@ -191,11 +201,14 @@ export function AppProvider({
     setModal(null);
   }, []);
 
-  // Subscribe to metro output — uses liveMetro from service bus
+  // Subscribe to metro output — uses liveMetro from service bus.
+  // The client adapter emits { line, stream } directly from the
+  // daemon's metro/log event (no worktreeKey envelope; the session is
+  // already 1:1 with a worktree).
   useEffect(() => {
-    if (!liveMetro || !liveWorktreeKey) return;
+    if (!liveMetro) return;
 
-    const handler = ({ line }: { worktreeKey: string; line: string; stream: string }) => {
+    const handler = ({ line }: { line: string; stream: "stdout" | "stderr" }) => {
       setMetroLines((prev) => [...prev, line].slice(-500));
     };
 
@@ -203,7 +216,7 @@ export function AppProvider({
     return () => {
       liveMetro.off("log", handler);
     };
-  }, [liveMetro, liveWorktreeKey]);
+  }, [liveMetro]);
 
   // Subscribe to watcher pipeline events — uses liveWatcher
   useEffect(() => {
@@ -215,7 +228,12 @@ export function AppProvider({
       result,
     }: {
       name: string;
-      result: { success: boolean; output: string; durationMs: number };
+      result: {
+        action: string;
+        success: boolean;
+        output: string;
+        durationMs: number;
+      };
     }) => {
       const status = result.success ? "\u2713" : "\u2717";
       const header = `${status} ${name} (${result.durationMs}ms)`;
@@ -322,8 +340,8 @@ export function AppProvider({
       switch (key) {
         case "r":
           appendToolOutput("\u25b6 Reloading app...");
-          if (liveMetro && liveWorktreeKey) {
-            liveMetro.reload(liveWorktreeKey);
+          if (liveMetro) {
+            void liveMetro.reload();
             appendToolOutput("\u2713 Reload signal sent", "");
           } else {
             appendToolOutput("\u2717 Metro not running", "");
@@ -331,8 +349,8 @@ export function AppProvider({
           break;
         case "d":
           appendToolOutput("\u25b6 Opening dev menu...");
-          if (liveMetro && liveWorktreeKey) {
-            liveMetro.devMenu(liveWorktreeKey);
+          if (liveMetro) {
+            void liveMetro.devMenu();
             appendToolOutput("\u2713 Dev menu signal sent", "");
           } else {
             appendToolOutput("\u2717 Metro not running", "");
@@ -349,17 +367,22 @@ export function AppProvider({
           break;
         case "w":
           if (liveWatcher) {
-            if (liveWatcher.isRunning()) {
-              liveWatcher.stop();
-              appendToolOutput("\u2713 Watcher disabled", "");
-            } else {
-              appendToolOutput("⏳ Starting watcher (scanning project)...", "");
-              // Start in next tick so the UI message renders first
-              setTimeout(() => {
-                liveWatcher.start();
+            // The watcher adapter's isRunning round-trips to the
+            // daemon, so we fire-and-forget inside an async IIFE to
+            // keep the shortcut switch synchronous.
+            (async () => {
+              const running = await liveWatcher.isRunning();
+              if (running) {
+                await liveWatcher.stop();
+                appendToolOutput("\u2713 Watcher disabled", "");
+              } else {
+                appendToolOutput("⏳ Starting watcher (scanning project)...", "");
+                await liveWatcher.start();
                 appendToolOutput("\u2713 Watcher enabled", "");
-              }, 50);
-            }
+              }
+            })().catch(() => {
+              appendToolOutput("\u2717 Watcher toggle failed", "");
+            });
           } else {
             appendToolOutput("\u2717 No on-save actions configured", "");
           }
@@ -418,10 +441,12 @@ export function AppProvider({
           break;
         }
         case "q":
-          // Kill Metro, disable mouse, restore terminal, exit
-          if (liveMetro) liveMetro.stopAll();
-          if (liveWatcher) liveWatcher.stop();
-          // Disable mouse reporting and restore terminal
+          // The daemon owns the session lifecycle — quitting the TUI
+          // closes the subscription and issues session/stop, but the
+          // daemon itself stays up so other clients (Electron, MCP)
+          // keep working. Restore terminal first, then exit; the
+          // subscription socket is torn down by the kernel on process
+          // exit so we don't need to await stop() here.
           process.stdout.write("\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l");
           process.stdout.write("\x1b[?25h");   // show cursor
           process.stdout.write("\x1b[?1049l"); // exit alternate screen
@@ -432,7 +457,7 @@ export function AppProvider({
           break;
       }
     },
-    [liveMetro, liveWatcher, liveWorktreeKey, runCommand, appendToolOutput]
+    [liveMetro, liveWatcher, runCommand, appendToolOutput]
   );
 
   const shortcuts = [

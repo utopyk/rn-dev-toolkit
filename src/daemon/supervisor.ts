@@ -109,6 +109,27 @@ export class DaemonSupervisor extends EventEmitter {
     return this.state;
   }
 
+  /**
+   * Exposes the wired services while a session is running, or null
+   * otherwise. Client RPCs (metro/reload, devtools/listNetwork, etc.)
+   * read from this — not from the supervisor's private `wired` field —
+   * so the RPC dispatcher stays outside the supervisor's internals.
+   */
+  getServices(): SessionServices | null {
+    return this.wired?.services ?? null;
+  }
+
+  /**
+   * The worktree the daemon was spawned against. Exposed so RPC
+   * handlers can bound untrusted path inputs (builder/build.projectRoot)
+   * to within this worktree — a caller that can reach the socket
+   * should not be able to spawn a build in a sibling repo whose
+   * `node_modules/.bin/react-native` the daemon has never vetted.
+   */
+  getWorktree(): string {
+    return this.worktree;
+  }
+
   async start(opts: StartSessionOptions): Promise<StartSessionResult> {
     if (this.state.status !== "stopped") {
       return {
@@ -264,80 +285,132 @@ export class DaemonSupervisor extends EventEmitter {
 
   private wireServiceEvents(services: SessionServices): () => void {
     const worktreeKey = services.worktreeKey;
-    const onMetroStatus = (evt: { worktreeKey: string; status: string }): void => {
-      this.emitSessionEvent({
-        kind: "metro/status",
-        worktreeKey,
-        data: { status: evt.status },
-      });
+    const detachers: Array<() => void> = [];
+
+    type EmitterLike = {
+      on: (event: string, listener: (...args: unknown[]) => void) => unknown;
+      off: (event: string, listener: (...args: unknown[]) => void) => unknown;
     };
-    const onMetroLog = (evt: {
-      worktreeKey: string;
-      line: string;
-      stream: "stdout" | "stderr";
-    }): void => {
-      this.emitSessionEvent({
+
+    const bind = <TPayload>(
+      target: EmitterLike,
+      event: string,
+      toEvent: (payload: TPayload) => SessionEvent,
+    ): void => {
+      const handler = (payload: unknown): void => {
+        this.emitSessionEvent(toEvent(payload as TPayload));
+      };
+      target.on(event, handler);
+      detachers.push(() => target.off(event, handler));
+    };
+
+    bind<{ worktreeKey: string; status: string }>(services.metro, "status", (p) => ({
+      kind: "metro/status",
+      worktreeKey,
+      data: { status: p.status },
+    }));
+    bind<{ worktreeKey: string; line: string; stream: "stdout" | "stderr" }>(
+      services.metro,
+      "log",
+      (p) => ({
         kind: "metro/log",
         worktreeKey,
-        data: { line: evt.line, stream: evt.stream },
-      });
-    };
-    const onDevtoolsStatus = (payload: Record<string, unknown>): void => {
-      this.emitSessionEvent({
-        kind: "devtools/status",
+        data: { line: p.line, stream: p.stream },
+      }),
+    );
+    bind<Record<string, unknown>>(services.devtools, "status", (p) => ({
+      kind: "devtools/status",
+      worktreeKey,
+      data: p,
+    }));
+    bind<{
+      worktreeKey: string;
+      addedIds: readonly string[];
+      updatedIds: readonly string[];
+      evictedIds: readonly string[];
+    }>(services.devtools, "delta", (p) => ({
+      kind: "devtools/delta",
+      worktreeKey,
+      data: {
+        addedIds: p.addedIds,
+        updatedIds: p.updatedIds,
+        evictedIds: p.evictedIds,
+      },
+    }));
+    bind<{ moduleId: string; scopeUnit: string; from: string; to: string }>(
+      services.moduleHost,
+      "state-changed",
+      (p) => ({ kind: "modules/state-changed", worktreeKey, data: p }),
+    );
+    bind<{ moduleId: string; scopeUnit: string; reason: string }>(
+      services.moduleHost,
+      "crashed",
+      (p) => ({ kind: "modules/crashed", worktreeKey, data: p }),
+    );
+    bind<{ moduleId: string; scopeUnit: string; reason: string }>(
+      services.moduleHost,
+      "failed",
+      (p) => ({ kind: "modules/failed", worktreeKey, data: p }),
+    );
+    bind<{ text: string; stream: "stdout" | "stderr"; replace?: boolean }>(
+      services.builder,
+      "line",
+      (p) => ({
+        kind: "builder/line",
         worktreeKey,
-        data: payload,
-      });
-    };
-    const onModuleStateChanged = (p: {
-      moduleId: string;
-      scopeUnit: string;
-      from: string;
-      to: string;
-    }): void => {
-      this.emitSessionEvent({
-        kind: "modules/state-changed",
+        data: { text: p.text, stream: p.stream, replace: p.replace },
+      }),
+    );
+    bind<{ phase: string }>(services.builder, "progress", (p) => ({
+      kind: "builder/progress",
+      worktreeKey,
+      data: { phase: p.phase },
+    }));
+    bind<{
+      success: boolean;
+      errors: Array<{
+        source: "xcodebuild" | "gradle";
+        summary: string;
+        file?: string;
+        line?: number;
+        reason?: string;
+        suggestion?: string;
+      }>;
+      platform?: "ios" | "android";
+    }>(services.builder, "done", (p) => ({
+      kind: "builder/done",
+      worktreeKey,
+      data: {
+        success: p.success,
+        errors: p.errors.map((e) => ({
+          source: e.source,
+          summary: e.summary,
+          file: e.file,
+          line: e.line,
+          reason: e.reason,
+          suggestion: e.suggestion,
+        })),
+        platform: p.platform,
+      },
+    }));
+    if (services.watcher) {
+      bind<{
+        name: string;
+        result: {
+          action: string;
+          success: boolean;
+          output: string;
+          durationMs: number;
+        };
+      }>(services.watcher, "action-complete", (p) => ({
+        kind: "watcher/action-complete",
         worktreeKey,
-        data: p,
-      });
-    };
-    const onModuleCrashed = (p: {
-      moduleId: string;
-      scopeUnit: string;
-      reason: string;
-    }): void => {
-      this.emitSessionEvent({
-        kind: "modules/crashed",
-        worktreeKey,
-        data: p,
-      });
-    };
-    const onModuleFailed = (p: {
-      moduleId: string;
-      scopeUnit: string;
-      reason: string;
-    }): void => {
-      this.emitSessionEvent({
-        kind: "modules/failed",
-        worktreeKey,
-        data: p,
-      });
-    };
-
-    services.metro.on("status", onMetroStatus);
-    services.metro.on("log", onMetroLog);
-    services.devtools.on("status", onDevtoolsStatus);
-    services.moduleHost.on("state-changed", onModuleStateChanged);
-    services.moduleHost.on("crashed", onModuleCrashed);
-    services.moduleHost.on("failed", onModuleFailed);
+        data: { name: p.name, result: p.result },
+      }));
+    }
 
     return () => {
-      services.metro.off("status", onMetroStatus);
-      services.metro.off("log", onMetroLog);
-      services.devtools.off("status", onDevtoolsStatus);
-      services.moduleHost.off("state-changed", onModuleStateChanged);
-      services.moduleHost.off("crashed", onModuleCrashed);
-      services.moduleHost.off("failed", onModuleFailed);
+      for (const fn of detachers) fn();
     };
   }
 

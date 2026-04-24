@@ -8,30 +8,31 @@
  */
 
 import { EventEmitter } from "events";
-import type { MetroManager } from "../core/metro.js";
-import type { FileWatcher } from "../core/watcher.js";
-import type { DevToolsManager } from "../core/devtools.js";
+import type { MetroClient } from "./client/metro-adapter.js";
+import type { WatcherClient } from "./client/watcher-adapter.js";
+import type { BuilderClient } from "./client/builder-adapter.js";
+import type { DevToolsClient } from "./client/devtools-adapter.js";
 import type { ModuleHostManager } from "../core/module-host/manager.js";
 import type { ModuleRegistry } from "../modules/registry.js";
 
 export interface ServiceBusEvents {
   log: (text: string) => void;
-  metro: (metro: MetroManager) => void;
-  builder: (builder: any) => void;
-  watcher: (watcher: FileWatcher) => void;
+  metro: (metro: MetroClient) => void;
+  builder: (builder: BuilderClient) => void;
+  watcher: (watcher: WatcherClient) => void;
   worktreeKey: (key: string) => void;
   /**
-   * DevTools is published once per session after Metro is up. Consumers
-   * subscribe to the manager's own 'delta' and 'status' events — the bus
-   * only bridges the instance reference across the start-flow / React
-   * boundary.
+   * DevTools is published once per session after Metro is up. The
+   * emitted instance is the client-side adapter (Phase 13.3) —
+   * consumers subscribe to its `delta` and `status` events which are
+   * driven off the daemon's events/subscribe stream.
    *
    * Namespacing: the module-system brainstorm frames `devtools` as one of
    * several future built-in modules. When that lands, this topic will
    * become one of a family (`devtools-network`, `devtools-console`, ...).
    * Treat the name as provisional.
    */
-  devtools: (manager: DevToolsManager) => void;
+  devtools: (manager: DevToolsClient) => void;
   /**
    * Published once when the daemon boots. The Phase 2 manager owns
    * module subprocess lifecycle — Phase 3 subscribes to expose modules/*
@@ -68,15 +69,15 @@ class ServiceBus extends EventEmitter {
     this.emit("log", text);
   }
 
-  setMetro(metro: MetroManager) {
+  setMetro(metro: MetroClient) {
     this.emit("metro", metro);
   }
 
-  setBuilder(builder: any) {
+  setBuilder(builder: BuilderClient) {
     this.emit("builder", builder);
   }
 
-  setWatcher(watcher: FileWatcher) {
+  setWatcher(watcher: WatcherClient) {
     this.emit("watcher", watcher);
   }
 
@@ -84,7 +85,7 @@ class ServiceBus extends EventEmitter {
     this.emit("worktreeKey", key);
   }
 
-  setDevTools(manager: DevToolsManager) {
+  setDevTools(manager: DevToolsClient) {
     this.emit("devtools", manager);
   }
 

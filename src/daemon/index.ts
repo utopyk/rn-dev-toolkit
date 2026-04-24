@@ -1,6 +1,5 @@
-import { chmodSync, existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { spawn } from "node:child_process";
 import {
   IpcServer,
   type IpcMessage,
@@ -10,9 +9,11 @@ import { ModuleLockfile } from "../core/module-host/lockfile.js";
 import { DaemonSupervisor, type SessionBootFn } from "./supervisor.js";
 import { bootSessionServices } from "../core/session/boot.js";
 import { fakeBootSessionServices } from "./fake-boot.js";
+import { spawnDetachedDaemon } from "./spawn.js";
 import { sweepOrphanModules } from "./orphan-sweep.js";
 import { validateProfile } from "./profile-guard.js";
 import type { SessionEvent } from "./session.js";
+import { handleClientRpc, isClientRpcAction } from "./client-rpcs.js";
 
 // ---------------------------------------------------------------------------
 // Daemon entry for `rn-dev daemon <worktree>`.
@@ -249,6 +250,10 @@ function handleMessage(
       return;
 
     default:
+      if (isClientRpcAction(message.action)) {
+        void handleClientRpc(event, supervisor);
+        return;
+      }
       reply({
         type: "response",
         action: "daemon/error",
@@ -372,54 +377,21 @@ function handleEventsSubscribe(
 }
 
 function detachAndExit(worktree: string, daemonEntryOverride?: string): never {
-  // Re-invoke ourselves with --foreground so the child runs the daemon
-  // loop in-process. `detached: true` + `stdio: "ignore"` gives us the
-  // POSIX setsid + close-stdio shape we need; `.unref()` lets the parent
-  // exit without waiting.
-  //
-  // Electron's `process.argv[1]` points at the packaged main.js, not
-  // the CLI entry. The `daemonEntry` option lets Electron pass the
-  // correct path explicitly (Phase 13.4 flip).
-  const entry = daemonEntryOverride ?? process.argv[1];
-  if (typeof entry !== "string" || entry.length === 0) {
-    process.stderr.write(
-      "rn-dev daemon: cannot detach (missing process.argv[1]); re-run with --foreground\n",
-    );
-    process.exit(1);
-  }
-  if (!existsSync(entry)) {
-    process.stderr.write(
-      `rn-dev daemon: cannot detach — entry ${entry} does not exist; re-run with --foreground\n`,
-    );
-    process.exit(1);
-  }
+  // The child runs the daemon loop in-process via --foreground; see
+  // `spawnDetachedDaemon` for the detach mechanics (detached=true,
+  // stdio=ignore, unref). This function is the "I am the CLI-level
+  // daemon command, now fork myself and exit" wrapper around that
+  // primitive.
   try {
-    const wtStat = statSync(worktree);
-    if (!wtStat.isDirectory()) {
-      process.stderr.write(
-        `rn-dev daemon: worktree ${worktree} is not a directory\n`,
-      );
-      process.exit(1);
-    }
-  } catch {
+    const child = spawnDetachedDaemon(worktree, daemonEntryOverride);
+    process.stdout.write(
+      `rn-dev daemon: spawned detached pid=${child.pid ?? "?"}, worktree=${worktree}\n`,
+    );
+    process.exit(0);
+  } catch (err) {
     process.stderr.write(
-      `rn-dev daemon: worktree ${worktree} does not exist\n`,
+      `rn-dev daemon: ${err instanceof Error ? err.message : String(err)} — re-run with --foreground\n`,
     );
     process.exit(1);
   }
-
-  const child = spawn(
-    process.execPath,
-    [entry, "daemon", worktree, "--foreground"],
-    {
-      detached: true,
-      stdio: "ignore",
-      cwd: worktree,
-    },
-  );
-  child.unref();
-  process.stdout.write(
-    `rn-dev daemon: spawned detached pid=${child.pid ?? "?"}, worktree=${worktree}\n`,
-  );
-  process.exit(0);
 }

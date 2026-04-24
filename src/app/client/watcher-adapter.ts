@@ -5,6 +5,7 @@
 
 import { EventEmitter } from "node:events";
 import type { IpcClient } from "../../core/ipc.js";
+import type { AdapterSink, WatcherEventKind } from "./adapter-sink.js";
 
 export interface WatcherClientEvents {
   "action-complete": (evt: {
@@ -16,9 +17,14 @@ export interface WatcherClientEvents {
       durationMs: number;
     };
   }) => void;
+  /** Fires once on unexpected daemon death (Phase 13.4 prereq #1). */
+  disconnected: (err?: Error) => void;
 }
 
-export class WatcherClient extends EventEmitter {
+export class WatcherClient
+  extends EventEmitter
+  implements AdapterSink<WatcherEventKind>
+{
   constructor(
     private client: IpcClient,
     private nextId: () => string,
@@ -51,8 +57,12 @@ export class WatcherClient extends EventEmitter {
     return (resp.payload as { running?: boolean }).running === true;
   }
 
-  _dispatch(kind: "watcher/action-complete", data: unknown): void {
+  dispatch(kind: WatcherEventKind, data: unknown): void {
     const topic = kind.slice("watcher/".length);
     this.emit(topic, data);
+  }
+
+  notifyDisconnected(err?: Error): void {
+    this.emit("disconnected", err);
   }
 }

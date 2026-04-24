@@ -12,6 +12,7 @@ import type {
   NetworkEntry,
   NetworkFilter,
 } from "../../core/devtools/types.js";
+import type { AdapterSink, DevToolsEventKind } from "./adapter-sink.js";
 
 export interface DevToolsClientEvents {
   status: (evt: Record<string, unknown>) => void;
@@ -20,9 +21,14 @@ export interface DevToolsClientEvents {
     updatedIds: readonly string[];
     evictedIds: readonly string[];
   }) => void;
+  /** Fires once on unexpected daemon death (Phase 13.4 prereq #1). */
+  disconnected: (err?: Error) => void;
 }
 
-export class DevToolsClient extends EventEmitter {
+export class DevToolsClient
+  extends EventEmitter
+  implements AdapterSink<DevToolsEventKind>
+{
   constructor(
     private client: IpcClient,
     private nextId: () => string,
@@ -80,11 +86,15 @@ export class DevToolsClient extends EventEmitter {
     }
   }
 
-  _dispatch(kind: "devtools/status" | "devtools/delta", data: unknown): void {
+  dispatch(kind: DevToolsEventKind, data: unknown): void {
     if (kind === "devtools/status") {
       this.emit("status", data);
     } else {
       this.emit("delta", data);
     }
+  }
+
+  notifyDisconnected(err?: Error): void {
+    this.emit("disconnected", err);
   }
 }

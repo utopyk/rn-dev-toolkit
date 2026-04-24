@@ -1,15 +1,22 @@
 .app-root {
-  height: 100vh;
-  display: flex;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: var(--sidebar-w, 260px) 1fr var(--notif-w, 72px);
+  gap: 28px;
+  padding: 28px;
   overflow: hidden;
+  transition: grid-template-columns 280ms cubic-bezier(0.4, 0, 0.2, 1);
 }
 
+.app-root.collapsed { --sidebar-w: 72px; }
+.app-root.notifications-expanded { --notif-w: 320px; }
+
 .app-main {
-  flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
-  padding-top: 8px;
+  gap: 20px;
+  padding: 0;       /* was padding-top: 8px — the grid gap handles spacing */
 }
 
 .app-content {
@@ -31,57 +38,48 @@
 }
 
 .prompt-modal {
-  background: var(--bg);
-  border: 2px solid var(--accent);
-  border-radius: 10px;
-  padding: 24px 32px;
+  background: var(--surface);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--neu-raised), var(--glow-medium);
+  padding: 28px 32px;
   max-width: 480px;
   width: 100%;
+  border: 1px solid var(--accent-border);
 }
 
-.prompt-title {
-  color: var(--accent);
-  font-size: 16px;
-  margin-bottom: 8px;
-}
+.prompt-title { color: var(--ink); font-size: 16px; margin-bottom: 8px; font-weight: 600; }
+.prompt-message { color: var(--muted); font-size: 13px; margin-bottom: 16px; line-height: 1.5; }
 
-.prompt-message {
-  color: var(--fg);
-  font-size: 13px;
-  margin-bottom: 16px;
-  line-height: 1.5;
-}
-
-.prompt-options {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.prompt-options { display: flex; flex-direction: column; gap: 8px; }
 
 .prompt-option {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 10px 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--fg);
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 18px;
+  border-radius: var(--radius-item);
+  background: var(--surface);
+  color: var(--ink);
   font-size: 13px;
+  box-shadow: var(--neu-raised-xs);
+  border: 1px solid transparent;
   cursor: pointer;
-  transition: all 0.15s ease;
-  text-align: left;
+  transition: box-shadow 220ms ease, border-color 220ms ease;
 }
+.prompt-option:hover { border-color: var(--accent-border); box-shadow: var(--neu-raised-xs), var(--glow-medium); }
+.prompt-option-label { font-weight: 500; }
+.prompt-option-cleanup { color: var(--booting); font-size: 11px; }
 
-.prompt-option:hover {
-  border-color: var(--accent);
-  background: var(--selection);
-}
-
-.prompt-option-label {
-  font-weight: 500;
-}
-
-.prompt-option-cleanup {
-  color: var(--warning);
-  font-size: 11px;
+/* Top-of-window drag region for frameless (titleBarStyle: 'hiddenInset')
+   Electron windows. Covers the 28px gutter where the OS traffic light
+   controls render on top. pointer-events:none lets clicks pass through
+   to controls and to any content beneath; -webkit-app-region:drag tells
+   Electron this is a window-move surface. */
+.app-drag-strip {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  -webkit-app-region: drag;
+  pointer-events: none;
+  z-index: 50;
 }

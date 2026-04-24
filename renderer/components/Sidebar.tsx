@@ -1,9 +1,10 @@
 import React from 'react';
 import './Sidebar.css';
+import { ModuleIcon } from './icons.js';
 
 interface ModuleItem {
   id: string;
-  icon: string;
+  hint: string;
   label: string;
 }
 
@@ -14,12 +15,12 @@ interface ShortcutItem {
 }
 
 const builtinModules: ModuleItem[] = [
-  { id: 'dev-space', icon: '🚀', label: 'Dev Space' },
-  { id: 'devtools', icon: '🔧', label: 'DevTools' },
-  { id: 'lint-test', icon: '🧪', label: 'Lint & Test' },
-  { id: 'metro-logs', icon: '📡', label: 'Metro Logs' },
-  { id: 'marketplace', icon: '🛒', label: 'Marketplace' },
-  { id: 'settings', icon: '⚙', label: 'Settings' },
+  { id: 'dev-space',   hint: 'terminal', label: 'Dev Space' },
+  { id: 'devtools',    hint: 'wrench',   label: 'DevTools' },
+  { id: 'lint-test',   hint: 'flask',    label: 'Lint & Test' },
+  { id: 'metro-logs',  hint: 'radio',    label: 'Metro Logs' },
+  { id: 'marketplace', hint: 'store',    label: 'Marketplace' },
+  { id: 'settings',    hint: 'settings', label: 'Settings' },
 ];
 
 const shortcuts: ShortcutItem[] = [
@@ -45,6 +46,8 @@ interface SidebarProps {
   onShortcut: (command: string) => void;
   onOpenWizard?: () => void;
   modulePanels?: SidebarModulePanel[];
+  collapsed: boolean;
+  onToggleCollapse: () => void;
 }
 
 export function Sidebar({
@@ -53,15 +56,26 @@ export function Sidebar({
   onShortcut,
   onOpenWizard,
   modulePanels = [],
+  collapsed,
+  onToggleCollapse,
 }: SidebarProps) {
   return (
-    <div className="sidebar">
-      {/* Logo */}
-      <div className="sidebar-logo">
-        <div className="logo-l1">╦═╗╔╗╗  ╦═╗╔═╗╦  ╦</div>
-        <div className="logo-l2">╠╦╝║║║  ║ ║╠═  ║║</div>
-        <div className="logo-l3">╩╚═╝╚╝  ╩═╝╚═╝ ╚╝</div>
+    <div className={`sidebar${collapsed ? ' collapsed' : ''}`}>
+      <div className="sidebar-top">
+        <button
+          className="sidebar-collapse-toggle"
+          onClick={onToggleCollapse}
+          aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+        >
+          <ModuleIcon hint={collapsed ? 'chevronRight' : 'chevronLeft'} size={14} />
+        </button>
       </div>
+      {!collapsed && (
+        <div className="sidebar-brand">
+          <h1 className="sidebar-brand-name">RN Dev</h1>
+          <span className="sidebar-brand-sub">Developer Suite</span>
+        </div>
+      )}
 
       {/* Modules */}
       <div className="sidebar-section">
@@ -72,7 +86,7 @@ export function Sidebar({
             className={`sidebar-item sidebar-module${activeTab === mod.id ? ' active' : ''}`}
             onClick={() => onTabChange(mod.id)}
           >
-            <span className="sidebar-module-icon">{mod.icon}</span>
+            <span className="sidebar-module-icon"><ModuleIcon hint={mod.hint} size={18} /></span>
             <span className="sidebar-item-label">{mod.label}</span>
           </button>
         ))}
@@ -87,7 +101,7 @@ export function Sidebar({
               className={`sidebar-item sidebar-module${activeTab === panel.id ? ' active' : ''}`}
               onClick={() => onTabChange(panel.id)}
             >
-              <span className="sidebar-module-icon">{panel.icon ?? '📦'}</span>
+              <span className="sidebar-module-icon"><ModuleIcon hint={panel.icon} size={18} /></span>
               <span className="sidebar-item-label">{panel.title}</span>
             </button>
           ))}

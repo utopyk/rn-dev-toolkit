@@ -1,38 +1,41 @@
 .panel {
   flex: 1;
-  border: 1px solid var(--border);
-  border-radius: 6px;
   display: flex;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  transition: border-color 0.15s ease, background-color 0.15s ease;
+  background: var(--surface);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--neu-raised-sm);
+  border: 1px solid transparent;
+  transition: border-color 220ms ease, box-shadow 220ms ease;
 }
 
 .panel.focused {
-  border-color: var(--accent);
-  background-color: var(--panel-focus);
+  border-color: var(--accent-border);
+  box-shadow: var(--neu-raised-sm), var(--glow-medium);
 }
 
 .panel-header {
-  padding: 4px 10px;
-  font-size: 11px;
+  padding: 12px 18px;
+  font-size: 12px;
   color: var(--muted);
-  border-bottom: 1px solid var(--border);
+  background: var(--surface-hi);
   display: flex;
   justify-content: space-between;
+  align-items: center;
   flex-shrink: 0;
+  border-bottom: 1px solid var(--shadow-dark-soft);
 }
 
 .panel.focused .panel-header {
-  color: var(--accent);
-  font-weight: bold;
-  border-bottom-color: var(--accent);
+  color: var(--ink);
+  font-weight: 600;
 }
 
 .panel-hint {
   font-size: 10px;
-  color: var(--muted);
+  color: var(--muted-2);
   font-weight: normal;
 }
 
@@ -40,23 +43,22 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 6px 10px;
+  padding: 10px 16px;
   font-size: 12px;
+  font-family: 'SF Mono', 'Menlo', monospace;
   user-select: text;
   cursor: text;
-  /* Ensure scroll works by setting explicit min/max heights */
   min-height: 0;
   max-height: 100%;
 }
 
-/* Log line colors */
 .log-line {
   white-space: pre-wrap;
   word-break: break-all;
 }
-.log-success { color: var(--success); }
-.log-warning { color: var(--warning); }
-.log-error { color: var(--error); }
-.log-info { color: var(--accent); }
-.log-muted { color: var(--muted); }
-.log-default { color: var(--fg); }
+.log-success { color: var(--ready); }
+.log-warning { color: var(--booting); }
+.log-error   { color: var(--error); }
+.log-info    { color: var(--glow); }
+.log-muted   { color: var(--muted); }
+.log-default { color: var(--ink); }

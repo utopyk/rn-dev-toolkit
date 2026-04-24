@@ -6,6 +6,9 @@
   justify-content: center;
   padding: 24px;
   overflow-y: auto;
+  background: var(--surface);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--neu-raised);
 }
 
 .wizard-container {
@@ -14,6 +17,11 @@
   display: flex;
   flex-direction: column;
   gap: 20px;
+  background: var(--surface-hi);
+  padding: 28px;
+  border-radius: var(--radius-panel);
+  box-shadow: var(--neu-raised-sm);
+  border: 1px solid var(--accent-border);
 }
 
 /* ── Header ── */
@@ -25,39 +33,41 @@
 
 .wizard-title {
   font-size: 20px;
-  color: var(--fg);
-  font-weight: bold;
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 /* ── Step indicator ── */
 .step-indicator {
   display: flex;
-  gap: 6px;
+  gap: 8px;
 }
 
 .step-dot {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
-  border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--neu-raised-xs);
+  border: 1px solid transparent;
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 10px;
-  font-weight: bold;
+  font-weight: 700;
   color: var(--muted);
-  transition: all 0.2s ease;
+  transition: color 160ms ease, border-color 220ms ease, box-shadow 220ms ease;
 }
 
 .step-dot.active {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--bg);
+  border-color: var(--accent-border);
+  color: var(--ink);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
 }
 
 .step-dot.done {
-  border-color: var(--success);
-  color: var(--success);
+  color: var(--ready);
 }
 
 /* ── Summary bar ── */
@@ -70,10 +80,12 @@
 .summary-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 3px 10px;
-  border-radius: 12px;
-  background: var(--selection);
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  box-shadow: var(--neu-raised-xs);
+  border: 1px solid transparent;
   font-size: 11px;
 }
 
@@ -82,8 +94,8 @@
 }
 
 .summary-chip-value {
-  color: var(--accent);
-  font-weight: bold;
+  color: var(--ink);
+  font-weight: 600;
 }
 
 /* ── Body ── */
@@ -100,8 +112,9 @@
 
 .wz-step-title {
   font-size: 16px;
-  color: var(--fg);
-  font-weight: bold;
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .wz-step-subtitle {
@@ -113,28 +126,30 @@
   margin-top: 4px;
 }
 
-/* ── SearchableList ── */
+/* ── Searchable List (shared component) ── */
 .searchable-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  min-height: 0;
+  flex: 1;
 }
 
 .sl-input {
-  width: 100%;
-  padding: 8px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--fg);
-  font-family: inherit;
+  background: var(--surface);
+  color: var(--ink);
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--neu-inset);
+  padding: 12px 20px;
   font-size: 13px;
-  outline: none;
-  transition: border-color 0.15s ease;
+  font-family: inherit;
+  outline: 0;
+  transition: box-shadow 220ms ease;
 }
 
 .sl-input:focus {
-  border-color: var(--accent);
+  box-shadow: var(--neu-inset), var(--glow-medium);
 }
 
 .sl-input::placeholder {
@@ -142,82 +157,93 @@
 }
 
 .sl-list {
-  max-height: 240px;
+  flex: 1;
   overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px;
 }
 
 .sl-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-item);
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink);
   cursor: pointer;
   font-size: 13px;
-  color: var(--fg);
-  transition: background 0.1s ease;
+  transition: background 160ms ease, border-color 220ms ease, box-shadow 220ms ease;
 }
 
-.sl-item:not(:last-child) {
-  border-bottom: 1px solid var(--border);
-}
-
-.sl-item.active {
-  background: var(--selection);
-}
-
+.sl-item.active,
 .sl-item:hover {
-  background: var(--selection);
+  background: var(--surface-hi);
+  border-color: var(--accent-border);
+  box-shadow: var(--glow-medium);
 }
 
 .sl-item-label {
-  flex: 1;
+  font-weight: 500;
+  color: var(--ink);
 }
 
 .sl-item-meta {
-  font-size: 11px;
   color: var(--muted);
+  font-size: 12px;
+  margin-left: auto;
 }
 
-.sl-loading,
 .sl-empty {
-  padding: 16px;
-  text-align: center;
-  font-size: 12px;
-  color: var(--muted);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-}
-
-.sl-create-btn {
-  padding: 6px 14px;
-  border: 1px dashed var(--accent);
-  border-radius: 6px;
-  color: var(--accent);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.12s ease;
-  background: none;
-}
-
-.sl-create-btn:hover {
-  background: var(--selection);
-}
-
-.sl-create-item {
-  border-top: 1px dashed var(--border);
-  color: var(--accent) !important;
+  gap: 10px;
+  padding: 24px 12px;
+  color: var(--muted);
+  font-size: 13px;
   font-style: italic;
 }
 
+.sl-loading {
+  padding: 24px 12px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 13px;
+}
+
+.sl-create-btn {
+  padding: 8px 16px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--neu-raised-xs);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 220ms ease, box-shadow 220ms ease;
+  font-family: inherit;
+}
+
+.sl-create-btn:hover {
+  border-color: var(--accent-border);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
+}
+
+.sl-create-item {
+  color: var(--glow);
+  font-weight: 500;
+  border-style: dashed;
+  border-color: var(--muted-2);
+}
+
 .sl-create-icon {
-  color: var(--accent);
-  font-weight: bold;
-  margin-right: 6px;
+  font-size: 16px;
+  color: var(--glow);
+  font-weight: 700;
 }
 
 /* Device status dots */
@@ -229,10 +255,10 @@
   flex-shrink: 0;
 }
 
-.sl-device-dot.booted { background: var(--success); }
-.sl-device-dot.available { background: var(--success); }
+.sl-device-dot.booted { background: var(--ready); }
+.sl-device-dot.available { background: var(--ready); }
 .sl-device-dot.shutdown { background: var(--muted); }
-.sl-device-dot.connected { background: var(--success); }
+.sl-device-dot.connected { background: var(--ready); }
 .sl-device-dot.disconnected { background: var(--error); }
 
 .sl-device-badge {
@@ -249,22 +275,22 @@
 }
 
 .sl-device-type.physical {
-  color: var(--success);
-  background: rgba(158, 206, 106, 0.15);
-  border: 1px solid rgba(158, 206, 106, 0.3);
+  color: var(--ready);
+  background: color-mix(in srgb, var(--ready) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ready) 30%, transparent);
 }
 
 .sl-device-type.simulator {
   color: var(--muted);
-  background: rgba(86, 95, 137, 0.15);
-  border: 1px solid rgba(86, 95, 137, 0.3);
+  background: color-mix(in srgb, var(--muted) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--muted) 30%, transparent);
 }
 
 /* ── Radio group ── */
 .wz-radio-group {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .wz-radio-group.inline {
@@ -275,27 +301,38 @@
 .wz-radio {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: var(--radius-item);
+  box-shadow: var(--neu-raised-xs);
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: border-color 220ms ease, box-shadow 220ms ease;
 }
 
 .wz-radio-group.inline .wz-radio {
-  padding: 6px 12px;
+  padding: 8px 14px;
   align-items: center;
 }
 
 .wz-radio:hover {
-  border-color: var(--accent);
-  background: var(--selection);
+  border-color: var(--accent-border);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
 }
 
 .wz-radio.selected {
-  border-color: var(--accent);
-  background: var(--selection);
+  border-color: var(--accent-border);
+  box-shadow:
+    inset 2px 2px 5px var(--shadow-light),
+    inset -2px -2px 5px rgba(0,0,0,0.03),
+    var(--glow-medium);
+}
+[data-theme^="soft-dark"] .wz-radio.selected {
+  box-shadow:
+    inset 2px 2px 5px var(--shadow-light),
+    inset -2px -2px 5px rgba(0,0,0,0.25),
+    var(--glow-medium);
 }
 
 .wz-radio-circle {
@@ -303,23 +340,23 @@
   height: 16px;
   min-width: 16px;
   border-radius: 50%;
-  border: 2px solid var(--border);
+  border: 2px solid var(--muted-2);
   display: flex;
   align-items: center;
   justify-content: center;
   margin-top: 2px;
-  transition: border-color 0.15s ease;
+  transition: border-color 160ms ease;
 }
 
 .wz-radio.selected .wz-radio-circle {
-  border-color: var(--accent);
+  border-color: var(--glow);
 }
 
 .wz-radio-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--accent);
+  background: var(--glow);
 }
 
 .wz-radio-content {
@@ -330,8 +367,8 @@
 
 .wz-radio-label {
   font-size: 13px;
-  font-weight: bold;
-  color: var(--fg);
+  font-weight: 600;
+  color: var(--ink);
 }
 
 .wz-radio-desc {
@@ -350,16 +387,16 @@
 .wz-checkbox {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-radius: 6px;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: var(--radius-item);
   cursor: pointer;
   font-size: 13px;
-  transition: background 0.1s ease;
+  transition: background 120ms ease;
 }
 
 .wz-checkbox:hover {
-  background: var(--selection);
+  background: var(--surface);
 }
 
 .wz-checkbox input[type='checkbox'] {
@@ -367,20 +404,21 @@
 }
 
 .wz-checkbox-mark {
-  width: 16px;
-  height: 16px;
-  min-width: 16px;
-  border: 2px solid var(--border);
+  width: 18px;
+  height: 18px;
+  min-width: 18px;
+  background: var(--surface);
   border-radius: 4px;
+  box-shadow: var(--neu-inset);
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s ease;
+  transition: box-shadow 160ms ease, background 160ms ease;
 }
 
 .wz-checkbox input[type='checkbox']:checked + .wz-checkbox-mark {
-  background: var(--accent);
-  border-color: var(--accent);
+  background: var(--glow);
+  box-shadow: 0 0 8px var(--glow);
 }
 
 .wz-checkbox input[type='checkbox']:checked + .wz-checkbox-mark::after {
@@ -388,13 +426,13 @@
   display: block;
   width: 6px;
   height: 10px;
-  border: solid var(--bg);
+  border: solid var(--surface);
   border-width: 0 2px 2px 0;
   transform: rotate(45deg) translate(-1px, -1px);
 }
 
 .wz-checkbox-label {
-  color: var(--fg);
+  color: var(--ink);
 }
 
 .wz-checkbox-meta {
@@ -415,7 +453,7 @@
 .wz-frequency-label {
   font-size: 12px;
   color: var(--muted);
-  font-weight: bold;
+  font-weight: 600;
 }
 
 /* ── Custom command ── */
@@ -429,24 +467,25 @@
 .wz-custom-cmd-label {
   font-size: 12px;
   color: var(--muted);
-  font-weight: bold;
+  font-weight: 600;
 }
 
 .wz-custom-cmd-input {
   width: 100%;
-  padding: 8px 12px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--fg);
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--neu-inset);
+  color: var(--ink);
   font-family: inherit;
   font-size: 13px;
-  outline: none;
-  transition: border-color 0.15s ease;
+  outline: 0;
+  transition: box-shadow 220ms ease;
 }
 
 .wz-custom-cmd-input:focus {
-  border-color: var(--accent);
+  box-shadow: var(--neu-inset), var(--glow-medium);
 }
 
 .wz-custom-cmd-input::placeholder {
@@ -465,8 +504,8 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  border-top: 1px solid var(--shadow-dark-soft);
 }
 
 .wizard-footer-right {
@@ -476,13 +515,14 @@
 
 /* ── Buttons ── */
 .wz-btn {
-  padding: 7px 18px;
-  border-radius: 6px;
+  padding: 10px 22px;
+  border-radius: var(--radius-pill);
   font-size: 13px;
-  font-weight: bold;
+  font-weight: 600;
   font-family: inherit;
   cursor: pointer;
-  transition: all 0.15s ease;
+  border: 1px solid transparent;
+  transition: color 160ms ease, border-color 220ms ease, box-shadow 220ms ease;
 }
 
 .wz-btn:disabled {
@@ -491,34 +531,35 @@
 }
 
 .wz-btn-primary {
-  background: var(--accent);
-  color: var(--bg);
-  border: none;
+  background: var(--ink);
+  color: var(--surface);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
 }
 
 .wz-btn-primary:hover:not(:disabled) {
-  filter: brightness(1.15);
+  filter: brightness(1.08);
 }
 
 .wz-btn-secondary {
-  background: var(--selection);
-  color: var(--fg);
-  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--neu-raised-xs);
 }
 
 .wz-btn-secondary:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
+  border-color: var(--accent-border);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
 }
 
 .wz-btn-ghost {
-  background: none;
+  background: transparent;
   color: var(--muted);
-  border: none;
+  box-shadow: none;
+  padding: 10px 14px;
 }
 
 .wz-btn-ghost:hover {
-  color: var(--fg);
+  color: var(--ink);
 }
 
 /* ── Create worktree ── */
@@ -531,24 +572,25 @@
 
 .wz-label {
   font-size: 13px;
-  color: var(--fg);
+  color: var(--ink);
   font-weight: 500;
 }
 
 .wz-input {
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg);
-  color: var(--fg);
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 0;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--neu-inset);
+  color: var(--ink);
   font-family: inherit;
   font-size: 13px;
-  outline: none;
-  transition: border-color 0.15s ease;
+  outline: 0;
+  transition: box-shadow 220ms ease;
 }
 
 .wz-input:focus {
-  border-color: var(--accent);
+  box-shadow: var(--neu-inset), var(--glow-medium);
 }
 
 .wz-error {
@@ -564,18 +606,19 @@
 
 .wz-create-btn {
   margin-top: 8px;
-  padding: 8px 16px;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
+  padding: 10px 18px;
+  background: var(--surface);
+  border: 1px dashed var(--muted-2);
+  border-radius: var(--radius-item);
   color: var(--muted);
   font-size: 13px;
   cursor: pointer;
-  transition: all 0.12s ease;
+  transition: color 160ms ease, border-color 220ms ease, box-shadow 220ms ease;
   text-align: center;
 }
 
 .wz-create-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--selection);
+  border-color: var(--accent-border);
+  color: var(--ink);
+  box-shadow: var(--glow-medium);
 }

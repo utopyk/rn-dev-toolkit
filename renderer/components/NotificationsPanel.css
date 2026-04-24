@@ -1,0 +1,92 @@
+.notifications-panel {
+  background: var(--surface);
+  border-radius: var(--radius-sidebar);
+  padding: 28px 20px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: -8px -8px 20px var(--shadow-light), 10px 12px 28px var(--shadow-dark);
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-app-region: drag;
+  transition: padding 220ms ease;
+  min-width: 0;
+}
+.notifications-panel button { -webkit-app-region: no-drag; }
+
+.notifications-panel:not(.expanded) { padding: 28px 10px; }
+
+.notifications-top {
+  display: flex;
+  justify-content: flex-start;
+  margin-bottom: 16px;
+}
+.notifications-panel:not(.expanded) .notifications-top { justify-content: center; }
+
+.notifications-toggle {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--surface-hi);
+  border: 1px solid var(--accent-border);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--neu-raised-xs);
+  transition: color 160ms ease, box-shadow 220ms ease;
+}
+.notifications-toggle:hover {
+  color: var(--ink);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
+}
+
+.notifications-header {
+  padding: 0 6px 16px;
+}
+.notifications-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.notifications-subtitle {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.notifications-empty {
+  margin-top: 16px;
+  padding: 24px 14px;
+  background: var(--surface-hi);
+  border-radius: var(--radius-card);
+  box-shadow: var(--neu-inset);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 8px;
+  color: var(--muted);
+}
+.notifications-empty p {
+  margin: 4px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.notifications-empty span {
+  font-size: 11px;
+  line-height: 1.5;
+  max-width: 220px;
+  color: var(--muted);
+}
+
+.notifications-collapsed-indicator {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0;
+  color: var(--muted-2);
+}

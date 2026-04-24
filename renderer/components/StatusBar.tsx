@@ -46,13 +46,13 @@ export function StatusBar({ metroStatus, metroPort, watcherOn, activeTab }: Stat
         <span className="sep">|</span>
         <span>
           Watcher:{' '}
-          <span style={{ color: watcherOn ? 'var(--success)' : 'var(--muted)', fontWeight: 'bold' }}>
+          <span style={{ color: watcherOn ? 'var(--ready)' : 'var(--muted)', fontWeight: 'bold' }}>
             {watcherOn ? 'ON' : 'OFF'}
           </span>
         </span>
         <span className="sep">|</span>
         <span>
-          Module: <span style={{ color: 'var(--accent)' }}>{labelFor(activeTab)}</span>
+          Module: <span style={{ color: 'var(--glow)' }}>{labelFor(activeTab)}</span>
         </span>
       </div>
     </div>

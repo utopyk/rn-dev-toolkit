@@ -1,23 +1,25 @@
 /* ── Error Summary Panel ── */
 
 .error-summary {
+  background: var(--surface);
   border: 1px solid var(--error);
-  border-radius: 6px;
-  background-color: rgba(247, 118, 142, 0.08);
-  margin-bottom: 4px;
+  border-radius: var(--radius-card);
+  margin-bottom: 12px;
   overflow: hidden;
   flex-shrink: 0;
+  box-shadow: var(--neu-raised-sm);
 }
 
 .error-summary-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  border-bottom: 1px solid rgba(247, 118, 142, 0.2);
+  gap: 10px;
+  padding: 10px 14px;
   font-size: 12px;
-  font-weight: bold;
+  font-weight: 600;
   color: var(--error);
+  background: var(--surface-hi);
+  border-bottom: 1px solid rgba(247, 118, 142, 0.2);
 }
 
 .error-summary-icon {
@@ -29,14 +31,14 @@
 }
 
 .error-summary-list {
-  padding: 6px 10px;
+  padding: 10px 14px;
   max-height: 200px;
   overflow-y: auto;
 }
 
 .error-summary-item {
-  padding: 4px 0;
-  border-bottom: 1px solid rgba(86, 95, 137, 0.3);
+  padding: 6px 0;
+  border-bottom: 1px solid var(--shadow-dark-soft);
 }
 
 .error-summary-item:last-child {
@@ -45,7 +47,7 @@
 
 .error-message {
   font-size: 12px;
-  color: var(--fg);
+  color: var(--ink);
   line-height: 1.4;
 }
 
@@ -58,21 +60,21 @@
 
 .error-file {
   font-size: 11px;
-  color: var(--accent);
-  margin-top: 2px;
+  color: var(--glow);
+  margin-top: 4px;
   cursor: pointer;
   text-decoration: underline;
   text-decoration-color: transparent;
-  transition: text-decoration-color 0.12s ease;
+  transition: text-decoration-color 120ms ease;
 }
 
 .error-file:hover {
-  text-decoration-color: var(--accent);
+  text-decoration-color: var(--glow);
 }
 
 .error-suggestion {
   font-size: 11px;
-  color: var(--success);
-  margin-top: 2px;
+  color: var(--ready);
+  margin-top: 4px;
   font-style: italic;
 }

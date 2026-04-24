@@ -2,8 +2,11 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 4px 12px;
+  gap: 16px;
+  padding: 24px 28px;
   min-height: 0;
-  overflow: hidden;
+  overflow: auto;
+  background: var(--surface);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--neu-raised);
 }

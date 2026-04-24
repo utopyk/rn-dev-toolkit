@@ -1,7 +1,7 @@
 /* ── Collapsible Log Sections ── */
 
 .collapsible-log-content {
-  padding: 6px 8px;
+  padding: 8px 10px;
 }
 
 /* ── Accordion List ── */
@@ -9,52 +9,44 @@
 .accordion-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
 }
 
 /* ── Accordion Section (card) ── */
 
 .accordion-section {
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  background: var(--surface);
+  border-radius: var(--radius-item);
   overflow: hidden;
-  transition: border-color 0.15s ease;
+  border: 1px solid transparent;
+  box-shadow: var(--neu-raised-xs);
+  transition: border-color 160ms ease, box-shadow 220ms ease;
 }
 
-.accordion-section.status-ok {
-  border-color: rgba(158, 206, 106, 0.3);
-}
-
-.accordion-section.status-error {
-  border-color: rgba(247, 118, 142, 0.3);
-}
-
-.accordion-section.status-warning {
-  border-color: rgba(224, 175, 104, 0.3);
-}
-
-.accordion-section.status-running {
-  border-color: var(--accent);
-}
+.accordion-section.status-ok      { border-color: rgba(43, 217, 106, 0.25); }
+.accordion-section.status-error   { border-color: rgba(247, 118, 142, 0.35); }
+.accordion-section.status-warning { border-color: rgba(255, 176, 32, 0.35); }
+.accordion-section.status-running { border-color: var(--accent-border); box-shadow: var(--neu-raised-xs), var(--glow-medium); }
 
 /* ── Accordion Header ── */
 
 .accordion-header {
   display: flex;
   align-items: center;
-  padding: 8px 12px;
+  padding: 10px 14px;
   cursor: pointer;
   user-select: none;
-  gap: 8px;
-  transition: background 0.1s ease;
+  gap: 10px;
+  background: transparent;
+  transition: background 140ms ease;
 }
 
 .accordion-header:hover {
-  background: var(--selection);
+  background: var(--surface-hi);
 }
 
 .accordion-header:focus-visible {
-  outline: 1px solid var(--accent);
+  outline: 1px solid var(--accent-border);
   outline-offset: -1px;
 }
 
@@ -66,28 +58,15 @@
   text-align: center;
 }
 
-/* ── Status icon ── */
-
 .accordion-status-icon {
   flex-shrink: 0;
-  font-size: 13px;
+  font-size: 14px;
 }
 
-.accordion-status-icon.status-ok {
-  color: var(--success);
-}
-
-.accordion-status-icon.status-warning {
-  color: var(--warning);
-}
-
-.accordion-status-icon.status-error {
-  color: var(--error);
-}
-
-.accordion-status-icon.status-running {
-  color: var(--accent);
-}
+.accordion-status-icon.status-ok      { color: var(--ready); }
+.accordion-status-icon.status-warning { color: var(--booting); }
+.accordion-status-icon.status-error   { color: var(--error); }
+.accordion-status-icon.status-running { color: var(--glow); }
 
 .icon-pulse {
   display: inline-block;
@@ -99,12 +78,11 @@
   50% { opacity: 0.4; }
 }
 
-/* ── Title & count ── */
-
 .accordion-title {
   flex: 1;
   font-size: 12px;
   font-weight: 500;
+  color: var(--ink);
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -117,71 +95,52 @@
   flex-shrink: 0;
 }
 
-/* ── Retry button ── */
-
 .accordion-retry {
-  padding: 2px 10px;
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
   color: var(--muted);
   font-size: 11px;
   cursor: pointer;
-  background: transparent;
-  transition: all 0.12s ease;
+  background: var(--surface);
+  box-shadow: var(--neu-raised-xs);
+  transition: color 160ms ease, border-color 220ms ease, box-shadow 220ms ease;
   flex-shrink: 0;
   font-family: inherit;
 }
 
 .accordion-retry:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--selection);
+  color: var(--ink);
+  border-color: var(--accent-border);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
 }
-
-/* ── Running badge ── */
 
 .accordion-running-badge {
   font-size: 10px;
-  color: var(--accent);
-  opacity: 0.8;
+  color: var(--glow);
+  opacity: 0.9;
   flex-shrink: 0;
   font-style: italic;
 }
 
-/* ── Accordion Body ── */
-
 .accordion-body {
-  border-top: 1px solid var(--border);
-  padding: 8px 12px;
+  border-top: 1px solid var(--shadow-dark-soft);
+  padding: 10px 14px;
   max-height: 300px;
   overflow-y: auto;
+  background: var(--surface-hi);
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+  color: var(--ink);
   animation: section-expand 0.15s ease-out;
 }
 
 @keyframes section-expand {
-  from {
-    opacity: 0;
-    max-height: 0;
-  }
-  to {
-    opacity: 1;
-    max-height: 300px;
-  }
+  from { opacity: 0; max-height: 0; }
+  to   { opacity: 1; max-height: 300px; }
 }
 
-/* status-specific body border-top tint */
-.accordion-section.status-ok .accordion-body {
-  border-top-color: rgba(158, 206, 106, 0.2);
-}
-
-.accordion-section.status-error .accordion-body {
-  border-top-color: rgba(247, 118, 142, 0.2);
-}
-
-.accordion-section.status-warning .accordion-body {
-  border-top-color: rgba(224, 175, 104, 0.2);
-}
-
-.accordion-section.status-running .accordion-body {
-  border-top-color: rgba(var(--accent-rgb, 100, 200, 255), 0.2);
-}
+.accordion-section.status-ok      .accordion-body { border-top-color: rgba(43, 217, 106, 0.2); }
+.accordion-section.status-error   .accordion-body { border-top-color: rgba(247, 118, 142, 0.25); }
+.accordion-section.status-warning .accordion-body { border-top-color: rgba(255, 176, 32, 0.25); }
+.accordion-section.status-running .accordion-body { border-top-color: var(--accent-border); }

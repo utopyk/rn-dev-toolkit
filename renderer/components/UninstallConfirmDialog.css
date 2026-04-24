@@ -1,7 +1,8 @@
 .uninstall-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -10,40 +11,43 @@
 }
 
 .uninstall-dialog {
-  background: var(--color-bg-panel, #1e1e28);
-  color: var(--color-fg, #eaeaea);
-  border: 1px solid var(--color-border, #3a3a48);
-  border-radius: 10px;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius-panel);
   width: min(520px, 100%);
   display: flex;
   flex-direction: column;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--neu-raised), var(--glow-medium);
 }
 
 .uninstall-header {
-  padding: 20px 24px 12px;
-  border-bottom: 1px solid var(--color-border, #3a3a48);
+  padding: 24px 28px 14px;
+  border-bottom: 1px solid var(--shadow-dark-soft);
 }
 
 .uninstall-title {
   margin: 0;
   font-size: 18px;
   font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -0.01em;
 }
 
 .uninstall-subtitle {
-  margin: 4px 0 0;
+  margin: 6px 0 0;
   font-size: 13px;
-  opacity: 0.75;
+  color: var(--muted);
 }
 
 .uninstall-body {
-  padding: 16px 24px;
+  padding: 18px 28px;
+  color: var(--ink);
 }
 
 .uninstall-details {
   margin: 0;
-  padding-left: 20px;
+  padding-left: 22px;
   font-size: 13px;
   line-height: 1.6;
 }
@@ -53,23 +57,22 @@
 }
 
 .uninstall-details code {
-  background: rgba(255, 255, 255, 0.05);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 3px;
-  padding: 1px 5px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: var(--surface-hi);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: 'SF Mono', 'Menlo', monospace;
   font-size: 12px;
 }
 
 .uninstall-detail-label {
   font-weight: 600;
-  opacity: 0.85;
+  color: var(--ink);
 }
 
 .uninstall-note {
-  margin: 12px 0 0;
+  margin: 14px 0 0;
   font-size: 12px;
-  opacity: 0.7;
+  color: var(--muted);
   line-height: 1.5;
 }
 
@@ -77,41 +80,44 @@
   display: flex;
   gap: 8px;
   justify-content: flex-end;
-  padding: 12px 24px 20px;
-  border-top: 1px solid var(--color-border, #3a3a48);
+  padding: 16px 28px 22px;
+  border-top: 1px solid var(--shadow-dark-soft);
 }
 
 .uninstall-button {
-  padding: 8px 16px;
-  border-radius: 6px;
+  padding: 10px 20px;
+  border-radius: var(--radius-pill);
   border: 1px solid transparent;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
   cursor: pointer;
-  transition: background 120ms ease, border 120ms ease;
+  box-shadow: var(--neu-raised-xs);
+  transition: color 160ms ease, border-color 220ms ease, box-shadow 220ms ease;
+  font-family: inherit;
 }
 
 .uninstall-button:disabled {
-  opacity: 0.6;
-  cursor: default;
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .uninstall-button--cancel {
-  background: transparent;
-  border-color: var(--color-border, #3a3a48);
-  color: var(--color-fg, #eaeaea);
+  background: var(--surface);
+  color: var(--ink);
 }
 
 .uninstall-button--cancel:not(:disabled):hover {
-  background: rgba(255, 255, 255, 0.05);
+  border-color: var(--accent-border);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
 }
 
 .uninstall-button--destructive {
-  background: #be4c4c;
-  border-color: #a03a3a;
+  background: var(--error);
   color: #fff;
+  border-color: var(--error);
+  box-shadow: var(--neu-raised-xs), 0 0 20px rgba(247, 118, 142, 0.3);
 }
 
 .uninstall-button--destructive:not(:disabled):hover {
-  background: #a83e3e;
+  filter: brightness(1.08);
 }

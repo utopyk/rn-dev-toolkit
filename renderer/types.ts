@@ -1,5 +1,6 @@
 /** Theme color tokens */
 export interface ThemeColors {
+  // Legacy (keep to avoid cascading breaks; map to new tokens where sensible)
   bg: string;
   fg: string;
   border: string;
@@ -10,6 +11,23 @@ export interface ThemeColors {
   muted: string;
   highlight: string;
   selection: string;
+  // Neumorphic tokens
+  bgSoft: string;
+  surface: string;
+  surfaceHi: string;
+  ink: string;
+  inkSoft: string;
+  muted2: string;
+  glow: string;
+  glowWarm: string;
+  ready: string;
+  booting: string;
+  shadowLight: string;
+  shadowDark: string;
+  shadowDarkSoft: string;
+  glowMedium: string;           /* multi-part shadow string, applied verbatim */
+  accentBorder: string;         /* 'transparent' in light */
+  bodyBg: string;               /* full radial-gradient string incl. fallback */
 }
 
 export interface Theme {

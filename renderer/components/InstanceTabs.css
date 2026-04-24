@@ -1,8 +1,10 @@
 .instance-tabs {
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
   -webkit-app-region: no-drag;
   flex-shrink: 0;
+  padding: 6px 16px;
+  background: var(--surface);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--neu-inset);
 }
 
 .instance-tabs-scroll {
@@ -10,86 +12,64 @@
   align-items: stretch;
   overflow-x: auto;
   overflow-y: hidden;
-  padding: 0 4px;
-  gap: 2px;
+  gap: 4px;
   scrollbar-width: thin;
-  scrollbar-color: var(--border) transparent;
+  scrollbar-color: var(--muted-2) transparent;
 }
 
-.instance-tabs-scroll::-webkit-scrollbar {
-  height: 3px;
-}
-
-.instance-tabs-scroll::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 2px;
-}
+.instance-tabs-scroll::-webkit-scrollbar { height: 3px; }
+.instance-tabs-scroll::-webkit-scrollbar-thumb { background: var(--muted-2); border-radius: 2px; }
 
 .instance-tab {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  font-size: 11px;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 12px;
   color: var(--muted);
   cursor: pointer;
-  border-bottom: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  border: 1px solid transparent;
   white-space: nowrap;
   position: relative;
-  transition: all 0.12s ease;
   flex-shrink: 0;
+  transition: color 160ms ease, background 220ms ease, box-shadow 220ms ease, border-color 220ms ease;
 }
 
 .instance-tab:hover {
-  color: var(--fg);
-  background: var(--selection);
+  color: var(--ink);
+  background: var(--surface-hi);
 }
 
 .instance-tab.active {
-  color: var(--fg);
-  border-bottom-color: var(--accent);
-  background: var(--selection);
+  color: var(--ink);
+  background: var(--surface-hi);
+  border-color: var(--accent-border);
+  box-shadow:
+    inset 2px 2px 5px var(--shadow-light),
+    inset -2px -2px 5px rgba(0,0,0,0.03);
+}
+[data-theme^="soft-dark"] .instance-tab.active {
+  box-shadow:
+    inset 2px 2px 5px var(--shadow-light),
+    inset -2px -2px 5px rgba(0,0,0,0.25);
 }
 
-.instance-tab-icon {
-  font-size: 12px;
-  flex-shrink: 0;
-}
-
-.instance-tab-name {
-  font-weight: bold;
-  color: inherit;
-}
-
-.instance-tab-device {
-  color: var(--muted);
-  font-size: 10px;
-}
+.instance-tab-icon { font-size: 14px; flex-shrink: 0; }
+.instance-tab-name { font-weight: 600; color: inherit; }
+.instance-tab-device { color: var(--muted); font-size: 11px; }
 
 .instance-dot {
   display: inline-block;
-  width: 6px;
-  height: 6px;
+  width: 8px; height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
+  box-shadow: 0 0 8px currentColor;
 }
-
-.instance-dot.running {
-  background: var(--success);
-}
-
-.instance-dot.starting {
-  background: var(--warning);
-  animation: pulse-dot 1.2s ease-in-out infinite;
-}
-
-.instance-dot.error {
-  background: var(--error);
-}
-
-.instance-dot.stopped {
-  background: var(--muted);
-}
+.instance-dot.running  { background: var(--ready); color: var(--ready); }
+.instance-dot.starting { background: var(--booting); color: var(--booting); animation: pulse-dot 1.2s ease-in-out infinite; }
+.instance-dot.error    { background: var(--error); color: var(--error); }
+.instance-dot.stopped  { background: var(--muted-2); color: transparent; box-shadow: none; }
 
 @keyframes pulse-dot {
   0%, 100% { opacity: 1; }
@@ -100,45 +80,43 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
-  border-radius: 3px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
   font-size: 12px;
   color: var(--muted);
   opacity: 0;
-  transition: all 0.12s ease;
+  transition: opacity 160ms ease, background 220ms ease, color 220ms ease;
   flex-shrink: 0;
   line-height: 1;
+  background: transparent;
+  border: 0;
 }
-
-.instance-tab:hover .instance-tab-close {
-  opacity: 1;
-}
-
-.instance-tab-close:hover {
-  background: var(--error);
-  color: var(--fg);
-}
+.instance-tab:hover .instance-tab-close,
+.instance-tab.active .instance-tab-close { opacity: 1; }
+.instance-tab-close:hover { background: var(--error); color: #fff; }
 
 .instance-tab-close.confirming {
   opacity: 1;
-  background: var(--warning);
-  color: var(--bg);
-  font-weight: bold;
+  background: var(--booting);
+  color: var(--ink);
+  font-weight: 700;
   font-size: 10px;
 }
 
 .instance-tab-confirm {
   position: absolute;
-  top: 100%;
+  top: calc(100% + 6px);
   left: 50%;
   transform: translateX(-50%);
-  background: var(--warning);
-  color: var(--bg);
-  font-size: 10px;
-  font-weight: bold;
-  padding: 3px 8px;
-  border-radius: 4px;
+  background: var(--surface);
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: var(--radius-pill);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
+  border: 1px solid var(--accent-border);
   white-space: nowrap;
   z-index: 10;
   pointer-events: none;
@@ -147,27 +125,28 @@
 
 @keyframes fade-in-confirm {
   from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
-  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
 .instance-tab-add {
   display: flex;
   align-items: center;
   justify-content: center;
-  min-width: 30px;
-  height: 28px;
-  margin: 3px 4px;
-  border: 1px dashed var(--border);
-  border-radius: 5px;
+  min-width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--surface-hi);
+  box-shadow: var(--neu-raised-xs);
   color: var(--muted);
-  font-size: 14px;
+  font-size: 16px;
   cursor: pointer;
-  transition: all 0.12s ease;
   flex-shrink: 0;
+  transition: color 160ms ease, box-shadow 220ms ease, border-color 220ms ease;
+  border: 1px solid transparent;
 }
-
 .instance-tab-add:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--selection);
+  color: var(--ink);
+  border-color: var(--accent-border);
+  box-shadow: var(--neu-raised-xs);
 }

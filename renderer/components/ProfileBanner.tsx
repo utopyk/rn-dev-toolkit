@@ -4,13 +4,9 @@ import './ProfileBanner.css';
 
 interface ProfileBannerProps {
   profile: ProfileInfo;
-  visible: boolean;
-  onToggle: () => void;
 }
 
-export function ProfileBanner({ profile, visible, onToggle }: ProfileBannerProps) {
-  if (!visible) return null;
-
+export function ProfileBanner({ profile }: ProfileBannerProps) {
   return (
     <div className="profile-banner">
       <div className="profile-info">
@@ -29,9 +25,6 @@ export function ProfileBanner({ profile, visible, onToggle }: ProfileBannerProps
         <span className="profile-sep">|</span>
         <span>{profile.buildType}</span>
       </div>
-      <button className="profile-toggle" onClick={onToggle}>
-        [p] toggle
-      </button>
     </div>
   );
 }

@@ -1,15 +1,26 @@
 :root {
-  --bg: #1a1b26;
-  --fg: #c0caf5;
-  --border: #565f89;
-  --accent: #7aa2f7;
-  --success: #9ece6a;
-  --warning: #e0af68;
-  --error: #f7768e;
-  --muted: #565f89;
-  --highlight: #bb9af7;
-  --selection: #283457;
-  --panel-focus: #1e2030;
+  /* Fallback values (pre-JS hydration) — mirrors softDark theme tokens */
+  --bg:         #14151E;
+  --bg-soft:    #1A1B26;
+  --surface:    #1E202B;
+  --surface-hi: #262833;
+  --ink:        #ECEEF5;
+  --ink-soft:   #C5C8D2;
+  --fg:         #ECEEF5;   /* legacy alias → --ink */
+  --muted:      #7D8192;
+  --muted-2:    #525668;
+  --glow:       #cc97cc;
+  --glow-warm:  #d9b0d9;
+  --accent:     #cc97cc;   /* legacy alias → --glow */
+  --ready:      #2BD96A;
+  --booting:    #FFB020;
+  --success:    #2BD96A;   /* legacy alias → --ready */
+  --warning:    #FFB020;   /* legacy alias → --booting */
+  --error:      #f7768e;
+  --border:     #cc97cc;   /* legacy alias → --accent-border */
+  --highlight:  #cc97cc;   /* legacy alias → --glow */
+  --selection:  #262833;   /* legacy alias → --surface-hi */
+  --panel-focus: #262833;  /* legacy alias → --surface-hi */
 }
 
 * {
@@ -24,8 +35,8 @@ html, body, #root {
 }
 
 body {
-  background: var(--bg);
-  color: var(--fg);
+  background: var(--body-bg, var(--bg));
+  color: var(--ink, var(--fg));
   font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace;
   font-size: 13px;
   line-height: 1.5;
@@ -36,16 +47,18 @@ body {
 /* ── Custom scrollbar ── */
 ::-webkit-scrollbar {
   width: 6px;
+  height: 6px;
 }
 ::-webkit-scrollbar-track {
-  background: var(--bg);
+  background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
+  background: var(--muted-2);
   border-radius: 3px;
+  opacity: 0.6;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--accent);
+  background: var(--muted);
 }
 
 /* ── Buttons reset ── */
@@ -61,4 +74,81 @@ button {
 ::selection {
   background: var(--selection);
   color: var(--fg);
+}
+
+/* ── Radii + shadow recipes (consumed by utilities) ── */
+:root {
+  --radius-sidebar: 28px;
+  --radius-panel:   24px;
+  --radius-card:    20px;
+  --radius-item:    16px;
+  --radius-pill:    999px;
+
+  --neu-raised:
+    -6px -6px 14px var(--shadow-light),
+     8px 10px 22px var(--shadow-dark);
+
+  --neu-raised-sm:
+    -5px -5px 12px var(--shadow-light),
+     6px  8px 18px var(--shadow-dark);
+
+  --neu-raised-xs:
+    -4px -4px 8px var(--shadow-light),
+     5px  6px 14px var(--shadow-dark-soft);
+
+  --neu-inset:
+    inset 3px 3px 6px var(--shadow-dark-soft),
+    inset -2px -2px 5px var(--shadow-light);
+
+  --neu-inset-strong:
+    inset 3px 3px 6px var(--shadow-dark),
+    inset -2px -2px 5px var(--shadow-light);
+}
+
+/* ── Neumorphic utility classes ── */
+.neu-raised {
+  background: var(--surface);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--neu-raised);
+}
+.neu-raised-sm {
+  background: var(--surface);
+  border-radius: var(--radius-card);
+  box-shadow: var(--neu-raised-sm);
+}
+.neu-raised-xs {
+  background: var(--surface);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--neu-raised-xs);
+}
+.neu-inset {
+  background: var(--surface);
+  box-shadow: var(--neu-inset);
+}
+.neu-inset-strong {
+  background: var(--surface);
+  box-shadow: var(--neu-inset-strong);
+}
+.neu-pill {
+  border-radius: var(--radius-pill);
+  padding: 10px 18px;
+}
+.neu-active {
+  background: var(--surface-hi);
+  color: var(--ink);
+  border: 1px solid var(--accent-border);
+  box-shadow:
+    inset 2px 2px 5px var(--shadow-light),
+    inset -2px -2px 5px rgba(0,0,0,0.03),
+    var(--glow-medium);
+}
+[data-theme^="soft-dark"] .neu-active {
+  box-shadow:
+    inset 2px 2px 5px var(--shadow-light),
+    inset -2px -2px 5px rgba(0,0,0,0.25),
+    var(--glow-medium);
+}
+.neu-hover-accent:hover {
+  border: 1px solid var(--accent-border);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
 }

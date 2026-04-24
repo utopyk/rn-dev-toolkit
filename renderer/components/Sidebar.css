@@ -1,131 +1,143 @@
+/* Frameless-window drag region: the whole sidebar is draggable by default,
+   with interactive children explicitly set no-drag. This preserves window
+   drag in collapsed mode too (where the brand is hidden). */
 .sidebar {
-  width: 220px;
-  min-width: 220px;
-  border-right: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: var(--radius-sidebar);
+  padding: 28px 20px;
   display: flex;
   flex-direction: column;
-  padding: 0 0 12px;
-  -webkit-app-region: no-drag;
+  box-shadow: -8px -8px 20px var(--shadow-light), 10px 12px 28px var(--shadow-dark);
   overflow-y: auto;
-}
-
-/* Logo */
-.sidebar-logo {
-  padding: 14px 14px 8px;
-  line-height: 1.2;
-  font-weight: bold;
-  font-size: 11px;
+  overflow-x: hidden;
   -webkit-app-region: drag;
+  transition: padding 220ms ease;
+  position: relative;
 }
-.logo-l1 { color: var(--error); }
-.logo-l2 { color: var(--highlight); }
-.logo-l3 { color: var(--accent); }
+.sidebar button,
+.sidebar .sidebar-item,
+.sidebar .sidebar-shortcut,
+.sidebar .sidebar-collapse-toggle,
+.sidebar .sidebar-new-worktree { -webkit-app-region: no-drag; }
 
-.sidebar-section {
-  margin-bottom: 16px;
+.sidebar-brand { padding: 6px 10px 26px; }
+.sidebar-brand-name {
+  font-size: 20px; font-weight: 700; letter-spacing: -0.02em;
+  color: var(--ink); margin: 0;
+}
+.sidebar-brand-sub {
+  display: block; margin-top: 4px;
+  font-size: 11px; color: var(--muted);
 }
 
+.sidebar-section { display: flex; flex-direction: column; gap: 6px; margin-bottom: 20px; }
 .sidebar-section-title {
-  padding: 0 14px;
-  margin-bottom: 6px;
-  font-size: 10px;
-  font-weight: bold;
-  letter-spacing: 0.08em;
-  color: var(--muted);
+  padding: 0 10px; margin-bottom: 6px;
+  font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+  color: var(--muted); text-transform: uppercase;
 }
 
 .sidebar-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 14px;
-  font-size: 12px;
-  color: var(--fg);
+  display: flex; align-items: center; gap: 14px;
+  padding: 12px 14px;
+  border-radius: var(--radius-item);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 500;
   width: 100%;
   text-align: left;
-  border-left: 2px solid transparent;
-  transition: all 0.12s ease;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  transition: color 160ms ease, background 220ms ease, box-shadow 220ms ease, border-color 220ms ease;
 }
-
-.sidebar-item:hover {
-  background: var(--selection);
+.sidebar-item:hover { color: var(--ink); background: var(--surface-hi); border-color: var(--accent-border); box-shadow: var(--glow-medium); }
+.sidebar-item.active {
+  background: var(--surface-hi);
+  color: var(--ink);
+  border-color: var(--accent-border);
+  box-shadow:
+    inset 2px 2px 5px var(--shadow-light),
+    inset -2px -2px 5px rgba(0,0,0,0.03),
+    var(--glow-medium);
 }
-
-.sidebar-module.active {
-  border-left-color: var(--accent);
-  background: var(--selection);
-  color: var(--accent);
-  font-weight: bold;
+[data-theme^="soft-dark"] .sidebar-item.active {
+  box-shadow:
+    inset 2px 2px 5px var(--shadow-light),
+    inset -2px -2px 5px rgba(0,0,0,0.25),
+    var(--glow-medium);
 }
 
 .sidebar-module-icon {
-  color: var(--accent);
-  font-weight: bold;
-  min-width: 14px;
-}
-
-.status-dot {
-  display: inline-block;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+  width: 18px; height: 18px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--muted-2);
   flex-shrink: 0;
 }
-.status-dot.running { background: var(--success); }
-.status-dot.starting { background: var(--warning); }
-.status-dot.error { background: var(--error); }
-.status-dot.stopped { background: var(--muted); }
+.sidebar-item.active .sidebar-module-icon,
+.sidebar-item:hover .sidebar-module-icon { color: var(--ink); }
 
-/* Shortcuts section */
 .sidebar-shortcuts {
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
+  margin-top: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--shadow-dark-soft);
 }
-
 .sidebar-shortcut {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 14px;
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 14px;
   font-size: 11px;
-  color: var(--fg);
-  width: 100%;
-  text-align: left;
-  transition: all 0.12s ease;
+  color: var(--muted);
+  width: 100%; text-align: left;
+  border-radius: var(--radius-item);
+  background: transparent; border: 0;
+  cursor: pointer;
+  transition: color 160ms ease, background 160ms ease;
 }
+.sidebar-shortcut:hover { color: var(--ink); background: var(--surface-hi); }
+.sidebar-shortcut .shortcut-key { color: var(--glow); font-weight: 700; min-width: 24px; font-size: 10px; }
 
-.sidebar-shortcut:hover {
-  background: var(--selection);
-}
-
-.sidebar-shortcut .shortcut-key {
-  color: var(--accent);
-  font-weight: bold;
-  min-width: 24px;
-  font-size: 10px;
-}
-
-.sidebar-shortcut .shortcut-label {
-  color: var(--fg);
-}
-
-.sidebar-footer {
-  margin-top: auto;
-  padding: 8px 14px;
-}
-
+.sidebar-footer { margin-top: auto; padding-top: 12px; }
 .sidebar-new-worktree {
   width: 100%;
-  padding: 6px 10px;
-  border: 1px dashed var(--border);
-  border-radius: 6px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-radius: var(--radius-item);
+  border: 1px dashed var(--muted-2);
   color: var(--muted);
   font-size: 12px;
-  transition: all 0.12s ease;
+  cursor: pointer;
+  transition: border-color 160ms ease, color 160ms ease, box-shadow 220ms ease;
+}
+.sidebar-new-worktree:hover {
+  border-color: var(--accent-border);
+  color: var(--ink);
+  box-shadow: var(--glow-medium);
 }
 
-.sidebar-new-worktree:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--selection);
+.sidebar-top {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 8px;
 }
+.sidebar.collapsed .sidebar-top { justify-content: center; }
+
+.sidebar-collapse-toggle {
+  width: 28px; height: 28px;
+  border-radius: 50%;
+  background: var(--surface-hi);
+  border: 1px solid var(--accent-border);
+  color: var(--muted);
+  display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+  box-shadow: var(--neu-raised-xs);
+}
+.sidebar-collapse-toggle:hover { color: var(--ink); box-shadow: var(--neu-raised-xs), var(--glow-medium); }
+
+.sidebar.collapsed { padding: 28px 10px; }
+.sidebar.collapsed .sidebar-section-title,
+.sidebar.collapsed .sidebar-item-label,
+.sidebar.collapsed .shortcut-label,
+.sidebar.collapsed .sidebar-new-worktree,
+.sidebar.collapsed .sidebar-footer { display: none; }
+.sidebar.collapsed .sidebar-item { justify-content: center; padding: 12px 0; }
+.sidebar.collapsed .sidebar-shortcut { justify-content: center; padding: 6px 0; }

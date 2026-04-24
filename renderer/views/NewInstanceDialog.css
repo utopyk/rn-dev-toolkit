@@ -6,6 +6,9 @@
   justify-content: center;
   padding: 24px;
   overflow-y: auto;
+  background: var(--surface);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--neu-raised);
 }
 
 .nid-container {
@@ -14,6 +17,11 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
+  background: var(--surface-hi);
+  padding: 24px;
+  border-radius: var(--radius-panel);
+  box-shadow: var(--neu-raised-sm);
+  border: 1px solid var(--accent-border);
 }
 
 .nid-header {
@@ -24,8 +32,9 @@
 
 .nid-title {
   font-size: 20px;
-  color: var(--fg);
-  font-weight: bold;
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
 .nid-subtitle {
@@ -37,10 +46,11 @@
 .nid-list {
   display: flex;
   flex-direction: column;
-  gap: 0;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
+  gap: 6px;
+  background: var(--surface);
+  padding: 6px;
+  border-radius: var(--radius-card);
+  box-shadow: var(--neu-inset);
   max-height: 360px;
   overflow-y: auto;
 }
@@ -51,22 +61,21 @@
   gap: 12px;
   padding: 12px 16px;
   cursor: pointer;
-  transition: background 0.1s ease;
-  border-bottom: 1px solid var(--border);
-  background: var(--bg);
-}
-
-.nid-profile-card:last-child {
-  border-bottom: none;
+  border-radius: var(--radius-item);
+  border: 1px solid transparent;
+  background: transparent;
+  transition: background 160ms ease, border-color 220ms ease, box-shadow 220ms ease;
 }
 
 .nid-profile-card:hover {
-  background: var(--selection);
+  background: var(--surface-hi);
+  border-color: var(--accent-border);
+  box-shadow: var(--glow-medium);
 }
 
 .nid-profile-card.is-default {
-  border-left: 3px solid var(--accent);
-  padding-left: 13px;
+  background: var(--surface-hi);
+  border-color: var(--accent-border);
 }
 
 .nid-profile-star {
@@ -74,6 +83,7 @@
   flex-shrink: 0;
   width: 18px;
   text-align: center;
+  color: var(--glow);
 }
 
 .nid-profile-info {
@@ -86,8 +96,8 @@
 
 .nid-profile-name {
   font-size: 13px;
-  font-weight: bold;
-  color: var(--fg);
+  font-weight: 600;
+  color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -102,7 +112,7 @@
 }
 
 .nid-profile-meta-sep {
-  color: var(--border);
+  color: var(--muted-2);
 }
 
 .nid-profile-actions {
@@ -110,7 +120,7 @@
   gap: 4px;
   flex-shrink: 0;
   opacity: 0;
-  transition: opacity 0.15s ease;
+  transition: opacity 160ms ease;
 }
 
 .nid-profile-card:hover .nid-profile-actions {
@@ -118,23 +128,24 @@
 }
 
 .nid-profile-action-btn {
-  width: 24px;
-  height: 24px;
-  border: none;
-  background: none;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: var(--surface);
   color: var(--muted);
   cursor: pointer;
-  border-radius: 4px;
+  border-radius: 50%;
   font-size: 12px;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.1s ease;
+  box-shadow: var(--neu-raised-xs);
+  transition: color 160ms ease, box-shadow 220ms ease;
 }
 
 .nid-profile-action-btn:hover {
-  background: var(--border);
-  color: var(--fg);
+  color: var(--ink);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
 }
 
 .nid-profile-action-btn.danger:hover {
@@ -149,25 +160,26 @@
   gap: 8px;
   padding: 14px 16px;
   cursor: pointer;
-  border: 2px dashed var(--border);
-  border-radius: 8px;
+  border: 2px dashed var(--muted-2);
+  border-radius: var(--radius-card);
   background: transparent;
   color: var(--muted);
   font-size: 13px;
-  font-weight: bold;
-  transition: all 0.15s ease;
+  font-weight: 600;
+  transition: color 160ms ease, border-color 220ms ease, box-shadow 220ms ease;
   font-family: inherit;
   width: 100%;
 }
 
 .nid-create-card:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--selection);
+  border-color: var(--accent-border);
+  color: var(--ink);
+  box-shadow: var(--glow-medium);
 }
 
 .nid-create-icon {
   font-size: 16px;
+  color: var(--glow);
 }
 
 /* ── Footer ── */

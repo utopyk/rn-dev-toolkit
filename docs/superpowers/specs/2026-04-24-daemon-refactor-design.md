@@ -72,6 +72,8 @@ Spawn uses **exclusive flock** on the pid file to arbitrate concurrent spawn att
 
 Daemon maintains **client-connection refcount**. When `refcount === 0`, a **60s grace timer** starts. New connection within grace → timer cancelled. Timer expires → daemon runs graceful shutdown (stop Metro, stop DevTools, unload modules, unlink pid + sock, `exit(0)`).
 
+The grace window is configurable via `RN_DEV_DAEMON_GRACE_MS` env var so integration test **#4** can run with a sub-second grace (avoiding 60s of wall-clock per test run).
+
 Daemon survives client exit by design. Electron quit → agent keeps working. Agent disconnect → GUI keeps running. Last one leaves → daemon schedules graceful shutdown.
 
 ### Wire protocol
@@ -80,7 +82,7 @@ New RPCs the daemon adds:
 
 | Method | Purpose |
 |---|---|
-| `daemon/ping` | Liveness + version handshake. Client sends `{clientVersion}`; server responds `{daemonVersion, hostRange}`. Used on connect for version compat check. |
+| `daemon/ping` | Liveness + version handshake. Client sends `{clientVersion}`; server responds `{daemonVersion, hostRange}`. Used on connect for version compat check. Also reusable as a keep-alive heartbeat if/when we need connection-drop detection shorter than TCP defaults (no separate RPC needed). |
 | `daemon/shutdown` | Graceful exit request. Used by the 60s-grace supervisor and by `rn-dev daemon-stop`. |
 | `session/start` | Boot `MetroManager` + `DevToolsManager` + `ModuleHostManager` for this worktree with the given profile. Returns immediately with `{status: "starting"}`. |
 | `session/stop` | Graceful service teardown. Daemon stays alive. |
@@ -161,7 +163,7 @@ Four PRs, each independently mergeable, each with a named integration test as th
 
 ### Phase 13.4 — Electron migrates to thin clients
 
-- `electron/ipc/{services,devtools,modules*,instance}.ts` handlers become `IpcClient` proxies to the daemon.
+- **All** ipcMain handlers under `electron/ipc/` become `IpcClient` proxies to the daemon. The named files (`services.ts`, `devtools.ts`, `modules*.ts`, `instance.ts`) are the largest, but the sweep covers the whole directory — any handler that creates or directly references a service instance is in scope.
 - `electron/module-system-bootstrap.ts` deleted.
 - Electron renderer's ipcRenderer surface unchanged — renderer doesn't know about the refactor.
 - Wizard's "Start" → ipcMain handler in Electron main → `connectToDaemon` → `session/start` → streams events back to renderer via ipcMain push.
@@ -237,7 +239,7 @@ Every existing Electron integration test (70+) continues to pass, re-pointed at 
 
 **Concurrent spawn race.** Daemon acquires `flock(pid_file, LOCK_EX)` early in startup. Losing daemon exits silently. Winner completes pid-write + socket-listen. Both clients connect to winner. Reuse `src/core/module-host/lockfile.ts` pattern.
 
-**Daemon crash mid-session.** Services die with daemon. Next client spawn gets a fresh daemon. Client surfaces `"connection lost; restart session? (y/n)"`. Session config re-applied from profile file.
+**Daemon crash mid-session.** Services die with daemon. Next client spawn gets a fresh daemon. Client surfaces `"connection lost; restart session? (y/n)"`. Session config re-applied from the per-worktree profile file at `<worktree>/.rn-dev/profiles/<profileName>.json` (the same file the wizard writes; `<profileName>` is the profile the session was started with, which the client cached locally when it issued `session/start`).
 
 **Orphaned module subprocesses on ungraceful daemon death.** Modules use detached process groups for signal isolation, so SIGKILL'ing the daemon leaks them. Two stacked mitigations:
 
@@ -266,7 +268,7 @@ Every existing Electron integration test (70+) continues to pass, re-pointed at 
 
 The refactor is done when:
 
-1. `grep -rn "new MetroManager\|new DevToolsManager\|createModuleSystem" src/ electron/ --include='*.ts'` returns matches only inside `src/daemon/` (and tests).
+1. `grep -rn "new MetroManager\|new DevToolsManager\|new ModuleHostManager\|createModuleSystem" src/ electron/ --include='*.ts'` returns matches only inside `src/daemon/` (and tests).
 2. All 5 integration tests pass.
 3. All 70+ existing Electron integration tests still pass.
 4. Running `claude mcp add rn-dev -- /path/to/dist/index.js mcp` and using the tools from Claude Code against a GUI session returns real data (not `no-session`).

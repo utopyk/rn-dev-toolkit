@@ -1,6 +1,17 @@
 import { ipcMain } from 'electron';
 import { execShellAsync } from '../../src/core/exec-async.js';
+import { serviceBus } from '../../src/app/service-bus.js';
+import type { WatcherClient } from '../../src/app/client/watcher-adapter.js';
 import { instances, state, appendLog, send } from './state.js';
+
+// Phase 13.4.1 — watcher:toggle flips to the daemon-client adapter.
+// `state.watcher` on the in-process path is retired as services.ts
+// collapses; `serviceBus.watcher` is the daemon adapter published by
+// `connectElectronToDaemon`.
+let watcherClient: WatcherClient | null = null;
+serviceBus.on('watcher', (client: WatcherClient) => {
+  watcherClient = client;
+});
 
 export function registerToolsHandlers() {
   ipcMain.handle('run:lint', async () => {
@@ -60,16 +71,17 @@ export function registerToolsHandlers() {
   });
 
   ipcMain.handle('watcher:toggle', async () => {
-    if (!state.watcher) {
+    if (!watcherClient) {
       send('service:log', 'No on-save actions configured');
       return;
     }
-    if (state.watcher.isRunning()) {
-      state.watcher.stop();
+    const running = await watcherClient.isRunning();
+    if (running) {
+      await watcherClient.stop();
       send('service:log', 'Watcher disabled');
     } else {
       send('service:log', 'Starting watcher...');
-      state.watcher.start();
+      await watcherClient.start();
       send('service:log', 'Watcher enabled');
     }
   });

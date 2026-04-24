@@ -6,22 +6,18 @@
 //   - modules:config-get   → read persisted config (safe, read-only)
 //   - modules:config-set   → shallow-merge patch, validate, persist, notify
 //
-// Electron shares a process with the daemon, so we call the daemon's
-// `getModuleConfig` / `setModuleConfig` helpers directly with a locally-
-// composed `ModulesIpcOptions` — no socket hop. The bus we hand in is the
-// one published on `serviceBus.moduleEventsBus`, which is also what MCP
-// `modules/subscribe` consumers listen on, so both paths emit through a
-// single fan-out point.
+// Phase 13.4.1 — the dispatcher routes both reads + writes through the
+// daemon client. The Electron process no longer holds a `ModuleHostManager`
+// / `ModuleRegistry`; the daemon owns those and `ModuleHostClient.configGet`
+// / `.configSet` are the single source of truth. Electron's audit sink
+// (service:log) still fires per set attempt — kept here because the daemon's
+// own HMAC-chained audit log doesn't drive the renderer's log pane.
 
-import type { EventEmitter } from "node:events";
-import type { ModuleHostManager } from "../../src/core/module-host/manager.js";
-import type { ModuleRegistry } from "../../src/modules/registry.js";
-import {
-  getModuleConfig as daemonGetConfig,
-  setModuleConfig as daemonSetConfig,
-  type ModuleConfigGetResult,
-  type ModuleConfigSetRequest,
-  type ModuleConfigSetResult,
+import type { ModuleHostClient } from "../../src/app/client/module-host-adapter.js";
+import type {
+  ModuleConfigGetResult,
+  ModuleConfigSetRequest,
+  ModuleConfigSetResult,
 } from "../../src/app/modules-ipc.js";
 
 // ---------------------------------------------------------------------------
@@ -39,17 +35,12 @@ export type ConfigGetReply = ModuleConfigGetResult | { error: string };
 export type ConfigSetReply = ModuleConfigSetResult;
 
 export interface ModulesConfigIpcDeps {
-  manager: ModuleHostManager;
-  registry: ModuleRegistry;
-  /**
-   * Shared event emitter from `registerModulesIpc`. `setConfig` emits
-   * `config-changed` onto it so MCP `modules/subscribe` consumers see it.
-   */
-  moduleEvents: EventEmitter;
+  modulesClient: ModuleHostClient;
   /**
    * Called for every `modules:config-set` attempt regardless of outcome.
-   * Electron registrar routes this to the `service:log` channel — mirrors
-   * the Phase 4 `modules:host-call` audit-log pattern.
+   * Electron registrar routes this to the `service:log` channel so the
+   * renderer's log pane sees what happened — the daemon's HMAC-chained
+   * audit log still runs server-side.
    */
   auditConfigSet?: (event: ConfigSetAuditEvent) => void;
 }
@@ -71,32 +62,18 @@ export interface ConfigSetAuditEvent {
 // Pure resolution — exported for unit tests
 // ---------------------------------------------------------------------------
 
-export function handleConfigGet(
+export async function handleConfigGet(
   deps: ModulesConfigIpcDeps,
   payload: ConfigGetPayload,
-): ConfigGetReply {
-  return daemonGetConfig(
-    {
-      manager: deps.manager,
-      registry: deps.registry,
-      moduleEvents: deps.moduleEvents,
-    },
-    payload,
-  );
+): Promise<ConfigGetReply> {
+  return deps.modulesClient.configGet(payload.moduleId, payload.scopeUnit);
 }
 
 export async function handleConfigSet(
   deps: ModulesConfigIpcDeps,
   payload: ConfigSetPayload,
 ): Promise<ConfigSetReply> {
-  const result = await daemonSetConfig(
-    {
-      manager: deps.manager,
-      registry: deps.registry,
-      moduleEvents: deps.moduleEvents,
-    },
-    payload,
-  );
+  const result = await deps.modulesClient.configSet(payload);
   if (deps.auditConfigSet) {
     const patchKeys =
       payload && payload.patch && typeof payload.patch === "object"

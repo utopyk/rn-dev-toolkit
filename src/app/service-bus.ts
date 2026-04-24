@@ -12,8 +12,7 @@ import type { MetroClient } from "./client/metro-adapter.js";
 import type { WatcherClient } from "./client/watcher-adapter.js";
 import type { BuilderClient } from "./client/builder-adapter.js";
 import type { DevToolsClient } from "./client/devtools-adapter.js";
-import type { ModuleHostManager } from "../core/module-host/manager.js";
-import type { ModuleRegistry } from "../modules/registry.js";
+import type { ModuleHostClient } from "./client/module-host-adapter.js";
 
 export interface ServiceBusEvents {
   log: (text: string) => void;
@@ -34,34 +33,16 @@ export interface ServiceBusEvents {
    */
   devtools: (manager: DevToolsClient) => void;
   /**
-   * Published once when the daemon boots. The Phase 2 manager owns
-   * module subprocess lifecycle — Phase 3 subscribes to expose modules/*
-   * MCP tools; Phase 4 subscribes to render panels.
+   * Published after `connectElectronToDaemon` completes. Phase 13.4.1 —
+   * every Electron `modules:*` ipcMain handler resolves its deps through
+   * this one topic (install, uninstall, list, list-panels, resolve-panel,
+   * host-call, call-tool, config-get, config-set, marketplace/list,
+   * marketplace/info). Emitted again (with `null`) on daemon disconnect
+   * so handlers can invalidate their cached adapter refs. Arch P0 on
+   * PR #20 — without clear-on-disconnect, a daemon respawn mid-session
+   * leaves every handler holding a dead client ref.
    */
-  moduleHost: (manager: ModuleHostManager) => void;
-  /**
-   * Published once after `moduleHost` — the registry tracks loaded
-   * manifests. Electron main subscribes so panel-bridge can resolve
-   * module root paths + manifests by id.
-   */
-  moduleRegistry: (registry: ModuleRegistry) => void;
-  /**
-   * The shared `moduleEvents` EventEmitter owned by `registerModulesIpc`
-   * (or created eagerly by the Electron-side module-system bootstrap).
-   *
-   * Published once; every subscriber (Electron renderer forward, MCP
-   * `modules/subscribe`, Electron `modules:config-set`) attaches directly
-   * to this emitter. Phase 5c — simplicity #6 removed the redundant
-   * `moduleEvent` topic that used to relay through the serviceBus; having
-   * one emitter means one fan-out point.
-   */
-  moduleEventsBus: (emitter: EventEmitter) => void;
-  /**
-   * Host version string published alongside `moduleHost` so IPC registrars
-   * (install flow, capability lookups) can thread it through without a
-   * second read of `package.json`. Phase 6.
-   */
-  hostVersion: (version: string) => void;
+  modulesClient: (client: ModuleHostClient | null) => void;
 }
 
 class ServiceBus extends EventEmitter {
@@ -89,20 +70,19 @@ class ServiceBus extends EventEmitter {
     this.emit("devtools", manager);
   }
 
-  setModuleHost(manager: ModuleHostManager) {
-    this.emit("moduleHost", manager);
+  setModulesClient(client: ModuleHostClient) {
+    this.emit("modulesClient", client);
   }
 
-  setModuleRegistry(registry: ModuleRegistry) {
-    this.emit("moduleRegistry", registry);
-  }
-
-  setModuleEventsBus(emitter: EventEmitter) {
-    this.emit("moduleEventsBus", emitter);
-  }
-
-  setHostVersion(version: string) {
-    this.emit("hostVersion", version);
+  /**
+   * Invalidate cached handler references to the daemon client. Called
+   * from `main.ts::wireDaemonDisconnectListener` on any adapter
+   * disconnect so the next session's `setModulesClient(newClient)` can
+   * re-populate deps. Without this, handlers hold a dead `ModuleHostClient`
+   * post-reconnect. Arch P0 on PR #20.
+   */
+  clearModulesClient() {
+    this.emit("modulesClient", null);
   }
 }
 

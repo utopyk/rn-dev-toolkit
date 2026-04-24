@@ -1,13 +1,8 @@
 import { ipcMain } from 'electron';
 import path from 'path';
-import { MetroManager } from '../../src/core/metro.js';
 import { ProfileStore } from '../../src/core/profile.js';
-import { Builder } from '../../src/core/builder.js';
 import { getCurrentBranch } from '../../src/core/project.js';
 import { listDevices } from '../../src/core/device.js';
-import { createDefaultPreflightEngine } from '../../src/core/preflight.js';
-import { execShellAsync } from '../../src/core/exec-async.js';
-import { CleanManager } from '../../src/core/clean.js';
 import {
   instances,
   state,
@@ -17,7 +12,17 @@ import {
   findFreePort,
   type InstanceState,
 } from './state.js';
-import { startInstanceServices } from './services.js';
+
+// Phase 13.4.1 — one daemon = one worktree = one session. A second
+// instance against the same daemon is not supported in this release;
+// the multi-session story lands with Phase 13.5 ref-counted
+// `DaemonSession.release()` semantics. `instances:create` still
+// materializes the renderer-side instance record (the wizard flow
+// needs it) but surfaces a loud warning that a restart is required
+// before services attach.
+const MULTI_INSTANCE_NOT_SUPPORTED_MSG =
+  'This release supports one active instance per project. ' +
+  'Restart the app to attach services to the newly-created profile.';
 
 export function registerInstanceHandlers() {
   ipcMain.handle('instances:list', async () => {
@@ -102,45 +107,40 @@ export function registerInstanceHandlers() {
     // Notify renderer of the new instance
     send('instance:created', toSummary(instance));
 
-    // Start services for this instance in the background
-    startInstanceServices(instance, profileData).catch(err => {
-      const errMsg = `Failed to start services for ${id}: ${err.message}`;
-      appendLog(instance, 'service', `ERROR ${errMsg}`);
-      send('instance:log', { instanceId: id, text: errMsg });
+    // Phase 13.4.1: no in-process startInstanceServices — services live
+    // in the daemon and only the first `startRealServices` call on boot
+    // opens a session for the default profile. Return `ok: false` so
+    // the wizard treats this as a failure the user has to resolve (app
+    // restart) — returning `ok: true` would silently pretend services
+    // attached. Arch P1 on PR #20.
+    appendLog(instance, 'service', MULTI_INSTANCE_NOT_SUPPORTED_MSG);
+    send('instance:log', {
+      instanceId: id,
+      text: MULTI_INSTANCE_NOT_SUPPORTED_MSG,
     });
 
-    return { ok: true, instance: toSummary(instance) };
+    return {
+      ok: false,
+      code: 'MULTI_INSTANCE_NOT_SUPPORTED' as const,
+      error: MULTI_INSTANCE_NOT_SUPPORTED_MSG,
+      instance: toSummary(instance),
+    };
   });
 
   ipcMain.handle('instances:remove', async (_, instanceId: string) => {
     const instance = instances.get(instanceId);
     if (!instance) return { ok: false, error: 'Instance not found' };
 
-    // Tear down DevTools (releases proxy port + Metro listener) before Metro,
-    // since DevToolsManager subscribes to Metro's status events.
-    if (instance.devtools) {
-      try {
-        await instance.devtools.dispose();
-      } catch {
-        // Best effort
-      }
-      instance.devtools = null;
-      instance.devtoolsStarted = false;
-    }
-
-    // Stop Metro
-    if (instance.metro) {
-      try {
-        const worktreeKey = state.artifactStore?.worktreeHash(instance.worktree) ?? instanceId;
-        instance.metro.stop(worktreeKey);
-      } catch {
-        // Best effort
-      }
-    }
-
+    // Phase 13.4.1 — `instance.metro` / `.devtools` / `.builder` are
+    // always null (no in-process services are ever attached); the
+    // daemon owns every runtime service. The pre-flip teardown branches
+    // that called `.dispose()` / `.stop()` here were dead code. If the
+    // instance being removed was the active one that `startRealServices`
+    // opened a daemon session for, the session stays alive — teardown
+    // is the user's choice via app quit (Phase 13.5 grows ref-counted
+    // `DaemonSession.release()` for the multi-instance story).
     instances.delete(instanceId);
 
-    // Switch active to another instance if needed
     if (state.activeInstanceId === instanceId) {
       const remaining = Array.from(instances.keys());
       state.activeInstanceId = remaining.length > 0 ? remaining[0] : null;
@@ -172,191 +172,20 @@ export function registerInstanceHandlers() {
   });
 
   // ── Retry a specific step for an instance ──
+  // Phase 13.4.1 — step retry is not yet wired through the daemon.
+  // preflight / clean / watchman / metro / build retries want to drive
+  // individual steps on a session that's already running, which the
+  // daemon's current `session/start` + `metro/reload` + `builder/build`
+  // surface doesn't model directly. Phase 13.5 grows the daemon-side
+  // session API to take targeted retry requests; until then, ask the
+  // user to fully restart the session.
   ipcMain.handle('instance:retryStep', async (_, data: { instanceId: string; stepId: string }) => {
     const { instanceId, stepId } = data;
     const instance = instances.get(instanceId);
     if (!instance) return { ok: false, error: 'Instance not found' };
-    const { projectRoot, artifactStore } = state;
-    if (!projectRoot || !artifactStore) return { ok: false, error: 'No project root' };
-
-    const emit = (text: string) => {
-      appendLog(instance, 'service', text);
-      send('instance:log', { instanceId: instance.id, text });
-    };
-
-    const sectionTitles: Record<string, string> = {
-      preflight: 'Preflight Checks',
-      clean: `${instance.mode} Clean`,
-      watchman: 'Watchman Clear',
-      metro: 'Metro Start',
-      build: `Build for ${instance.platform}`,
-    };
-
-    const title = sectionTitles[stepId] ?? stepId;
-    send('instance:section:start', { instanceId: instance.id, id: stepId, title, icon: '\u23F3' });
-
-    try {
-      if (stepId === 'preflight') {
-        const engine = createDefaultPreflightEngine(projectRoot);
-
-        // Build minimal preflight config — run all checks for the instance's platform
-        const preflightConfig = {
-          checks: [
-            'node-version', 'ruby-version', 'xcode-cli-tools', 'cocoapods-installed',
-            'podfile-lock-sync', 'watchman', 'node-modules-sync', 'metro-port', 'env-file',
-          ],
-          frequency: 'always' as const,
-        };
-
-        emit('Running preflight checks...');
-        const results = await engine.runAll(instance.platform, preflightConfig);
-        let hasErrors = false;
-        for (const [id, result] of results) {
-          const icon = result.passed ? '  OK' : '  FAIL';
-          emit(`${icon} ${id}: ${result.message}`);
-          if (!result.passed) hasErrors = true;
-        }
-        if (hasErrors) {
-          emit('  Some preflight checks failed.');
-          send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'warning' });
-        } else {
-          emit('  All preflight checks passed');
-          send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'ok' });
-        }
-
-      } else if (stepId === 'clean') {
-        const effectiveRoot = instance.worktree ?? projectRoot;
-        const cleaner = new CleanManager(effectiveRoot);
-        const results = await cleaner.execute(instance.mode as any, instance.platform, (step, status) => {
-          const icon = status === 'running' ? '\u23F3' : '\u2714';
-          emit(`  ${icon} ${step}`);
-        });
-        const failed = results.filter((r: any) => !r.success);
-        if (failed.length > 0) {
-          emit(`  ⚠ ${failed.length} clean step(s) had issues`);
-          send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'warning' });
-        } else {
-          emit('Clean complete');
-          send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'ok' });
-        }
-
-      } else if (stepId === 'watchman') {
-        emit('Clearing watchman...');
-        await execShellAsync(`watchman watch-del '${projectRoot}'`, { timeout: 10000 }).catch(() => {});
-        if (instance.worktree && instance.worktree !== projectRoot) {
-          await execShellAsync(`watchman watch-del '${instance.worktree}'`, { timeout: 10000 }).catch(() => {});
-        }
-        await execShellAsync('watchman watch-del-all', { timeout: 10000 }).catch(() => {});
-        emit('Watchman cleared');
-        send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'ok' });
-
-      } else if (stepId === 'metro') {
-        emit(`Restarting Metro on port ${instance.port}...`);
-        // Tear down DevTools first — it holds the old Metro reference via a
-        // status listener; rebuilding Metro without disposing would leave a
-        // stale subscription.
-        if (instance.devtools) {
-          try { await instance.devtools.dispose(); } catch { /* best-effort */ }
-          instance.devtools = null;
-          instance.devtoolsStarted = false;
-        }
-        // Stop existing metro if running
-        if (instance.metro) {
-          const worktreeKey = artifactStore.worktreeHash(instance.worktree);
-          instance.metro.stop(worktreeKey);
-          instance.metro = null;
-        }
-        await new Promise(r => setTimeout(r, 500));
-
-        const worktreeKey = artifactStore.worktreeHash(instance.worktree);
-        const metroMgr = new MetroManager(artifactStore);
-        // Kill anything on the port
-        const portFree = await metroMgr.isPortFree(instance.port);
-        if (!portFree) {
-          emit(`Port ${instance.port} in use — killing stale process...`);
-          await metroMgr.killProcessOnPort(instance.port);
-          await new Promise(r => setTimeout(r, 1000));
-        }
-
-        metroMgr.start({
-          worktreeKey,
-          projectRoot: instance.worktree ?? projectRoot,
-          port: instance.port,
-          resetCache: false,
-          env: {},
-        });
-        instance.metro = metroMgr;
-
-        metroMgr.on('log', ({ line }: { worktreeKey: string; line: string }) => {
-          appendLog(instance, 'metro', line);
-          send('instance:metro', { instanceId: instance.id, text: line });
-        });
-
-        metroMgr.on('status', ({ status }: { worktreeKey: string; status: string }) => {
-          instance.metroStatus = status;
-          send('instance:status', { instanceId: instance.id, ...toSummary(instance) });
-          if (status === 'running') {
-            emit('Metro is running');
-            send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'ok' });
-          }
-        });
-
-      } else if (stepId === 'build') {
-        emit(`Rebuilding for ${instance.platform}...`);
-        // Stop previous builder if any
-        if (instance.builder) {
-          instance.builder.removeAllListeners?.();
-          instance.builder = null;
-        }
-
-        const b = new Builder();
-        instance.builder = b;
-
-        b.on('line', ({ text }: { text: string }) => {
-          appendLog(instance, 'service', text);
-          send('instance:build:line', { instanceId: instance.id, text });
-        });
-
-        b.on('done', ({ success, errors }: any) => {
-          send('instance:build:done', { instanceId: instance.id, success, errors });
-          if (success) {
-            emit('Build complete!');
-            send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'ok' });
-          } else {
-            emit('Build failed');
-            for (const err of errors ?? []) {
-              emit(`  ${err.summary}`);
-              if (err.suggestion) emit(`    Fix: ${err.suggestion}`);
-            }
-            send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'error' });
-          }
-        });
-
-        const platformsToBuild: Array<'ios' | 'android'> =
-          instance.platform === 'both' ? ['ios', 'android'] : [instance.platform];
-
-        for (const plat of platformsToBuild) {
-          b.build({
-            projectRoot: instance.worktree ?? projectRoot,
-            platform: plat,
-            deviceId: instance.deviceId ?? undefined,
-            port: instance.port,
-            variant: 'debug',
-            env: {},
-          });
-        }
-
-      } else {
-        emit(`Unknown step: ${stepId}`);
-        send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'warning' });
-      }
-
-      return { ok: true };
-    } catch (err: any) {
-      const msg = err.message?.slice(0, 200) ?? 'Unknown error';
-      emit(`ERROR ${msg}`);
-      send('instance:section:end', { instanceId: instance.id, id: stepId, status: 'error' });
-      return { ok: false, error: msg };
-    }
+    const msg = `Step retry (${stepId}) is not wired to the daemon yet — restart the app to re-run the full boot sequence.`;
+    appendLog(instance, 'service', msg);
+    send('instance:log', { instanceId: instance.id, text: msg });
+    return { ok: false, error: msg };
   });
 }

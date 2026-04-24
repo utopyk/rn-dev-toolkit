@@ -97,6 +97,12 @@ export async function connectElectronToDaemon(
   serviceBus.setDevTools(session.devtools);
   serviceBus.setBuilder(session.builder);
   serviceBus.setWatcher(session.watcher);
+  // Phase 13.4.1 — the `modules` field on DaemonSession is the
+  // client-side RPC surface every flipped ipcMain handler consumes
+  // (install / uninstall / config / panels / host-call / marketplace).
+  // Publishing it here keeps the "connectElectronToDaemon fans every
+  // adapter onto the bus" symmetry with the other four services.
+  serviceBus.setModulesClient(session.modules);
   serviceBus.setWorktreeKey(session.worktreeKey);
 
   return session;

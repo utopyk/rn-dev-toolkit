@@ -1,280 +1,142 @@
-import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ModuleHostManager } from "../../src/core/module-host/manager.js";
-import { ModuleConfigStore } from "../../src/modules/config-store.js";
-import { ModuleRegistry } from "../../src/modules/registry.js";
+import { describe, expect, it, vi } from "vitest";
 import {
   handleConfigGet,
   handleConfigSet,
   type ConfigSetAuditEvent,
   type ModulesConfigIpcDeps,
 } from "../ipc/modules-config.js";
-import type { ModuleManifest } from "@rn-dev/module-sdk";
+import type { ModuleHostClient } from "../../src/app/client/module-host-adapter.js";
 
-// ---------------------------------------------------------------------------
-// Fixtures
-// ---------------------------------------------------------------------------
+// Phase 13.4.1 — handleConfigGet/handleConfigSet are now thin wrappers
+// around ModuleHostClient RPCs. The deep behavioral coverage (schema
+// validation, concurrent-set serialization, moduleEvents emission,
+// unknown-module guard) moved to src/app/__tests__/modules-ipc.test.ts
+// where `dispatchModulesAction` is exercised directly. This file pins
+// the delegation shape:
+//   - handleConfigGet forwards { moduleId, scopeUnit } to client.configGet
+//   - handleConfigSet forwards the payload to client.configSet + invokes
+//     auditConfigSet with sorted patch keys + the daemon's outcome code.
+// Anything deeper is a daemon-dispatcher concern.
 
-function manifestWithConfig(): ModuleManifest {
+function makeStubClient(): {
+  client: ModuleHostClient;
+  configGet: ReturnType<typeof vi.fn>;
+  configSet: ReturnType<typeof vi.fn>;
+} {
+  const configGet = vi.fn();
+  const configSet = vi.fn();
   return {
-    id: "tunable",
-    version: "0.1.0",
-    hostRange: ">=0.1.0",
-    scope: "per-worktree",
-    contributes: {
-      config: {
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            greeting: { type: "string", minLength: 1 },
-            count: { type: "integer", minimum: 0 },
-          },
-        },
-      },
-    } as ModuleManifest["contributes"],
+    client: { configGet, configSet } as unknown as ModuleHostClient,
+    configGet,
+    configSet,
   };
 }
-
-interface Harness {
-  deps: ModulesConfigIpcDeps;
-  audit: ConfigSetAuditEvent[];
-  configStore: ModuleConfigStore;
-  registry: ModuleRegistry;
-  cleanup: () => Promise<void>;
-}
-
-function setup(manifest: ModuleManifest, modulesDir: string): Harness {
-  const configStore = new ModuleConfigStore({ modulesDir });
-  const registry = new ModuleRegistry();
-  registry.registerManifest({
-    manifest,
-    modulePath: `/modules/${manifest.id}`,
-    scopeUnit: "wt-1",
-    state: "inert",
-    isBuiltIn: false,
-  });
-  const manager = new ModuleHostManager({
-    hostVersion: "0.1.0",
-    configStore,
-    initializeTimeoutMs: 500,
-  });
-  const audit: ConfigSetAuditEvent[] = [];
-  const deps: ModulesConfigIpcDeps = {
-    manager,
-    registry,
-    moduleEvents: new EventEmitter(),
-    auditConfigSet: (event) => audit.push(event),
-  };
-  return {
-    deps,
-    audit,
-    configStore,
-    registry,
-    cleanup: () => manager.shutdownAll(),
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 describe("electron/modules-config — handleConfigGet", () => {
-  let modulesDir: string;
-  let harness: Harness | null = null;
-
-  beforeEach(() => {
-    modulesDir = mkdtempSync(join(tmpdir(), "rn-dev-modcfg-ipc-"));
-  });
-
-  afterEach(async () => {
-    await harness?.cleanup();
-    harness = null;
-    rmSync(modulesDir, { recursive: true, force: true });
-  });
-
-  it("returns { moduleId, config: {} } when nothing is persisted", () => {
-    harness = setup(manifestWithConfig(), modulesDir);
-    const result = handleConfigGet(harness.deps, {
-      moduleId: "tunable",
+  it("forwards moduleId + scopeUnit through ModuleHostClient.configGet", async () => {
+    const { client, configGet } = makeStubClient();
+    configGet.mockResolvedValueOnce({ moduleId: "m", config: { k: "v" } });
+    const deps: ModulesConfigIpcDeps = { modulesClient: client };
+    const result = await handleConfigGet(deps, {
+      moduleId: "m",
       scopeUnit: "wt-1",
     });
-    expect(result).toEqual({ moduleId: "tunable", config: {} });
+    expect(configGet).toHaveBeenCalledWith("m", "wt-1");
+    expect(result).toEqual({ moduleId: "m", config: { k: "v" } });
   });
 
-  it("returns the persisted blob after a set", () => {
-    harness = setup(manifestWithConfig(), modulesDir);
-    harness.configStore.write("tunable", { greeting: "hi" });
-    const result = handleConfigGet(harness.deps, {
-      moduleId: "tunable",
-      scopeUnit: "wt-1",
-    });
-    expect(result).toEqual({
-      moduleId: "tunable",
-      config: { greeting: "hi" },
-    });
+  it("omits scopeUnit when undefined", async () => {
+    const { client, configGet } = makeStubClient();
+    configGet.mockResolvedValueOnce({ moduleId: "m", config: {} });
+    const deps: ModulesConfigIpcDeps = { modulesClient: client };
+    await handleConfigGet(deps, { moduleId: "m" });
+    expect(configGet).toHaveBeenCalledWith("m", undefined);
   });
 });
 
 describe("electron/modules-config — handleConfigSet", () => {
-  let modulesDir: string;
-  let harness: Harness | null = null;
-
-  beforeEach(() => {
-    modulesDir = mkdtempSync(join(tmpdir(), "rn-dev-modcfg-ipc-"));
-  });
-
-  afterEach(async () => {
-    await harness?.cleanup();
-    harness = null;
-    rmSync(modulesDir, { recursive: true, force: true });
-  });
-
-  it("persists valid patches and emits a sorted-keys audit on ok", async () => {
-    harness = setup(manifestWithConfig(), modulesDir);
-    const result = await handleConfigSet(harness.deps, {
-      moduleId: "tunable",
+  it("forwards payload through ModuleHostClient.configSet + audits ok outcome with sorted keys", async () => {
+    const { client, configSet } = makeStubClient();
+    configSet.mockResolvedValueOnce({ kind: "ok", config: { a: 1, b: 2 } });
+    const audit: ConfigSetAuditEvent[] = [];
+    const deps: ModulesConfigIpcDeps = {
+      modulesClient: client,
+      auditConfigSet: (event) => audit.push(event),
+    };
+    const result = await handleConfigSet(deps, {
+      moduleId: "m",
       scopeUnit: "wt-1",
-      patch: { count: 2, greeting: "ok" },
+      // Keys passed out-of-order — audit sink should receive them sorted.
+      patch: { b: 2, a: 1 },
+    });
+    expect(configSet).toHaveBeenCalledWith({
+      moduleId: "m",
+      scopeUnit: "wt-1",
+      patch: { b: 2, a: 1 },
     });
     expect(result.kind).toBe("ok");
-    if (result.kind === "ok") {
-      expect(result.config).toEqual({ count: 2, greeting: "ok" });
-    }
-    expect(harness.configStore.get("tunable")).toEqual({
-      count: 2,
-      greeting: "ok",
-    });
-    expect(harness.audit).toEqual([
+    expect(audit).toEqual([
       {
-        moduleId: "tunable",
+        moduleId: "m",
         scopeUnit: "wt-1",
-        patchKeys: ["count", "greeting"],
+        patchKeys: ["a", "b"],
         outcome: "ok",
         code: undefined,
       },
     ]);
   });
 
-  it("rejects schema violations and audits the error code", async () => {
-    harness = setup(manifestWithConfig(), modulesDir);
-    const result = await handleConfigSet(harness.deps, {
-      moduleId: "tunable",
-      scopeUnit: "wt-1",
-      patch: { count: -1 },
+  it("surfaces daemon validation errors through the audit sink with the error code", async () => {
+    const { client, configSet } = makeStubClient();
+    configSet.mockResolvedValueOnce({
+      kind: "error",
+      code: "E_CONFIG_VALIDATION",
+      message: "bad patch",
     });
-    expect(result.kind).toBe("error");
-    if (result.kind === "error") {
-      expect(result.code).toBe("E_CONFIG_VALIDATION");
-    }
-    expect(harness.audit[0]?.outcome).toBe("error");
-    expect(harness.audit[0]?.code).toBe("E_CONFIG_VALIDATION");
-    // Store is untouched on validation failure.
-    expect(harness.configStore.get("tunable")).toEqual({});
-  });
-
-  it("forwards config-changed through the shared moduleEvents bus", async () => {
-    harness = setup(manifestWithConfig(), modulesDir);
-    const received: Array<Record<string, unknown>> = [];
-    harness.deps.moduleEvents.on(
-      "modules-event",
-      (e: Record<string, unknown>) => received.push(e),
-    );
-    await handleConfigSet(harness.deps, {
-      moduleId: "tunable",
-      scopeUnit: "wt-1",
-      patch: { greeting: "bus" },
-    });
-    expect(received).toHaveLength(1);
-    expect(received[0]).toMatchObject({
-      kind: "config-changed",
-      moduleId: "tunable",
-      config: { greeting: "bus" },
-    });
-  });
-
-  it("returns E_CONFIG_MODULE_UNKNOWN for unregistered ids", async () => {
-    harness = setup(manifestWithConfig(), modulesDir);
-    const result = await handleConfigSet(harness.deps, {
-      moduleId: "never",
-      patch: { greeting: "x" },
-    });
-    expect(result.kind).toBe("error");
-    if (result.kind === "error") {
-      expect(result.code).toBe("E_CONFIG_MODULE_UNKNOWN");
-    }
-  });
-
-  it("serializes concurrent sets for the same moduleId (disjoint keys)", async () => {
-    harness = setup(manifestWithConfig(), modulesDir);
-    // Two concurrent patches with disjoint key sets. Even under a lost-
-    // update bug, disjoint-key races can still merge correctly because
-    // the later read sees the earlier write when the event loop yields —
-    // but the contract is serialized execution, so this verifies the lock
-    // doesn't drop either write on the floor.
-    const [a, b] = await Promise.all([
-      handleConfigSet(harness.deps, {
-        moduleId: "tunable",
-        scopeUnit: "wt-1",
-        patch: { greeting: "first" },
-      }),
-      handleConfigSet(harness.deps, {
-        moduleId: "tunable",
-        scopeUnit: "wt-1",
-        patch: { count: 7 },
-      }),
-    ]);
-    expect(a.kind).toBe("ok");
-    expect(b.kind).toBe("ok");
-    const final = harness.configStore.get("tunable");
-    expect(final).toEqual({ greeting: "first", count: 7 });
-  });
-
-  it("runs concurrent sets for different moduleIds in parallel (no cross-module lock)", async () => {
-    // Second module with its own schema registered under a different id,
-    // so cross-module parallelism is observable. The test doesn't
-    // directly assert timing — it asserts that both sets succeed and
-    // that the map key includes the moduleId (not a global lock).
-    harness = setup(manifestWithConfig(), modulesDir);
-    const otherManifest: ModuleManifest = {
-      id: "other",
-      version: "0.1.0",
-      hostRange: ">=0.1.0",
-      scope: "per-worktree",
-      contributes: {
-        config: {
-          schema: {
-            type: "object",
-            additionalProperties: true,
-          },
-        },
-      },
+    const audit: ConfigSetAuditEvent[] = [];
+    const deps: ModulesConfigIpcDeps = {
+      modulesClient: client,
+      auditConfigSet: (event) => audit.push(event),
     };
-    harness.registry.registerManifest({
-      manifest: otherManifest,
-      modulePath: "/nowhere",
-      scopeUnit: "wt-1",
-      state: "active",
-      isBuiltIn: false,
+    const result = await handleConfigSet(deps, {
+      moduleId: "m",
+      patch: { bad: "x" },
     });
-    const [a, b] = await Promise.all([
-      handleConfigSet(harness.deps, {
-        moduleId: "tunable",
-        scopeUnit: "wt-1",
-        patch: { greeting: "a" },
-      }),
-      handleConfigSet(harness.deps, {
-        moduleId: "other",
-        scopeUnit: "wt-1",
-        patch: { greeting: "b" },
-      }),
-    ]);
-    expect(a.kind).toBe("ok");
-    expect(b.kind).toBe("ok");
-    expect(harness.configStore.get("tunable")).toEqual({ greeting: "a" });
-    expect(harness.configStore.get("other")).toEqual({ greeting: "b" });
+    expect(result.kind).toBe("error");
+    expect(audit[0]).toMatchObject({
+      moduleId: "m",
+      outcome: "error",
+      code: "E_CONFIG_VALIDATION",
+    });
+  });
+
+  it("works without an audit sink (Electron wires it, tests may omit it)", async () => {
+    const { client, configSet } = makeStubClient();
+    configSet.mockResolvedValueOnce({ kind: "ok", config: {} });
+    const deps: ModulesConfigIpcDeps = { modulesClient: client };
+    const result = await handleConfigSet(deps, {
+      moduleId: "m",
+      patch: {},
+    });
+    expect(result.kind).toBe("ok");
+  });
+
+  it("never echoes patch VALUES into the audit event — only keys", async () => {
+    const { client, configSet } = makeStubClient();
+    configSet.mockResolvedValueOnce({ kind: "ok", config: {} });
+    const audit: ConfigSetAuditEvent[] = [];
+    const deps: ModulesConfigIpcDeps = {
+      modulesClient: client,
+      auditConfigSet: (event) => audit.push(event),
+    };
+    await handleConfigSet(deps, {
+      moduleId: "m",
+      patch: { apiKey: "sk-supersecret", timeout: 30 },
+    });
+    expect(audit[0]?.patchKeys).toEqual(["apiKey", "timeout"]);
+    // Audit event has no `patch` or `values` field.
+    expect(audit[0]).not.toHaveProperty("patch");
+    expect(audit[0]).not.toHaveProperty("values");
+    expect(JSON.stringify(audit[0])).not.toContain("sk-supersecret");
   });
 });

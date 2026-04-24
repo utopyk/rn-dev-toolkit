@@ -14,6 +14,7 @@ import { sweepOrphanModules } from "./orphan-sweep.js";
 import { validateProfile } from "./profile-guard.js";
 import type { SessionEvent } from "./session.js";
 import { handleClientRpc, isClientRpcAction } from "./client-rpcs.js";
+import { MODULES_ACTIONS } from "../app/modules-ipc.js";
 
 // ---------------------------------------------------------------------------
 // Daemon entry for `rn-dev daemon <worktree>`.
@@ -252,6 +253,32 @@ function handleMessage(
     default:
       if (isClientRpcAction(message.action)) {
         void handleClientRpc(event, supervisor);
+        return;
+      }
+      // `registerModulesIpc` attaches a second `ipc.on("message")` listener
+      // that asynchronously dispatches `modules/*` + `marketplace/*` actions
+      // (see src/app/modules-ipc.ts). Both listeners fire on every message,
+      // so a synchronous E_UNKNOWN_ACTION reply here would race ahead of the
+      // modules dispatcher's async reply and the client would see "unknown
+      // action" for every modules RPC. Skip those actions and let the
+      // dispatcher answer. The dispatcher is only wired once a session has
+      // booted (`registerModulesIpc` is called inside `bootSessionServices`
+      // / `fakeBootSessionServices`); before that, modules actions fall
+      // through to E_SESSION_NOT_RUNNING via the pre-session guard below
+      // rather than E_UNKNOWN_ACTION, which is the more accurate signal.
+      if (MODULES_ACTIONS.has(message.action)) {
+        if (!supervisor.getServices()) {
+          reply({
+            type: "response",
+            action: message.action,
+            id: message.id,
+            payload: {
+              code: "E_SESSION_NOT_RUNNING",
+              message:
+                "no session is currently running — call session/start before issuing modules RPCs",
+            },
+          });
+        }
         return;
       }
       reply({

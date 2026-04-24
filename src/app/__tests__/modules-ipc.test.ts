@@ -738,3 +738,276 @@ describe("dispatchModulesAction — built-in-privileged guard", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// modules/host-call — Phase 13.4.1 daemon RPC
+// ---------------------------------------------------------------------------
+
+describe("dispatchModulesAction — modules/host-call", () => {
+  it("returns MODULE_UNAVAILABLE when the module is not registered", async () => {
+    active = await setup();
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/host-call", {
+        moduleId: "ghost",
+        capabilityId: "log",
+        method: "info",
+        args: [],
+      }),
+    )) as { kind: string; code?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("MODULE_UNAVAILABLE");
+  });
+
+  it("returns HOST_CALL_FAILED on malformed payload", async () => {
+    active = await setup();
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/host-call", { capabilityId: "log" }),
+    )) as { kind: string; code?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("HOST_CALL_FAILED");
+  });
+
+  it("returns HOST_CAPABILITY_NOT_FOUND_OR_DENIED when the capability is missing or the module lacks permission", async () => {
+    active = await setup([makeManifest({ id: "no-perms", permissions: [] })]);
+    active.manager.capabilities.register(
+      "restricted",
+      { ping: () => "pong" },
+      { requiredPermission: "exec:adb" },
+    );
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/host-call", {
+        moduleId: "no-perms",
+        capabilityId: "restricted",
+        method: "ping",
+        args: [],
+      }),
+    )) as { kind: string; code?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("HOST_CAPABILITY_NOT_FOUND_OR_DENIED");
+  });
+
+  it("returns HOST_METHOD_NOT_FOUND when the method does not exist on the capability", async () => {
+    active = await setup([makeManifest({ id: "perms", permissions: [] })]);
+    active.manager.capabilities.register("cap-no-perm", {
+      existingMethod: () => true,
+    });
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/host-call", {
+        moduleId: "perms",
+        capabilityId: "cap-no-perm",
+        method: "nonExistent",
+        args: [],
+      }),
+    )) as { kind: string; code?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("HOST_METHOD_NOT_FOUND");
+  });
+
+  it("invokes the capability method + returns ok with the result on happy path", async () => {
+    active = await setup([makeManifest({ id: "caller", permissions: [] })]);
+    active.manager.capabilities.register("echo-cap", {
+      say: (...args: unknown[]) => ({ echoed: args }),
+    });
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/host-call", {
+        moduleId: "caller",
+        capabilityId: "echo-cap",
+        method: "say",
+        args: ["hi", 42],
+      }),
+    )) as { kind: string; result?: { echoed: unknown[] } };
+    expect(result.kind).toBe("ok");
+    expect(result.result?.echoed).toEqual(["hi", 42]);
+  });
+
+  it("returns HOST_CALL_FAILED when the capability method throws", async () => {
+    active = await setup([makeManifest({ id: "explodey", permissions: [] })]);
+    active.manager.capabilities.register("boom", {
+      detonate: () => {
+        throw new Error("boom boom");
+      },
+    });
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/host-call", {
+        moduleId: "explodey",
+        capabilityId: "boom",
+        method: "detonate",
+        args: [],
+      }),
+    )) as { kind: string; code?: string; message?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("HOST_CALL_FAILED");
+    expect(result.message).toMatch(/boom boom/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// modules/list-panels — Phase 13.4.1 daemon RPC
+// ---------------------------------------------------------------------------
+
+describe("dispatchModulesAction — modules/list-panels", () => {
+  it("returns { modules: [] } when no module contributes an electron panel", async () => {
+    active = await setup([makeManifest({ id: "no-panel" })]);
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/list-panels"),
+    )) as { modules: unknown[] };
+    expect(result.modules).toEqual([]);
+  });
+
+  it("returns one entry per module with Electron panel contributions", async () => {
+    active = await setup([
+      makeManifest({
+        id: "with-panel",
+        contributes: {
+          electron: {
+            panels: [
+              {
+                id: "main",
+                title: "Main Panel",
+                webviewEntry: "./dist/index.html",
+                hostApi: ["log"],
+              },
+              {
+                id: "settings",
+                title: "Settings",
+                icon: "⚙",
+                webviewEntry: "./dist/settings.html",
+                hostApi: ["log", "appInfo"],
+              },
+            ],
+          },
+        },
+      }),
+      makeManifest({ id: "no-panel" }),
+    ]);
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/list-panels"),
+    )) as {
+      modules: Array<{
+        moduleId: string;
+        title: string;
+        panels: Array<{ id: string; title: string; icon?: string; hostApi: string[] }>;
+      }>;
+    };
+    expect(result.modules).toHaveLength(1);
+    expect(result.modules[0]?.moduleId).toBe("with-panel");
+    expect(result.modules[0]?.panels).toHaveLength(2);
+    expect(result.modules[0]?.panels[0]).toMatchObject({
+      id: "main",
+      title: "Main Panel",
+      hostApi: ["log"],
+    });
+    // webviewEntry is intentionally NOT projected into list-panels — callers
+    // fetch it via modules/resolve-panel when they're ready to mount.
+    expect("webviewEntry" in (result.modules[0]?.panels[0] ?? {})).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// modules/resolve-panel — Phase 13.4.1 daemon RPC
+// ---------------------------------------------------------------------------
+
+describe("dispatchModulesAction — modules/resolve-panel", () => {
+  it("returns E_PANEL_BAD_REQUEST on malformed payload", async () => {
+    active = await setup();
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/resolve-panel", { moduleId: "only-id" }),
+    )) as { kind: string; code?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("E_PANEL_BAD_REQUEST");
+  });
+
+  it("returns E_PANEL_NOT_FOUND when the module is not registered", async () => {
+    active = await setup();
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/resolve-panel", {
+        moduleId: "ghost",
+        panelId: "main",
+      }),
+    )) as { kind: string; code?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("E_PANEL_NOT_FOUND");
+  });
+
+  it("returns E_PANEL_NOT_FOUND when the panelId is not contributed", async () => {
+    active = await setup([
+      makeManifest({
+        id: "has-panels",
+        contributes: {
+          electron: {
+            panels: [
+              {
+                id: "real",
+                title: "Real",
+                webviewEntry: "./index.html",
+                hostApi: [],
+              },
+            ],
+          },
+        },
+      }),
+    ]);
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/resolve-panel", {
+        moduleId: "has-panels",
+        panelId: "fake",
+      }),
+    )) as { kind: string; code?: string };
+    expect(result.kind).toBe("error");
+    expect(result.code).toBe("E_PANEL_NOT_FOUND");
+  });
+
+  it("returns contribution + moduleRoot on happy path", async () => {
+    active = await setup([
+      makeManifest({
+        id: "happy",
+        contributes: {
+          electron: {
+            panels: [
+              {
+                id: "main",
+                title: "Main",
+                icon: "🎯",
+                webviewEntry: "./dist/panel.html",
+                hostApi: ["log", "metro:logs"],
+              },
+            ],
+          },
+        },
+      }),
+    ]);
+    const result = (await dispatchModulesAction(
+      { registry: active.registry, manager: active.manager },
+      makeMsg("modules/resolve-panel", {
+        moduleId: "happy",
+        panelId: "main",
+      }),
+    )) as {
+      kind: string;
+      moduleId?: string;
+      moduleRoot?: string;
+      contribution?: { id: string; title: string; webviewEntry: string; hostApi: string[] };
+    };
+    expect(result.kind).toBe("ok");
+    expect(result.moduleId).toBe("happy");
+    expect(result.moduleRoot).toBe("/fake/happy");
+    expect(result.contribution).toMatchObject({
+      id: "main",
+      title: "Main",
+      icon: "🎯",
+      webviewEntry: "./dist/panel.html",
+      hostApi: ["log", "metro:logs"],
+    });
+  });
+});

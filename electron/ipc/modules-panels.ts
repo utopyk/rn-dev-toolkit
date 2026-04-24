@@ -8,42 +8,26 @@
 //   - modules:activate-panel     → show WebContentsView, set bounds, focus
 //   - modules:deactivate-panel   → hide
 //   - modules:set-panel-bounds   → reapply bounds on renderer layout changes
-//   - modules:host-call          → preload → capability registry (panel RPC)
+//   - modules:host-call          → preload → daemon CapabilityRegistry
 //
-// In Electron mode the daemon shares a process with main, so host-call
-// resolves against the in-process `CapabilityRegistry` directly — no
-// socket hop. The daemon's `modules/call` IPC is for MCP-side proxying
-// and isn't used here.
+// Phase 13.4.1 — data-plane resolution (list, host-call, call-tool)
+// happens through the daemon client in `modules-panels-register.ts`.
+// The helpers here own the local WebContentsView lifecycle only:
+// activate / deactivate / bounds. `activatePanel` takes the resolved
+// panel contribution (already fetched via `modules/resolve-panel`) and
+// hands it to the panel-bridge — no manifest lookup required locally.
 
 import type { ElectronPanelContribution } from "@rn-dev/module-sdk";
-import type { ModuleHostManager } from "../../src/core/module-host/manager.js";
-import type {
-  ModuleRegistry,
-  RegisteredModule,
-} from "../../src/modules/registry.js";
+import type { ModuleHostClient } from "../../src/app/client/module-host-adapter.js";
 import type { PanelBridge, PanelBounds } from "../panel-bridge.js";
-import {
-  callModuleTool,
-  type ModuleCallError,
-  type ModuleCallSuccess,
+import type {
+  ModuleCallSuccess,
+  ModuleCallError,
 } from "../../src/app/modules-ipc.js";
 
 // ---------------------------------------------------------------------------
 // Wire-format types
 // ---------------------------------------------------------------------------
-
-export interface PanelsListResponse {
-  modules: Array<{
-    moduleId: string;
-    title: string;
-    panels: Array<{
-      id: string;
-      title: string;
-      icon?: string;
-      hostApi: string[];
-    }>;
-  }>;
-}
 
 export interface ActivatePanelPayload {
   moduleId: string;
@@ -69,22 +53,10 @@ export interface HostCallPayload {
   args: unknown[];
 }
 
-export type HostCallReply =
-  | { kind: "ok"; result: unknown }
-  | {
-      kind: "error";
-      code:
-        | "MODULE_UNAVAILABLE"
-        | "HOST_CAPABILITY_NOT_FOUND_OR_DENIED"
-        | "HOST_METHOD_NOT_FOUND"
-        | "HOST_CALL_FAILED";
-      message: string;
-    };
-
 /**
  * Payload for `modules:call-tool` — panels invoking their own subprocess
  * tools. Different from `modules:host-call` (which resolves against the
- * host `CapabilityRegistry` for cross-module capabilities). `moduleId`
+ * daemon's CapabilityRegistry for cross-module capabilities). `moduleId`
  * is the panel's bound module — the Electron registrar derives it from
  * the sender identity, not from the renderer.
  */
@@ -99,201 +71,18 @@ export interface CallToolPayload {
   callTimeoutMs?: number;
   /**
    * Pass `true` when the panel has walked a user-visible confirmation
-   * for a `destructiveHint: true` tool. `resolveCallTool` rejects
-   * destructive tools without this token — the MCP-side proxy enforces
-   * the same gate via `permissionsAccepted[tool]`, so Phase 7 keeps
-   * agent-native parity with the panel surface.
+   * for a `destructiveHint: true` tool. The daemon-side `modules/call`
+   * dispatcher rejects destructive tools without this token. Matches the
+   * Phase 7 destructive-tool gate the MCP-side proxy enforces via
+   * `permissionsAccepted[tool]`.
    */
   confirmed?: boolean;
 }
 
-export type CallToolError =
-  | ModuleCallError
-  | {
-      kind: "error";
-      code: "E_DESTRUCTIVE_REQUIRES_CONFIRM";
-      message: string;
-    };
-
-export type CallToolReply = ModuleCallSuccess | CallToolError;
+export type CallToolReply = ModuleCallSuccess | ModuleCallError;
 
 // ---------------------------------------------------------------------------
-// Pure resolution logic — exported for unit tests
-// ---------------------------------------------------------------------------
-
-export function listPanels(registry: ModuleRegistry): PanelsListResponse {
-  const modules = registry
-    .getAllManifests()
-    .map((registered) => ({
-      moduleId: registered.manifest.id,
-      title: registered.manifest.id,
-      panels:
-        registered.manifest.contributes?.electron?.panels?.map((p) => ({
-          id: p.id,
-          title: p.title,
-          icon: p.icon,
-          hostApi: [...p.hostApi],
-        })) ?? [],
-    }))
-    .filter((m) => m.panels.length > 0);
-  return { modules };
-}
-
-export interface HostCallAuditEvent {
-  moduleId: string;
-  capabilityId: string;
-  method: string;
-  outcome: "ok" | "unavailable" | "denied" | "method-not-found" | "error";
-  timestamp: number;
-}
-
-export async function resolveHostCall(
-  manager: ModuleHostManager,
-  registry: ModuleRegistry,
-  payload: HostCallPayload,
-  audit?: (event: HostCallAuditEvent) => void,
-): Promise<HostCallReply> {
-  const logOutcome = (outcome: HostCallAuditEvent["outcome"]): void => {
-    audit?.({
-      moduleId: payload?.moduleId ?? "",
-      capabilityId: payload?.capabilityId ?? "",
-      method: payload?.method ?? "",
-      outcome,
-      timestamp: Date.now(),
-    });
-  };
-  if (
-    !payload ||
-    typeof payload.moduleId !== "string" ||
-    typeof payload.capabilityId !== "string" ||
-    typeof payload.method !== "string"
-  ) {
-    logOutcome("error");
-    return {
-      kind: "error",
-      code: "HOST_CALL_FAILED",
-      message:
-        "modules:host-call requires { moduleId, capabilityId, method, args }",
-    };
-  }
-
-  const reg = findRegistered(registry, payload.moduleId);
-  if (!reg) {
-    logOutcome("unavailable");
-    return {
-      kind: "error",
-      code: "MODULE_UNAVAILABLE",
-      message: `Module "${payload.moduleId}" is not registered.`,
-    };
-  }
-
-  const granted = reg.manifest.permissions ?? [];
-  const impl = manager.capabilities.resolve<Record<string, unknown>>(
-    payload.capabilityId,
-    granted,
-  );
-  if (!impl) {
-    logOutcome("denied");
-    return {
-      kind: "error",
-      code: "HOST_CAPABILITY_NOT_FOUND_OR_DENIED",
-      message: `Capability "${payload.capabilityId}" not found or not granted to "${payload.moduleId}"`,
-    };
-  }
-
-  const fn = impl[payload.method];
-  if (typeof fn !== "function") {
-    logOutcome("method-not-found");
-    return {
-      kind: "error",
-      code: "HOST_METHOD_NOT_FOUND",
-      message: `Method "${payload.method}" not found on capability "${payload.capabilityId}"`,
-    };
-  }
-
-  try {
-    const args = Array.isArray(payload.args) ? payload.args : [];
-    const result = await (fn as (...a: unknown[]) => unknown).apply(impl, args);
-    logOutcome("ok");
-    return { kind: "ok", result };
-  } catch (err) {
-    logOutcome("error");
-    return {
-      kind: "error",
-      code: "HOST_CALL_FAILED",
-      message: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-function findRegistered(
-  registry: ModuleRegistry,
-  moduleId: string,
-): RegisteredModule | undefined {
-  return registry.getAllManifests().find((r) => r.manifest.id === moduleId);
-}
-
-/**
- * Pure resolution for `modules:call-tool` — a panel invoking one of its
- * own module's subprocess tools. The moduleId comes from the sender's
- * panel registration (caller-supplied), not from the renderer payload, so
- * a panel can't ask another module to run a tool on its behalf.
- *
- * Reuses the `callModuleTool` helper from `modules-ipc.ts` so the
- * MCP-side `modules/call` dispatch and the panel-side `modules:call-tool`
- * funnel through the same acquire → sendRequest → release flow.
- *
- * Destructive-tool gate (P0, Phase 7 review): tools declared with
- * `destructiveHint: true` in the manifest REQUIRE `payload.confirmed ===
- * true`. The MCP-proxy side (`src/mcp/module-proxy.ts`) applies the
- * equivalent gate via `permissionsAccepted[toolName]`. Without this,
- * a panel XSS or a misbehaving in-panel button could silently
- * uninstall apps / wipe device data.
- */
-export async function resolveCallTool(
-  manager: ModuleHostManager,
-  registry: ModuleRegistry,
-  moduleId: string,
-  payload: CallToolPayload | null,
-): Promise<CallToolReply> {
-  if (!payload || typeof payload.tool !== "string") {
-    return {
-      kind: "error",
-      code: "E_MODULE_CALL_FAILED",
-      message: "modules:call-tool requires { tool, args? }",
-    };
-  }
-
-  const reg = registry.getAllManifests().find((r) => r.manifest.id === moduleId);
-  const toolDecl = reg?.manifest.contributes?.mcp?.tools?.find((t) => {
-    // Match both the prefixed wire name and the bare name — panels
-    // typically pass the bare form (`"uninstall-app"`), tests may
-    // pass either.
-    return t.name === payload.tool || t.name === `${moduleId}__${payload.tool}`;
-  });
-  if (toolDecl?.destructiveHint === true && payload.confirmed !== true) {
-    return {
-      kind: "error",
-      code: "E_DESTRUCTIVE_REQUIRES_CONFIRM",
-      message: `Tool "${payload.tool}" is marked destructiveHint: true. Re-invoke with { confirmed: true } after walking a user-visible confirmation.`,
-    };
-  }
-
-  return callModuleTool(
-    { manager, registry },
-    {
-      moduleId,
-      tool: payload.tool,
-      args: payload.args ?? {},
-      ...(payload.callTimeoutMs !== undefined
-        ? { callTimeoutMs: payload.callTimeoutMs }
-        : {}),
-    },
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Panel-activation logic — exported for unit tests
+// Panel-activation logic — pure, exported for unit tests
 // ---------------------------------------------------------------------------
 
 /**
@@ -310,31 +99,32 @@ export function createBoundsCache(): PanelBoundsCache {
   return new Map<string, PanelBounds>();
 }
 
+/**
+ * Resolved panel contribution fields the bridge needs to build a
+ * WebContentsView. Aliases the SDK type so the Electron handler layer
+ * and the panel-bridge (`electron/panel-bridge.ts:20`) agree on a
+ * single wire shape. Simplicity P1 on PR #20 — the previous local
+ * duplicate drifted from the SDK definition's `readonly`/`optional`
+ * semantics.
+ */
+export type ResolvedPanelContribution = ElectronPanelContribution;
+
 export interface ActivatePanelDeps {
   bridge: PanelBridge;
-  registry: ModuleRegistry;
   bounds: PanelBoundsCache;
 }
 
 export function activatePanel(
   deps: ActivatePanelDeps,
   payload: ActivatePanelPayload,
+  contribution: ResolvedPanelContribution,
 ): { ok: true } | { ok: false; error: string } {
-  const reg = findRegistered(deps.registry, payload.moduleId);
-  if (!reg) {
-    return { ok: false, error: `Module "${payload.moduleId}" not registered` };
-  }
-  const contribution: ElectronPanelContribution | undefined =
-    reg.manifest.contributes?.electron?.panels?.find(
-      (p) => p.id === payload.panelId,
-    );
-  if (!contribution) {
+  if (contribution.id !== payload.panelId) {
     return {
       ok: false,
-      error: `Module "${payload.moduleId}" has no panel "${payload.panelId}"`,
+      error: `Resolved panel id "${contribution.id}" does not match requested "${payload.panelId}"`,
     };
   }
-
   deps.bridge.register(payload.moduleId, contribution);
   const key = `${payload.moduleId}:${payload.panelId}`;
   deps.bounds.set(key, payload.bounds);
@@ -367,15 +157,17 @@ export function setPanelBounds(
 
 export interface ModulesPanelsIpcDeps {
   bridge: PanelBridge;
-  manager: ModuleHostManager;
-  registry: ModuleRegistry;
+  modulesClient: ModuleHostClient;
   bounds: PanelBoundsCache;
   /**
-   * Optional sink for host-call audit events. Every `modules:host-call`
-   * — ok, denied, method-not-found, or error — fires exactly once. Used
-   * by the Electron wiring to forward to the service-bus log channel.
+   * Populated by the `modules:activate-panel` handler. Electron's
+   * panel-bridge resolves `moduleRoot(id)` synchronously during
+   * `register()`, so we pre-fetch the moduleRoot via the daemon's
+   * `modules/resolve-panel` RPC and cache it here before calling
+   * register. The installPanelBridge wiring in ipc/index.ts reads
+   * from this map.
    */
-  auditHostCall?: (event: HostCallAuditEvent) => void;
+  moduleRoots: Map<string, string>;
 }
 
 export interface ModulesPanelsIpcHandle {

@@ -1,33 +1,21 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { setupIpcBridge, startRealServices } from './ipc/index.js';
-import { detectProjectRoot, getCurrentBranch } from '../src/core/project.js';
-import { ProfileStore } from '../src/core/profile.js';
-import { connectElectronToDaemon } from './daemon-connect.js';
+import { detectProjectRoot } from '../src/core/project.js';
 import type { DaemonSession } from '../src/app/client/session.js';
 
 const isDev = !app.isPackaged;
 
 let mainWindow: BrowserWindow | null = null;
 
-// Phase 13.4 — the live daemon-client session for the current
-// project. Populated once the renderer finishes loading so the
-// daemon's Metro / DevTools / Builder / Watcher adapters are on
-// the serviceBus before any ipcMain handler consults them.
-// `null` until the renderer signals `did-finish-load`; the
-// in-process `startRealServices` path still covers the module
-// system + instance orchestration during the 13.4.1 transition.
+// Phase 13.4.1 — the daemon-client session is the ONLY path. Electron
+// main connects to (or cold-spawns) the per-worktree daemon after the
+// renderer finishes loading; every ipcMain handler resolves its deps
+// through the serviceBus adapters `connectElectronToDaemon` publishes.
+// The 13.4 env-gated opt-in (`RN_DEV_ELECTRON_DAEMON_CLIENT=1`) is
+// gone — the in-process duplicate it guarded against (services.ts
+// double-Metro) went away with the services.ts collapse.
 let daemonSession: DaemonSession | null = null;
-
-// The daemon-client path is OPT-IN in 13.4. Enabling it by default
-// would collide with `startRealServices` on Metro's profile port —
-// both paths spawn Metro against the same project root today. Flip
-// this to `1` only when exercising the daemon-client path (e.g.
-// running the 13.4.1 handler-flip branch locally). Collision-free
-// coexistence is the first order of business for 13.4.1. Arch P0
-// on PR #18.
-const ELECTRON_DAEMON_CLIENT_ENABLED =
-  process.env.RN_DEV_ELECTRON_DAEMON_CLIENT === "1";
 
 // Suppresses the `disconnected` event that fires if the daemon socket
 // drops in the same tick as a user-initiated window quit — cosmetic
@@ -106,85 +94,72 @@ async function createWindow() {
   // Pass projectRoot to IPC bridge so wizard handlers have it immediately
   setupIpcBridge(mainWindow, projectRoot);
 
-  // Start real services after renderer has loaded
+  // Start real services after renderer has loaded. `startRealServices`
+  // runs local UX helpers (pm-conflict + code-signing prompts) + the
+  // Electron instance bookkeeping, then connects to the daemon —
+  // everything runtime-level (preflight, clean, Metro, builder, watcher,
+  // module host) lives in the daemon session the connect call opens.
   mainWindow.webContents.on('did-finish-load', () => {
     console.log('[electron] Renderer loaded, starting services...');
     setTimeout(() => {
-      startRealServices(projectRoot).then(() => {
-        console.log('[electron] Services started successfully');
-      }).catch((err) => {
-        console.error('[electron] Failed to start services:', err);
-        // Send the error to the renderer so user can see it
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('service:log', `✖ Service error: ${err.message ?? err}`);
-        }
-      });
-
-      // Phase 13.4 — open a daemon-client session alongside the
-      // in-process services when the opt-in flag is set. Default-off
-      // because the daemon's own `bootSessionServices` spawns Metro
-      // against the same profile port `startRealServices` does.
-      // 13.4.1 either gates `startRealServices` off the daemon-client
-      // path or collapses the in-process orchestration entirely.
-      if (ELECTRON_DAEMON_CLIENT_ENABLED) {
-        void connectDaemonClientBestEffort(projectRoot);
-      } else {
-        console.log(
-          '[electron] daemon-client path disabled — set ' +
-            'RN_DEV_ELECTRON_DAEMON_CLIENT=1 to enable (13.4.1).',
-        );
-      }
+      startRealServices(projectRoot)
+        .then((session) => {
+          daemonSession = session;
+          if (session) {
+            wireDaemonDisconnectListener(session);
+            console.log(
+              `[electron] Daemon client connected — worktreeKey=${session.worktreeKey}`,
+            );
+          } else {
+            console.log(
+              '[electron] Services started without an active daemon session (no default profile — wizard will prompt).',
+            );
+          }
+        })
+        .catch((err) => {
+          console.error('[electron] Failed to start services:', err);
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send(
+              'service:log',
+              `✖ Service error: ${err.message ?? err}`,
+            );
+          }
+        });
     }, 1000);
   });
 }
 
-async function connectDaemonClientBestEffort(projectRoot: string): Promise<void> {
-  try {
-    const profileStore = new ProfileStore(
-      path.join(projectRoot, '.rn-dev', 'profiles'),
-    );
-    const branch = (await getCurrentBranch(projectRoot)) ?? 'main';
-    const profile = profileStore.findDefault(null, branch);
-    if (!profile) {
-      console.log('[electron] No default profile — skipping daemon connect');
-      return;
+function wireDaemonDisconnectListener(session: DaemonSession): void {
+  // When the daemon drops unexpectedly, surface it in the service
+  // log exactly once AND invalidate every handler's cached adapter
+  // ref so a subsequent reconnect can re-populate deps. Every adapter
+  // fires its own `disconnected` event independently; we attach to
+  // all five so any listener can see which surface drifted first in
+  // future diagnostics, but a single-flight guard keeps the log noise
+  // bounded. Kieran P0 on PR #18 + Arch P0 on PR #20.
+  let disconnectLogged = false;
+  const surfaceDisconnect = (surface: string, err?: Error): void => {
+    if (electronQuitting) return;
+    if (disconnectLogged) return;
+    disconnectLogged = true;
+    const message = err instanceof Error ? err.message : 'unknown';
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send(
+        'service:log',
+        `⚠ Daemon disconnected (${surface}): ${message}`,
+      );
     }
-    daemonSession = await connectElectronToDaemon({
-      projectRoot,
-      profile,
+    // Invalidate serviceBus-cached handler deps so the next session's
+    // `setModulesClient(newClient)` fires registrars again.
+    void import('../src/app/service-bus.js').then(({ serviceBus }) => {
+      serviceBus.clearModulesClient();
     });
-    console.log(
-      `[electron] Daemon client connected — worktreeKey=${daemonSession.worktreeKey}`,
-    );
-
-    // When the daemon drops unexpectedly, surface it in the service
-    // log exactly once. Every adapter fires its own `disconnected`
-    // event independently; we attach to all five so any listener
-    // can see which surface drifted first in future diagnostics,
-    // but a single-flight guard keeps the log noise bounded. Kieran
-    // P0 on PR #18.
-    let disconnectLogged = false;
-    const surfaceDisconnect = (surface: string, err?: Error): void => {
-      if (electronQuitting) return;
-      if (disconnectLogged) return;
-      disconnectLogged = true;
-      const message = err instanceof Error ? err.message : 'unknown';
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send(
-          'service:log',
-          `⚠ Daemon disconnected (${surface}): ${message}`,
-        );
-      }
-    };
-    daemonSession.metro.on('disconnected', (err) => surfaceDisconnect('metro', err));
-    daemonSession.devtools.on('disconnected', (err) => surfaceDisconnect('devtools', err));
-    daemonSession.builder.on('disconnected', (err) => surfaceDisconnect('builder', err));
-    daemonSession.watcher.on('disconnected', (err) => surfaceDisconnect('watcher', err));
-    daemonSession.modules.on('disconnected', (err) => surfaceDisconnect('modules', err));
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error('[electron] Daemon connect failed (non-fatal):', message);
-  }
+  };
+  session.metro.on('disconnected', (err) => surfaceDisconnect('metro', err));
+  session.devtools.on('disconnected', (err) => surfaceDisconnect('devtools', err));
+  session.builder.on('disconnected', (err) => surfaceDisconnect('builder', err));
+  session.watcher.on('disconnected', (err) => surfaceDisconnect('watcher', err));
+  session.modules.on('disconnected', (err) => surfaceDisconnect('modules', err));
 }
 
 app.whenReady().then(createWindow);

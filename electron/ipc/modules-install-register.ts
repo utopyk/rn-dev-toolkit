@@ -8,23 +8,16 @@
 //   marketplace:info               → { moduleId }                   → info reply
 //   modules:acknowledge-third-party → ()                            → { ok: true }
 //
-// All five pull deps via the eager-register / getDeps() closure pattern the
-// panel-bridge + modules-config handlers already use, so the renderer can
-// safely invoke the channels at mount time before `startRealServices`
-// publishes moduleHost + moduleRegistry.
+// Phase 13.4.1 — every action routes through the daemon client. The
+// `getDeps()` closure now resolves a `ModuleHostClient` (published on
+// serviceBus by `connectElectronToDaemon`) instead of in-process
+// `ModuleHostManager` + `ModuleRegistry` refs. Kieran + Security P1
+// (Phase 6) sender-identity gates stay — a sandboxed panel still can't
+// trigger pacote-backed installs on the user's behalf.
 
 import { ipcMain } from "electron";
-import type { EventEmitter } from "node:events";
-import type { ModuleHostManager } from "../../src/core/module-host/manager.js";
-import type { ModuleRegistry } from "../../src/modules/registry.js";
-import {
-  installAction,
-  marketplaceInfo,
-  marketplaceList,
-  uninstallAction,
-  type ModuleInstallRequest,
-  type ModulesIpcOptions,
-} from "../../src/app/modules-ipc.js";
+import type { ModuleHostClient } from "../../src/app/client/module-host-adapter.js";
+import type { ModuleInstallRequest } from "../../src/app/modules-ipc.js";
 import {
   acknowledgeThirdParty,
   hasAcknowledgedThirdParty,
@@ -42,11 +35,7 @@ import type { PanelSenderRegistry } from "../panel-sender-registry.js";
 const MARKETPLACE_WRITE_PRINCIPAL = "marketplace" as const;
 
 export interface ModulesInstallIpcDeps {
-  manager: ModuleHostManager;
-  registry: ModuleRegistry;
-  moduleEvents: EventEmitter;
-  /** Host version — threaded into the installer's hostRange validation. */
-  hostVersion: string;
+  modulesClient: ModuleHostClient;
   /**
    * Called on every install/uninstall outcome. Electron registrar wires
    * this to `service:log` so the renderer's service-log pane sees what
@@ -94,8 +83,7 @@ export function registerModulesInstallIpc(
       if (senderReg && !senderReg.canWrite(event.sender, MARKETPLACE_WRITE_PRINCIPAL)) {
         return FORBIDDEN_REPLY;
       }
-      const opts = toIpcOptions(deps);
-      const result = await installAction(opts, payload);
+      const result = await deps.modulesClient.install(payload);
       deps.auditInstall?.({
         kind: "install",
         moduleId: payload?.moduleId ?? "",
@@ -118,8 +106,7 @@ export function registerModulesInstallIpc(
       if (senderReg && !senderReg.canWrite(event.sender, MARKETPLACE_WRITE_PRINCIPAL)) {
         return FORBIDDEN_REPLY;
       }
-      const opts = toIpcOptions(deps);
-      const result = await uninstallAction(opts, payload);
+      const result = await deps.modulesClient.uninstall(payload);
       deps.auditInstall?.({
         kind: "uninstall",
         moduleId: payload?.moduleId ?? "",
@@ -133,7 +120,7 @@ export function registerModulesInstallIpc(
   ipcMain.handle("marketplace:list", async () => {
     const deps = getDeps();
     if (!deps) return PENDING_DEPS_REPLY;
-    return marketplaceList(toIpcOptions(deps));
+    return deps.modulesClient.marketplaceList();
   });
 
   ipcMain.handle(
@@ -141,13 +128,16 @@ export function registerModulesInstallIpc(
     async (_event, payload: { moduleId: string }) => {
       const deps = getDeps();
       if (!deps) return PENDING_DEPS_REPLY;
-      return marketplaceInfo(toIpcOptions(deps), payload);
+      return deps.modulesClient.marketplaceInfo(payload.moduleId);
     },
   );
 
   // Two accessor handlers so the renderer's consent dialog can show the
   // ack gate conditionally (first-ever install only) without needing its
-  // own filesystem read.
+  // own filesystem read. These stay Electron-side — the third-party ack
+  // is a local UX gate persisted at `~/.rn-dev/third-party-ack` + read by
+  // the installer on the daemon side. Moving them to the daemon would
+  // cost a round-trip for a boolean the consent dialog needs synchronously.
   ipcMain.handle("modules:acknowledge-third-party", () => {
     acknowledgeThirdParty();
     return { ok: true };
@@ -166,14 +156,5 @@ export function registerModulesInstallIpc(
       ipcMain.removeHandler("modules:acknowledge-third-party");
       ipcMain.removeHandler("modules:has-third-party-ack");
     },
-  };
-}
-
-function toIpcOptions(deps: ModulesInstallIpcDeps): ModulesIpcOptions {
-  return {
-    manager: deps.manager,
-    registry: deps.registry,
-    hostVersion: deps.hostVersion,
-    moduleEvents: deps.moduleEvents,
   };
 }

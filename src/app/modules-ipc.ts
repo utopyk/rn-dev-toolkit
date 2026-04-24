@@ -37,7 +37,7 @@ import {
 } from "../modules/registry.js";
 import type { ModuleInstanceState } from "../core/module-host/instance.js";
 import type { ModuleConfigStore } from "../modules/config-store.js";
-import { getDefaultAuditLog } from "../core/audit-log.js";
+import { getDefaultAuditLog, type AuditOutcome } from "../core/audit-log.js";
 import {
   defaultModulesRoot,
   isDisabled,
@@ -156,10 +156,13 @@ export type ModulesIpcAction =
   | "modules/config/set"
   | "modules/install"
   | "modules/uninstall"
+  | "modules/host-call"
+  | "modules/list-panels"
+  | "modules/resolve-panel"
   | "marketplace/list"
   | "marketplace/info";
 
-const MODULES_ACTIONS: ReadonlySet<string> = new Set<ModulesIpcAction>([
+export const MODULES_ACTIONS: ReadonlySet<string> = new Set<ModulesIpcAction>([
   "modules/list",
   "modules/status",
   "modules/restart",
@@ -172,6 +175,9 @@ const MODULES_ACTIONS: ReadonlySet<string> = new Set<ModulesIpcAction>([
   "modules/config/set",
   "modules/install",
   "modules/uninstall",
+  "modules/host-call",
+  "modules/list-panels",
+  "modules/resolve-panel",
   "marketplace/list",
   "marketplace/info",
 ]);
@@ -258,6 +264,15 @@ export async function dispatchModulesAction(
       return uninstallAction(
         opts,
         msg.payload as { moduleId: string; scopeUnit?: string; keepData?: boolean },
+      );
+    case "modules/host-call":
+      return hostCall(opts, msg.payload as HostCallRequest);
+    case "modules/list-panels":
+      return listElectronPanels(opts);
+    case "modules/resolve-panel":
+      return resolveElectronPanel(
+        opts,
+        msg.payload as { moduleId: string; panelId: string },
       );
     case "marketplace/list":
       return marketplaceList(opts);
@@ -665,6 +680,231 @@ export async function callModuleTool(
         : "E_MODULE_CALL_FAILED";
     return { kind: "error", code, message };
   }
+}
+
+// ---------------------------------------------------------------------------
+// modules/host-call — panel-preload → daemon CapabilityRegistry. Phase
+// 13.4.1 moved this from electron/ipc/modules-panels.ts into the daemon
+// dispatcher so Electron is a pure client. The Electron-side
+// `auditHostCall` -> service:log forwarder is dropped: every host-call
+// still writes to `~/.rn-dev/audit.log` via `getDefaultAuditLog()`, and
+// operators who want the real-time echo can tail it.
+// ---------------------------------------------------------------------------
+
+export interface HostCallRequest {
+  moduleId: string;
+  capabilityId: string;
+  method: string;
+  args: unknown[];
+}
+
+export type HostCallReply =
+  | { kind: "ok"; result: unknown }
+  | {
+      kind: "error";
+      code:
+        | "MODULE_UNAVAILABLE"
+        | "HOST_CAPABILITY_NOT_FOUND_OR_DENIED"
+        | "HOST_METHOD_NOT_FOUND"
+        | "HOST_CALL_FAILED";
+      message: string;
+    };
+
+export async function hostCall(
+  opts: ModulesIpcOptions,
+  payload: HostCallRequest | null,
+): Promise<HostCallReply> {
+  const auditOutcome = (outcome: AuditOutcome): void => {
+    void getDefaultAuditLog().append({
+      kind: "host-call",
+      moduleId: payload?.moduleId ?? "",
+      outcome,
+      capabilityId: payload?.capabilityId ?? "",
+      method: payload?.method ?? "",
+    });
+  };
+  if (
+    !payload ||
+    typeof payload.moduleId !== "string" ||
+    typeof payload.capabilityId !== "string" ||
+    typeof payload.method !== "string"
+  ) {
+    auditOutcome("error");
+    return {
+      kind: "error",
+      code: "HOST_CALL_FAILED",
+      message:
+        "modules/host-call requires { moduleId, capabilityId, method, args }",
+    };
+  }
+
+  const reg = resolveRegistered(opts, payload.moduleId, undefined);
+  if (!reg) {
+    auditOutcome("denied");
+    return {
+      kind: "error",
+      code: "MODULE_UNAVAILABLE",
+      message: `Module "${payload.moduleId}" is not registered.`,
+    };
+  }
+
+  const granted = reg.manifest.permissions ?? [];
+  const impl = opts.manager.capabilities.resolve<Record<string, unknown>>(
+    payload.capabilityId,
+    granted,
+  );
+  if (!impl) {
+    auditOutcome("denied");
+    return {
+      kind: "error",
+      code: "HOST_CAPABILITY_NOT_FOUND_OR_DENIED",
+      message: `Capability "${payload.capabilityId}" not found or not granted to "${payload.moduleId}"`,
+    };
+  }
+
+  const fn = impl[payload.method];
+  if (typeof fn !== "function") {
+    auditOutcome("error");
+    return {
+      kind: "error",
+      code: "HOST_METHOD_NOT_FOUND",
+      message: `Method "${payload.method}" not found on capability "${payload.capabilityId}"`,
+    };
+  }
+
+  try {
+    const args = Array.isArray(payload.args) ? payload.args : [];
+    const result = await (fn as (...a: unknown[]) => unknown).apply(impl, args);
+    auditOutcome("ok");
+    return { kind: "ok", result };
+  } catch (err) {
+    auditOutcome("error");
+    return {
+      kind: "error",
+      code: "HOST_CALL_FAILED",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// modules/list-panels — projects every registered module's Electron panel
+// contributions for the renderer sidebar. Webview paths + moduleRoot are
+// intentionally NOT included; callers fetch a single panel's full
+// contribution via `modules/resolve-panel` when they're ready to mount it.
+// This keeps the list-panels payload small enough to spray on every
+// sidebar re-render without growing with module count.
+// ---------------------------------------------------------------------------
+
+export interface ListPanelsEntry {
+  moduleId: string;
+  title: string;
+  panels: Array<{
+    id: string;
+    title: string;
+    icon?: string;
+    hostApi: string[];
+  }>;
+}
+
+export interface ListPanelsReply {
+  modules: ListPanelsEntry[];
+}
+
+export function listElectronPanels(
+  opts: ModulesIpcOptions,
+): ListPanelsReply {
+  const modules = opts.registry
+    .getAllManifests()
+    .map<ListPanelsEntry>((registered) => ({
+      moduleId: registered.manifest.id,
+      title: registered.manifest.id,
+      panels:
+        registered.manifest.contributes?.electron?.panels?.map((p) => ({
+          id: p.id,
+          title: p.title,
+          icon: p.icon,
+          hostApi: [...p.hostApi],
+        })) ?? [],
+    }))
+    .filter((m) => m.panels.length > 0);
+  return { modules };
+}
+
+// ---------------------------------------------------------------------------
+// modules/resolve-panel — returns the full ElectronPanelContribution + the
+// absolute module root for a single (moduleId, panelId) pair. The Electron
+// panel-bridge consumes this when activating a panel to build the
+// WebContentsView: webviewEntry is resolved against moduleRoot, and the
+// returned hostApi allowlist is forwarded into the preload's
+// additionalArguments.
+// ---------------------------------------------------------------------------
+
+export interface ResolvePanelReply {
+  kind: "ok";
+  moduleId: string;
+  moduleRoot: string;
+  contribution: {
+    id: string;
+    title: string;
+    icon?: string;
+    webviewEntry: string;
+    hostApi: string[];
+  };
+}
+
+export type ResolvePanelError = {
+  kind: "error";
+  code: "E_PANEL_NOT_FOUND" | "E_PANEL_BAD_REQUEST";
+  message: string;
+};
+
+export function resolveElectronPanel(
+  opts: ModulesIpcOptions,
+  payload: { moduleId: string; panelId: string } | null,
+): ResolvePanelReply | ResolvePanelError {
+  if (
+    !payload ||
+    typeof payload.moduleId !== "string" ||
+    typeof payload.panelId !== "string"
+  ) {
+    return {
+      kind: "error",
+      code: "E_PANEL_BAD_REQUEST",
+      message:
+        "modules/resolve-panel requires { moduleId: string, panelId: string }",
+    };
+  }
+  const reg = resolveRegistered(opts, payload.moduleId, undefined);
+  if (!reg) {
+    return {
+      kind: "error",
+      code: "E_PANEL_NOT_FOUND",
+      message: `Module "${payload.moduleId}" is not registered.`,
+    };
+  }
+  const contribution = reg.manifest.contributes?.electron?.panels?.find(
+    (p) => p.id === payload.panelId,
+  );
+  if (!contribution) {
+    return {
+      kind: "error",
+      code: "E_PANEL_NOT_FOUND",
+      message: `Module "${payload.moduleId}" has no panel "${payload.panelId}"`,
+    };
+  }
+  return {
+    kind: "ok",
+    moduleId: reg.manifest.id,
+    moduleRoot: reg.modulePath,
+    contribution: {
+      id: contribution.id,
+      title: contribution.title,
+      icon: contribution.icon,
+      webviewEntry: contribution.webviewEntry,
+      hostApi: [...contribution.hostApi],
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

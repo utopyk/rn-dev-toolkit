@@ -3,43 +3,23 @@ import React from "react";
 import { createCliRenderer, VignetteEffect, applyScanlines } from "@opentui/core";
 import { createRoot } from "@opentui/react";
 
-import { execShellAsync } from "../core/exec-async.js";
 import { detectProjectRoot, getCurrentBranch } from "../core/project.js";
 import { ProfileStore } from "../core/profile.js";
 import { ArtifactStore } from "../core/artifact.js";
 import { MetroManager } from "../core/metro.js";
 import { DevToolsManager } from "../core/devtools.js";
-import { MetroLogsStore } from "../core/metro-logs/buffer.js";
-import {
-  METRO_LOGS_CAPABILITY_ID,
-  METRO_LOGS_CAPABILITY_READ_PERMISSION,
-  METRO_LOGS_METHOD_PERMISSIONS,
-  createMetroLogsHostCapability,
-} from "../core/metro-logs/host-capability.js";
-import { CleanManager } from "../core/clean.js";
 import { FileWatcher } from "../core/watcher.js";
 import { IpcServer } from "../core/ipc.js";
 import type { ModuleHostManager } from "../core/module-host/manager.js";
-import { CapabilityRegistry } from "../core/module-host/capabilities.js";
-import {
-  createDevtoolsHostCapability,
-  DEVTOOLS_CAPABILITY_ID,
-  DEVTOOLS_CAPABILITY_READ_PERMISSION,
-  DEVTOOLS_METHOD_PERMISSIONS,
-} from "../core/devtools/host-capability.js";
-import { registerModulesIpc } from "./modules-ipc.js";
+import { bootSessionServices } from "../core/session/boot.js";
+import { readHostVersion } from "../core/host-version.js";
 import { loadTheme, getThemeEffects } from "../ui/theme-provider.js";
 import {
   ModuleRegistry,
   devSpaceModule,
   settingsModule,
   lintTestModule,
-  isSensitivePermission,
 } from "../modules/index.js";
-import {
-  createModuleSystem,
-  type LogCapability,
-} from "../modules/create-module-system.js";
 import { firstRunSetup } from "./first-run.js";
 import { App } from "./App.js";
 import { serviceBus } from "./service-bus.js";
@@ -341,385 +321,44 @@ async function startServicesAsync(
 }> {
   const emit = (line: string) => serviceBus.log(line);
 
-  // 1. Run preflights if configured
-  if (profile.preflight.checks.length > 0) {
-    const artifact = artifactStore.load(
-      artifactStore.worktreeHash(profile.worktree)
-    );
-    const needsPreflight =
-      profile.preflight.frequency === "always" || !artifact?.preflightPassed;
-
-    if (needsPreflight) {
-      emit("\u23f3 Running preflight checks...");
-      const { createDefaultPreflightEngine } = await import(
-        "../core/preflight.js"
-      );
-      const engine = createDefaultPreflightEngine(projectRoot);
-      const results = await engine.runAll(profile.platform, profile.preflight);
-
-      let hasErrors = false;
-      for (const [id, result] of results) {
-        const icon = result.passed ? "\u2714" : "\u2716";
-        emit(`  ${icon} ${id}: ${result.message}`);
-        if (!result.passed) hasErrors = true;
-      }
-
-      if (hasErrors) {
-        emit(`  \u26a0 Some preflight checks failed. Continuing anyway...`);
-      } else {
-        emit(`  \u2714 All preflight checks passed`);
-      }
-      emit("");
-
-      const wKey = artifactStore.worktreeHash(profile.worktree);
-      artifactStore.save(wKey, { preflightPassed: !hasErrors });
-    }
-  }
-
-  // 2. Check node_modules — auto-install if missing
-  const effectiveRoot = profile.worktree ?? projectRoot;
-  const { existsSync: exists } = await import("fs");
-  if (!exists(path.join(effectiveRoot, "node_modules"))) {
-    emit("\u26a0 node_modules not found \u2014 auto-installing dependencies...");
-
-    const hasPackageLock = exists(path.join(effectiveRoot, "package-lock.json"));
-    const hasBunLock = exists(path.join(effectiveRoot, "bun.lock")) || exists(path.join(effectiveRoot, "bun.lockb"));
-    const hasYarnLock = exists(path.join(effectiveRoot, "yarn.lock"));
-    const installCmd = hasPackageLock ? "npm install" : hasBunLock ? "bun install" : hasYarnLock ? "yarn install" : "npm install";
-
-    emit(`  \u23f3 ${installCmd}...`);
-    try {
-      await execShellAsync(installCmd, { cwd: effectiveRoot, timeout: 300000 });
-      emit("  \u2714 Dependencies installed");
-    } catch (err: any) {
-      emit(`  \u2716 Install failed: ${(err.message ?? "").slice(0, 120)}`);
-      emit("  \u26a0 Build will likely fail without node_modules");
-    }
-    emit("");
-
-    // Install pods if iOS and Podfile exists
-    if (profile.platform === "ios" || profile.platform === "both") {
-      const podfilePath = path.join(effectiveRoot, "ios", "Podfile");
-      if (exists(podfilePath)) {
-        emit("  \u23f3 pod install...");
-        try {
-          await execShellAsync("pod install", {
-            cwd: path.join(effectiveRoot, "ios"),
-            timeout: 300000,
-          });
-          emit("  \u2714 Pods installed");
-        } catch {
-          emit("  \u26a0 pod install failed");
-        }
-        emit("");
-      }
-    }
-  }
-
-  // 3. Run clean if needed — skipped for dirty + quick modes.
-  if (profile.mode !== "dirty" && profile.mode !== "quick") {
-    const cleaner = new CleanManager(projectRoot);
-    emit(`\u23f3 Running ${profile.mode} clean...`);
-    await cleaner.execute(profile.mode, profile.platform, (step, status) => {
-      const icon = status === "done" ? "\u2714" : status === "skip" ? "\u2139" : "\u26a0";
-      emit(`  ${icon} ${step}`);
-    });
-    emit("");
-  }
-
-  // 4. Clear watchman for this project to prevent recrawl warnings
-  emit("\u23f3 Clearing watchman...");
-  try {
-    await execShellAsync(`watchman watch-del '${effectiveRoot}'`, {
-      timeout: 15000,
-    });
-    emit("\u2714 Watchman watch cleared for project");
-  } catch {
-    emit("\u2139 Watchman not available or timed out");
-  }
-
-  // 5. Check port and kill stale process if needed
-  const metro = new MetroManager(artifactStore);
-  const worktreeKey = artifactStore.worktreeHash(profile.worktree);
-  const port = profile.metroPort;
-
-  emit(`\u23f3 Checking port ${port}...`);
-  const portFree = await metro.isPortFree(port);
-  if (!portFree) {
-    emit(`\u26a0 Port ${port} is in use. Killing stale process...`);
-    const killed = await metro.killProcessOnPort(port);
-    if (killed) {
-      emit(`  \u2714 Killed process on port ${port}`);
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    } else {
-      emit(`  \u2716 Could not kill process on port ${port}. Trying anyway...`);
-    }
-  } else {
-    emit(`\u2714 Port ${port} is free`);
-  }
-
-  // 6. Boot simulator if needed
-  if (profile.platform === "ios" || profile.platform === "both") {
-    const deviceId = profile.devices?.ios;
-    if (deviceId) {
-      emit("\u23f3 Checking simulator status...");
-      try {
-        const { listDevices: listDev, bootDevice } = await import("../core/device.js");
-        const devices = await listDev("ios");
-        const device = devices.find((d) => d.id === deviceId);
-        if (device && device.status === "shutdown") {
-          emit(`\u23f3 Booting simulator ${device.name}...`);
-          const booted = await bootDevice(device);
-          if (booted) {
-            emit("  \u2714 Simulator booted");
-          } else {
-            emit("  \u26a0 Could not boot simulator \u2014 may already be booting");
-          }
-        } else if (device && device.status === "booted") {
-          emit(`  \u2714 Simulator ${device.name} already booted`);
-        } else {
-          emit(`  \u26a0 Device ${deviceId} not found in simulator list`);
-        }
-      } catch (err: any) {
-        emit(`  \u26a0 Simulator check failed: ${(err.message ?? "").slice(0, 80)}`);
-      }
-    }
-  }
-
-  // 7. Start Metro
-  emit(`\u23f3 Starting Metro on port ${port}...`);
-
-  // 7a. Metro log ring buffer — backs the metro-logs 3p module's host
-  // capability. Must be attached BEFORE `metro.start()` so the very first
-  // log event from Metro lands in the ring. Status events bump the
-  // buffer epoch on restart so agent cursors don't bleed across
-  // sessions. The store owns the status vocabulary — `setMetroStatus`
-  // normalizes a raw string via an internal `Set`, closing the
-  // prototype-walk hole a plain `Record<string, ...>` lookup would
-  // have (Phase 11 Security review P1).
-  const metroLogsStore = new MetroLogsStore();
-  metro.on("log", (event: { worktreeKey: string; line: string; stream: "stdout" | "stderr" }) => {
-    metroLogsStore.append(event.worktreeKey, event.stream, event.line);
-  });
-  metro.on("status", (event: { worktreeKey: string; status: string }) => {
-    metroLogsStore.setMetroStatus(event.worktreeKey, event.status);
-  });
-
-  metro.start({
-    worktreeKey,
-    projectRoot: effectiveRoot,
-    port: profile.metroPort,
-    resetCache: profile.mode !== "dirty" && profile.mode !== "quick",
-    verbose: true,
-    env: profile.env,
-  });
-  serviceBus.setMetro(metro);
-  serviceBus.setWorktreeKey(worktreeKey);
-
-  // 8. File watcher — create but DON'T start yet (chokidar's initial scan
-  // blocks the event loop for minutes on large projects). User can toggle
-  // with 'w' shortcut when ready.
-  let watcher: FileWatcher | null = null;
-  if (profile.onSave.length > 0) {
-    watcher = new FileWatcher({
-      projectRoot,
-      actions: profile.onSave,
-    });
-    serviceBus.setWatcher(watcher);
-    emit("ℹ File watcher ready — press [w] to enable");
-  }
-
-  // 9. Start IPC server
+  // IPC server — owned by the TUI caller so the `.rn-dev/sock` path is
+  // derived from the TUI's project root, not the daemon's worktree.
   const ipc = new IpcServer(path.join(projectRoot, ".rn-dev", "sock"));
   await ipc.start();
 
-  // 10. DevTools — Phase 3 Track A. Eager-start so MCP tools over unix
-  // socket see a live proxy from the moment the session is up. Starting
-  // may land in `no-target` posture if Metro isn't ready yet; that's
-  // fine — the manager polls /json again on first activity and the
-  // status envelope tells the agent what's going on.
-  const devtools = new DevToolsManager(metro, {});
-  try {
-    await devtools.start(worktreeKey);
-  } catch (err) {
-    emit(`ℹ DevTools: deferred (${err instanceof Error ? err.message : String(err)})`);
-  }
-  serviceBus.setDevTools(devtools);
-
-  // 11. Create builder
-  const { Builder } = await import("../core/builder.js");
-  const builder = new Builder();
-  serviceBus.setBuilder(builder);
-
-  // 12. Module host — Phase 2 + Phase 3a, refactored via `createModuleSystem`
-  // (Phase 6 Arch P1-1).
-  //
-  // The factory stamps `appInfo` / `log` on the capability registry, registers
-  // every built-in manifest, and wires the Marketplace built-in's capability.
-  // `metro` / `artifacts` are TUI-path specific — they register before the
-  // factory so modules activated during built-in manifest registration can
-  // resolve them.
   const hostVersion = readHostVersion();
-  const capabilities = registerHostCapabilities({
-    metro,
+  const services = await bootSessionServices({
+    profile,
+    projectRoot,
     artifactStore,
-    devtools,
-    metroLogsStore,
-    worktreeKey,
-  });
-  const { moduleHost } = createModuleSystem({
-    hostVersion,
-    worktreeKey,
-    capabilities,
     moduleRegistry,
-    logger: createScopedLogger(emit),
-  });
-  serviceBus.setHostVersion(hostVersion);
-  serviceBus.setModuleHost(moduleHost);
-  serviceBus.setModuleRegistry(moduleRegistry);
-
-  const loadResult = moduleRegistry.loadUserGlobalModules({
+    emit,
     hostVersion,
-    scopeUnit: worktreeKey,
-  });
-  if (loadResult.modules.length > 0) {
-    emit(
-      `ℹ Loaded ${loadResult.modules.length} module manifest${loadResult.modules.length === 1 ? "" : "s"} (${loadResult.modules.map((m) => m.manifest.id).join(", ")})`,
-    );
-  }
-  // Security S7 — operator visibility. After the Phase 9 retirement of the
-  // `--enable-devtools-mcp` stderr banner, the startup log is the only
-  // ambient signal that a data-sensitive module is live. Emit one warning
-  // line per module carrying a sensitive permission so tailing operators
-  // see "devtools-network active" without running `rn-dev module list`.
-  // Uses `isSensitivePermission` from `src/modules/registry.ts` so the
-  // manifest lint (Phase 10 P2-12) and this banner stay on the same list.
-  for (const mod of loadResult.modules) {
-    const sensitive = (mod.manifest.permissions ?? []).filter(
-      isSensitivePermission,
-    );
-    if (sensitive.length > 0) {
-      emit(
-        `⚠ Module "${mod.manifest.id}" holds sensitive permission${sensitive.length === 1 ? "" : "s"}: ${sensitive.join(", ")} — untrusted external content (network traffic, device output, Metro log lines) may be exposed over MCP.`,
-      );
-    }
-  }
-  for (const rejected of loadResult.rejected) {
-    emit(
-      `⚠ Module manifest rejected (${rejected.code}): ${rejected.manifestPath} — ${rejected.message}`,
-    );
-  }
-
-  const modulesIpc = registerModulesIpc(ipc, {
-    manager: moduleHost,
-    registry: moduleRegistry,
-  });
-  // Simplicity #6 (Phase 5c) — the bus itself is the single fan-out point.
-  // MCP `modules/subscribe`, Electron renderer forward, and Electron
-  // `modules:config-set` each attach to this emitter directly. No relay
-  // through a second serviceBus topic.
-  serviceBus.setModuleEventsBus(modulesIpc.moduleEvents);
-
-  emit("\u2714 All services started");
-  emit("");
-
-  return {
-    metro,
-    devtools,
-    watcher,
     ipc,
-    worktreeKey,
-    builder,
-    moduleHost,
-    moduleRegistry,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Module-host capability helpers (Phase 2 daemon wiring)
-// ---------------------------------------------------------------------------
-
-/**
- * Phase 10 P3-13 — extracted from `startServicesAsync` so the tangled
- * capability registrations live in one place with a clear signature. Each
- * dep maps 1:1 to a single `capabilities.register()` call; adding a new
- * built-in host capability (e.g. a future "telemetry") means one more arg
- * here and one more call, rather than widening the surface area of
- * `startServicesAsync`.
- */
-interface HostCapabilityDeps {
-  metro: MetroManager;
-  artifactStore: ArtifactStore;
-  devtools: DevToolsManager;
-  metroLogsStore: MetroLogsStore;
-  worktreeKey: string;
-}
-
-function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry {
-  const capabilities = new CapabilityRegistry();
-  // TODO(phase-12): wrap `deps.metro` in a typed host-capability
-  // façade like `metro-logs` and `devtools` do, instead of handing
-  // the raw `MetroManager` to 3p modules. A module with
-  // `exec:react-native` currently reaches every public method on the
-  // class (start / stop / killProcessOnPort / the EventEmitter
-  // surface). The other two capabilities hide this behind a purpose-
-  // built interface; `metro` is the outlier. Flagged in Phase 11
-  // Architecture review P1-A.
-  capabilities.register("metro", deps.metro, {
-    requiredPermission: "exec:react-native",
   });
-  capabilities.register("artifacts", deps.artifactStore, {
-    requiredPermission: "fs:artifacts",
-  });
-  capabilities.register(
-    DEVTOOLS_CAPABILITY_ID,
-    createDevtoolsHostCapability(deps.devtools, deps.worktreeKey),
-    {
-      requiredPermission: DEVTOOLS_CAPABILITY_READ_PERMISSION,
-      methodPermissions: DEVTOOLS_METHOD_PERMISSIONS,
-    },
-  );
-  capabilities.register(
-    METRO_LOGS_CAPABILITY_ID,
-    createMetroLogsHostCapability(deps.metroLogsStore, deps.worktreeKey),
-    {
-      requiredPermission: METRO_LOGS_CAPABILITY_READ_PERMISSION,
-      methodPermissions: METRO_LOGS_METHOD_PERMISSIONS,
-    },
-  );
-  return capabilities;
-}
 
-function readHostVersion(): string {
-  // Single source of truth: root package.json. Phase 2 handoff flags this
-  // — if the daemon is ever split off, re-wire this to a build-stamped
-  // constant instead of a runtime read.
-  try {
-    const pkgPath = path.join(process.cwd(), "package.json");
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
-    const pkg = JSON.parse(
-      require("fs").readFileSync(pkgPath, "utf-8"),
-    ) as { version?: string };
-    return pkg.version ?? "0.0.0";
-  } catch {
-    return "0.0.0";
-  }
-}
+  // TUI-specific fan-out into the React-propagation service bus. The
+  // daemon path does not use serviceBus; it emits events over
+  // events/subscribe instead.
+  serviceBus.setMetro(services.metro);
+  serviceBus.setWorktreeKey(services.worktreeKey);
+  if (services.watcher) serviceBus.setWatcher(services.watcher);
+  serviceBus.setDevTools(services.devtools);
+  serviceBus.setBuilder(services.builder);
+  serviceBus.setHostVersion(hostVersion);
+  serviceBus.setModuleHost(services.moduleHost);
+  serviceBus.setModuleRegistry(services.moduleRegistry);
+  serviceBus.setModuleEventsBus(services.moduleEvents);
 
-function createScopedLogger(emit: (line: string) => void): LogCapability {
-  const format = (
-    level: string,
-    msg: string,
-    data?: Record<string, unknown>,
-  ): string => {
-    const suffix = data ? ` ${JSON.stringify(data)}` : "";
-    return `[module/${level}] ${msg}${suffix}`;
-  };
   return {
-    debug: (msg, data) => emit(format("debug", msg, data)),
-    info: (msg, data) => emit(format("info", msg, data)),
-    warn: (msg, data) => emit(format("warn", msg, data)),
-    error: (msg, data) => emit(format("error", msg, data)),
+    metro: services.metro,
+    devtools: services.devtools,
+    watcher: services.watcher,
+    ipc,
+    worktreeKey: services.worktreeKey,
+    builder: services.builder,
+    moduleHost: services.moduleHost,
+    moduleRegistry: services.moduleRegistry,
   };
 }
 

@@ -15,11 +15,17 @@
 //     boundary. The sandboxing story is curated registry + subprocess
 //     isolation + consent UI (unchanged from Phase 6).
 //
-// Concurrency: `append()` serializes through an instance-scoped promise
-// chain. Two concurrent appends on the same AuditLog instance land in
-// deterministic sequence order. Cross-process concurrency is NOT handled
-// — only the single daemon process writes. If the CLI or another process
-// needs to audit, route through the daemon's IPC.
+// Concurrency: two levels.
+//   - In-process: `appendFileSync` is a blocking syscall, so synchronous
+//     callers on the same tick can't interleave — the earlier call's
+//     lastHash/seq updates complete before the later call reads them.
+//   - Cross-process (Phase 13 multi-daemon): before each append the
+//     writer acquires an O_EXCL lockfile at `<audit.log>.lock`, re-reads
+//     the tail under the lock, builds the entry, appends, and unlinks
+//     the lock. Two daemons writing concurrently serialize via the
+//     lockfile instead of corrupting the HMAC chain by both reading
+//     the same tail. Stale locks (crashed writer) expire after
+//     `LOCK_STALE_MS` and are force-reclaimed.
 //
 // Rotation: when the active log exceeds `rotateBytes` (default 10MB), the
 // NEXT append rotates. Rotation shifts files up the numbered suffix:
@@ -34,16 +40,20 @@
 // `audit.log.1` tail hash into the `audit.log` head verification.
 
 import { createHmac, randomBytes } from "node:crypto";
+import { constants } from "node:fs";
 import {
   appendFileSync,
   chmodSync,
+  closeSync,
   createReadStream,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { EventEmitter } from "node:events";
@@ -165,6 +175,14 @@ export class AuditLog extends EventEmitter {
   private seq = 0;
   private lastHash = "";
   private initialized = false;
+  /**
+   * File size we last observed the active log to be. Cross-process
+   * writers bump the real size past this value; matching size → nobody
+   * else wrote since we did → cached lastHash/seq are still valid and
+   * we can skip re-reading the tail. Keeps the same-process append
+   * path O(1) even with the lockfile wrapper around it.
+   */
+  private lastObservedSize = 0;
 
   constructor(opts: AuditLogOptions = {}) {
     super();
@@ -181,36 +199,94 @@ export class AuditLog extends EventEmitter {
    * `hash`) so listeners (e.g. the Electron service-log mirror) can
    * react without re-reading the file.
    *
-   * Concurrency: `appendFileSync` is a blocking Node syscall, so two
-   * synchronous callers on the same event loop tick can't interleave
-   * — the earlier one's `lastHash`/`seq` mutations complete before the
-   * later one reads them. The return type stays `Promise<AuditEntry>`
-   * for forward compatibility (streaming writes in Phase 11+), but
-   * `append()` itself still resolves synchronously. Distinct from
-   * `verify()`, which streams the file and genuinely awaits.
+   * Cross-process serialization: the critical section runs under an
+   * O_EXCL lockfile at `<path>.lock`. Under the lock we re-read the
+   * tail hash + seq from disk — another writer may have appended
+   * since we last cached them — then build, append, unlink lock.
+   * `appendFileSync` itself is blocking so in-process concurrency is
+   * already serialized by Node's event loop.
+   *
+   * Emits `append-failed` on write error so the Electron service-log
+   * mirror can surface the failure; the audit record is dropped on
+   * error but the emitter keeps UI visibility intact.
    */
-  append(input: AuditEntryInput): Promise<AuditEntry> {
+  async append(input: AuditEntryInput): Promise<AuditEntry> {
     this.ensureInitialized();
-    // Rotate BEFORE building so the new entry's `seq` reflects the
-    // fresh file (reset to 1) instead of continuing the pre-rotation
-    // counter. The chain (prevHash) continues across rotation; seq
-    // resets per-file so operators can locate entries within a single
-    // log.
-    this.rotateIfNeeded();
-    const entry = this.buildEntry(input);
-    try {
-      appendFileSync(this.path, JSON.stringify(entry) + "\n", { mode: 0o600 });
-    } catch (err) {
-      // Surface write failures via the emitter so the Electron service
-      // log can flag them — the audit record is dropped, but we don't
-      // want the host UI to be blind.
-      this.emit("append-failed", { entry, error: err });
-      return Promise.reject(err);
+    return withAuditLock(this.lockPath(), () => {
+      // Another process may have appended since we last read — rebase
+      // on the current tail before building our entry so the HMAC
+      // chain stays unbroken.
+      this.refreshTailState();
+      // Rotate BEFORE building so the new entry's `seq` reflects the
+      // fresh file (reset to 1) instead of continuing the pre-rotation
+      // counter. The chain (prevHash) continues across rotation; seq
+      // resets per-file so operators can locate entries within a
+      // single log.
+      this.rotateIfNeeded();
+      const entry = this.buildEntry(input);
+      try {
+        appendFileSync(this.path, JSON.stringify(entry) + "\n", { mode: 0o600 });
+      } catch (err) {
+        this.emit("append-failed", { entry, error: err });
+        throw err;
+      }
+      this.lastHash = entry.hash;
+      this.seq = entry.seq;
+      // Cache the new size so the next same-process append skips the
+      // tail re-read. Out of line with the actual append rather than
+      // stat()ing because the canonical JSON is exactly what we wrote.
+      try {
+        this.lastObservedSize = statSync(this.path).size;
+      } catch {
+        this.lastObservedSize = 0;
+      }
+      this.emit("appended", entry);
+      return entry;
+    });
+  }
+
+  /** Lock file path — one per audit log file, next to the log itself. */
+  private lockPath(): string {
+    return `${this.path}.lock`;
+  }
+
+  /**
+   * Re-read the active file's tail so `lastHash`/`seq` reflect the
+   * state another daemon may have written since our cached values were
+   * captured. Called under the append lock.
+   *
+   * Fast path: if the file size matches what we last observed, nobody
+   * else has appended and the cached state is still current. Skipping
+   * the re-read keeps the common same-process-sequential append path
+   * O(1); cross-process contention pays the tail-read cost only when
+   * it actually happens.
+   */
+  private refreshTailState(): void {
+    const curSize = existsSync(this.path) ? statSync(this.path).size : 0;
+    if (curSize === this.lastObservedSize) return;
+    if (curSize === 0) {
+      this.lastHash = "";
+      this.seq = 0;
+      this.lastObservedSize = 0;
+      return;
     }
-    this.lastHash = entry.hash;
-    this.seq = entry.seq;
-    this.emit("appended", entry);
-    return Promise.resolve(entry);
+    const raw = readFileSync(this.path, "utf-8");
+    const lines = raw.split("\n").filter((l) => l.length > 0);
+    const last = lines[lines.length - 1];
+    if (!last) {
+      this.lastHash = "";
+      this.seq = 0;
+      this.lastObservedSize = curSize;
+      return;
+    }
+    try {
+      const entry = JSON.parse(last) as AuditEntry;
+      this.lastHash = entry.hash;
+      this.seq = entry.seq;
+    } catch {
+      /* keep existing in-memory values — verify() will flag the gap */
+    }
+    this.lastObservedSize = curSize;
   }
 
   /**
@@ -308,6 +384,11 @@ export class AuditLog extends EventEmitter {
           // will flag the gap but append keeps working.
         }
       }
+      try {
+        this.lastObservedSize = statSync(this.path).size;
+      } catch {
+        this.lastObservedSize = 0;
+      }
     }
     this.initialized = true;
   }
@@ -337,8 +418,11 @@ export class AuditLog extends EventEmitter {
     this.emit("rotated", { active: this.path, rotatedTo: `${this.path}.1` });
     // Next append starts fresh — `lastHash` carries across so the chain
     // continues. Seq resets per-file so operators can locate entries
-    // within the active log.
+    // within the active log. The active file is empty post-rotation, so
+    // reset `lastObservedSize` too; without this, the next append's
+    // size-equality check would incorrectly skip the tail refresh.
     this.seq = 0;
+    this.lastObservedSize = 0;
   }
 
   private buildEntry(input: AuditEntryInput): AuditEntry {
@@ -444,3 +528,101 @@ function generateKey(keyPath: string): Buffer {
 // re-export above preserves the public API; tests that used to reach for
 // `_canonicalizeForTests` now import `canonicalize` directly from the new
 // module (the test-only re-export smell is gone).
+
+// ---------------------------------------------------------------------------
+// Cross-process lockfile (Phase 13.2)
+// ---------------------------------------------------------------------------
+
+const LOCK_POLL_MS = 10;
+const LOCK_MAX_ATTEMPTS = 300; // ~3s total before we treat the attempt as failed
+
+/**
+ * Acquire an O_EXCL lockfile, write our pid into it, run `fn`, release.
+ *
+ * Stale-lock reclaim: the holder's pid is read from the lockfile body
+ * and probed with `kill(pid, 0)`. Only if the holder is actually dead
+ * do we unlink and retake. An mtime-threshold-based reclaim (which the
+ * first draft used) is unsafe — a slow writer on NFS or a writer
+ * traversing a large file under the lock can exceed any threshold
+ * without being stuck, and concurrent reclaim creates two writers
+ * reading the same tail and corrupting the HMAC chain. Security
+ * reviewer P1 on this was the blocker.
+ */
+async function withAuditLock<T>(
+  lockPath: string,
+  fn: () => T | Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
+    let fd: number;
+    try {
+      fd = openSync(
+        lockPath,
+        constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+        0o600,
+      );
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      // Read the holder's pid and check liveness. Only a dead holder
+      // gets reclaimed; a live (possibly slow) holder makes us wait.
+      const holder = readLockHolder(lockPath);
+      if (holder === null || isPidDead(holder)) {
+        try {
+          unlinkSync(lockPath);
+        } catch {
+          /* race with another reclaimer — fall through to backoff */
+        }
+        continue;
+      }
+      await new Promise((r) => setTimeout(r, LOCK_POLL_MS));
+      continue;
+    }
+
+    // Record our pid so another writer can probe it if we crash.
+    try {
+      writeFileSync(lockPath, `${process.pid}\n`, { mode: 0o600 });
+    } catch {
+      /* best-effort — if the write fails, reclaim-by-pid falls back to
+         the "holder === null" path which unlinks as stale */
+    }
+    try {
+      return await fn();
+    } finally {
+      try {
+        closeSync(fd);
+      } catch {
+        /* best-effort */
+      }
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        /* best-effort — may have been reclaimed by a stale sweep */
+      }
+    }
+  }
+  throw new Error(
+    `AuditLog: timed out acquiring lock at ${lockPath} after ${LOCK_MAX_ATTEMPTS * LOCK_POLL_MS}ms`,
+  );
+}
+
+function readLockHolder(lockPath: string): number | null {
+  try {
+    const raw = readFileSync(lockPath, "utf-8").trim();
+    if (!raw) return null;
+    const pid = Number(raw);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isPidDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    // EPERM = exists but we lack permission to signal — treat as alive.
+    if (code === "EPERM") return false;
+    return true;
+  }
+}

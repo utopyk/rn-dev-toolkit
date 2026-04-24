@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { spawn, type ChildProcess } from "node:child_process";
+import { execSync, spawn, type ChildProcess } from "node:child_process";
 import type { RegisteredModule } from "../../modules/registry.js";
 import { ModuleConfigStore } from "../../modules/config-store.js";
 import { CapabilityRegistry } from "./capabilities.js";
@@ -73,7 +73,16 @@ export class NodeSpawner implements ModuleSpawner {
     _manifest: RegisteredModule["manifest"],
     modulePath: string,
   ): SpawnHandle {
-    const child = spawn("node", [modulePath], {
+    // On Linux with util-linux's `setpriv` available, prepend
+    // `setpriv --pdeathsig SIGKILL --` so the kernel kills the module
+    // the instant the daemon dies — closes the orphan window before
+    // the next daemon's startup-sweep runs. setpriv is standard on
+    // modern distros but not guaranteed; absent → we fall back to the
+    // startup sweep (see src/daemon/orphan-sweep.ts). macOS has no
+    // PDEATHSIG equivalent; practical impact bounded since dev
+    // machines restart daemons far more than servers do.
+    const { command, args } = buildSpawnCommand(modulePath);
+    const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
       // POSIX: start a new process group so we can kill the whole group and
       // reap stray grandchildren spawned by the module.
@@ -83,6 +92,30 @@ export class NodeSpawner implements ModuleSpawner {
     });
     return wrapChild(child);
   }
+}
+
+function buildSpawnCommand(modulePath: string): { command: string; args: string[] } {
+  if (process.platform === "linux" && hasSetpriv()) {
+    return {
+      command: "setpriv",
+      args: ["--pdeathsig", "SIGKILL", "--", "node", modulePath],
+    };
+  }
+  return { command: "node", args: [modulePath] };
+}
+
+let setprivCached: boolean | null = null;
+function hasSetpriv(): boolean {
+  if (setprivCached !== null) return setprivCached;
+  try {
+    // `which setpriv` returns 0 iff the binary is in PATH. stdio is
+    // ignored so this is silent; `execSync` throws on non-zero exit.
+    execSync("which setpriv", { stdio: "ignore" });
+    setprivCached = true;
+  } catch {
+    setprivCached = false;
+  }
+  return setprivCached;
 }
 
 function wrapChild(child: ChildProcess): SpawnHandle {

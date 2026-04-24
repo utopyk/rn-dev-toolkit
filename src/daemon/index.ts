@@ -1,4 +1,4 @@
-import { chmodSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import {
@@ -7,11 +7,21 @@ import {
   type IpcMessageEvent,
 } from "../core/ipc.js";
 import { ModuleLockfile } from "../core/module-host/lockfile.js";
+import { DaemonSupervisor, type SessionBootFn } from "./supervisor.js";
+import { bootSessionServices } from "../core/session/boot.js";
+import { fakeBootSessionServices } from "./fake-boot.js";
+import { sweepOrphanModules } from "./orphan-sweep.js";
+import { validateProfile } from "./profile-guard.js";
+import type { SessionEvent } from "./session.js";
 
 // ---------------------------------------------------------------------------
-// Daemon entry for `rn-dev daemon <worktree>`. Phase 13.1 ships lifecycle
-// primitives only — pid arbitration, socket listen, daemon/ping, and
-// daemon/shutdown. Session + service ownership arrive in Phase 13.2.
+// Daemon entry for `rn-dev daemon <worktree>`.
+//
+// Phase 13.1 shipped lifecycle primitives (pid arbitration, socket listen,
+// daemon/ping, daemon/shutdown). Phase 13.2 moves services into the
+// daemon via DaemonSupervisor and adds the session/* + events/subscribe
+// RPCs. TUI + Electron + MCP continue with their existing in-process
+// paths until 13.3 / 13.4 flip them to clients.
 //
 // The daemon detaches from its parent by default via a self-respawn:
 //   `rn-dev daemon <wt>` (no flag)  → fork a child with `--foreground`,
@@ -36,6 +46,13 @@ const HOST_RANGE = ">=0.1.0";
 export interface RunDaemonOptions {
   worktree: string;
   foreground?: boolean;
+  /**
+   * Optional absolute path to the CLI entry used when detaching via
+   * self-respawn. Threading this explicitly lets callers in packaged
+   * environments (Electron, bundled binaries) override `process.argv[1]`
+   * which otherwise points at the host bundle, not the CLI.
+   */
+  daemonEntry?: string;
 }
 
 export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
@@ -43,7 +60,7 @@ export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
   const foreground = opts.foreground === true;
 
   if (!foreground) {
-    detachAndExit(worktree);
+    detachAndExit(worktree, opts.daemonEntry);
     return;
   }
 
@@ -81,8 +98,55 @@ export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
     /* best-effort — ModuleLockfile.writeFileSync doesn't take a mode. */
   }
 
+  // Orphan module sweep — kill module subprocesses whose parent daemon
+  // crashed (PPID=1 → init reaped them). Runs after lock acquisition so
+  // we can trust that no live daemon is still spawning modules into the
+  // tree. The kill is POSIX-only; see src/daemon/orphan-sweep.ts for
+  // platform notes.
+  try {
+    const sweep = sweepOrphanModules({
+      log: (line) => process.stdout.write(`${line}\n`),
+    });
+    if (sweep.killed > 0) {
+      process.stdout.write(
+        `rn-dev daemon: orphan-sweep cleared ${sweep.killed} module${sweep.killed === 1 ? "" : "s"} (${sweep.cleared.join(", ")})\n`,
+      );
+    }
+  } catch (err) {
+    process.stderr.write(
+      `rn-dev daemon: orphan-sweep failed (${err instanceof Error ? err.message : String(err)}) — continuing\n`,
+    );
+  }
+
+  // Pre-bind unlink of a stale socket file. Phase 13.1 reviewer P1#3:
+  // previously hidden inside IpcServer.start() where it ran AFTER the
+  // pid-file lock was acquired, leaving a post-lock / pre-bind window
+  // where a racing client could `connect()` the stale inode. Doing it
+  // here — outside the server — keeps the unlink scoped to the
+  // lock-holder and under the daemon's own umask/chmod discipline.
+  if (existsSync(sockPath)) {
+    try {
+      unlinkSync(sockPath);
+    } catch {
+      /* best-effort — may race with a crashed daemon's cleanup */
+    }
+  }
+
   const server = new IpcServer(sockPath);
-  server.on("message", (event: IpcMessageEvent) => handleMessage(event, shutdown));
+
+  // Select boot implementation. Production path uses the real
+  // bootSessionServices; tests opt into a stub via RN_DEV_DAEMON_BOOT_MODE=fake
+  // so the state machine + event fan-out can be exercised without
+  // spawning real Metro.
+  const bootFn: SessionBootFn =
+    process.env.RN_DEV_DAEMON_BOOT_MODE === "fake"
+      ? fakeBootSessionServices
+      : bootSessionServices;
+  const supervisor = new DaemonSupervisor({ worktree, ipc: server, bootFn });
+
+  server.on("message", (event: IpcMessageEvent) =>
+    handleMessage(event, supervisor, shutdown),
+  );
 
   // Gate the bind with a restrictive umask so the socket file is 0o600
   // from the first `listen()` byte. Plain chmod-after-bind leaves a
@@ -106,9 +170,14 @@ export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
     if (shuttingDown) return;
     shuttingDown = true;
     try {
-      await server.stop();
+      await supervisor.stop();
     } catch {
       /* ignore — best-effort cleanup */
+    }
+    try {
+      await server.stop();
+    } catch {
+      /* ignore */
     }
     try {
       lock.release();
@@ -135,6 +204,7 @@ export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
 
 function handleMessage(
   event: IpcMessageEvent,
+  supervisor: DaemonSupervisor,
   shutdown: () => Promise<void>,
 ): void {
   const { message, reply } = event;
@@ -162,6 +232,22 @@ function handleMessage(
       });
       return;
 
+    case "session/start":
+      void handleSessionStart(event, supervisor);
+      return;
+
+    case "session/stop":
+      void handleSessionStop(event, supervisor);
+      return;
+
+    case "session/status":
+      handleSessionStatus(event, supervisor);
+      return;
+
+    case "events/subscribe":
+      handleEventsSubscribe(event, supervisor);
+      return;
+
     default:
       reply({
         type: "response",
@@ -176,18 +262,125 @@ function handleMessage(
   }
 }
 
-function detachAndExit(worktree: string): never {
+async function handleSessionStart(
+  event: IpcMessageEvent,
+  supervisor: DaemonSupervisor,
+): Promise<void> {
+  const payloadCandidate = event.message.payload;
+  const profileCandidate =
+    payloadCandidate &&
+    typeof payloadCandidate === "object" &&
+    "profile" in payloadCandidate
+      ? (payloadCandidate as { profile: unknown }).profile
+      : undefined;
+
+  // Strict schema validation before anything downstream touches the
+  // payload — see src/daemon/profile-guard.ts for the threat model.
+  const validation = validateProfile(profileCandidate);
+  if (!validation.ok) {
+    event.reply({
+      type: "response",
+      action: "session/start",
+      id: event.message.id,
+      payload: { code: validation.code, message: validation.message },
+    });
+    return;
+  }
+
+  const result = await supervisor.start({ profile: validation.profile });
+  if (result.kind === "error") {
+    event.reply({
+      type: "response",
+      action: "session/start",
+      id: event.message.id,
+      payload: { code: result.code, message: result.message },
+    });
+    return;
+  }
+  event.reply({
+    type: "response",
+    action: "session/start",
+    id: event.message.id,
+    payload: { status: result.status },
+  });
+}
+
+async function handleSessionStop(
+  event: IpcMessageEvent,
+  supervisor: DaemonSupervisor,
+): Promise<void> {
+  const result = await supervisor.stop();
+  if (result.kind === "error") {
+    event.reply({
+      type: "response",
+      action: "session/stop",
+      id: event.message.id,
+      payload: { code: result.code, message: result.message },
+    });
+    return;
+  }
+  event.reply({
+    type: "response",
+    action: "session/stop",
+    id: event.message.id,
+    payload: { status: result.status },
+  });
+}
+
+function handleSessionStatus(
+  event: IpcMessageEvent,
+  supervisor: DaemonSupervisor,
+): void {
+  const state = supervisor.getState();
+  event.reply({
+    type: "response",
+    action: "session/status",
+    id: event.message.id,
+    payload: {
+      status: state.status,
+      services: state.services ?? {},
+    },
+  });
+}
+
+function handleEventsSubscribe(
+  event: IpcMessageEvent,
+  supervisor: DaemonSupervisor,
+): void {
+  // Confirm the subscription so the client's subscribe() promise resolves.
+  event.reply({
+    type: "response",
+    action: "events/subscribe",
+    id: event.message.id,
+    payload: { subscribed: true },
+  });
+
+  // Stream every subsequent session event on the same socket, reusing the
+  // subscription id so the client can route it back to this subscription.
+  const push = (evt: SessionEvent): void => {
+    event.reply({
+      type: "event",
+      action: "session/event",
+      id: event.message.id,
+      payload: evt,
+    });
+  };
+  const detach = supervisor.onEvent(push);
+  event.onClose(() => {
+    detach();
+  });
+}
+
+function detachAndExit(worktree: string, daemonEntryOverride?: string): never {
   // Re-invoke ourselves with --foreground so the child runs the daemon
   // loop in-process. `detached: true` + `stdio: "ignore"` gives us the
   // POSIX setsid + close-stdio shape we need; `.unref()` lets the parent
   // exit without waiting.
   //
-  // Note for Phase 13.4: Electron's `process.argv[1]` points at the
-  // packaged main.js, not the CLI entry. When `connectToDaemon()` is
-  // called from Electron main it MUST thread an explicit daemonEntry
-  // option (see spawn.ts TODO). For 13.1 the detach path is only
-  // exercised manually, so the current argv[1] resolution is enough.
-  const entry = process.argv[1];
+  // Electron's `process.argv[1]` points at the packaged main.js, not
+  // the CLI entry. The `daemonEntry` option lets Electron pass the
+  // correct path explicitly (Phase 13.4 flip).
+  const entry = daemonEntryOverride ?? process.argv[1];
   if (typeof entry !== "string" || entry.length === 0) {
     process.stderr.write(
       "rn-dev daemon: cannot detach (missing process.argv[1]); re-run with --foreground\n",

@@ -15,13 +15,21 @@ export interface ConnectToDaemonOptions {
   spawnTimeoutMs?: number;
   /** Poll cadence for the socket-appearance check. */
   pollMs?: number;
+  /**
+   * Absolute path to the CLI entry used when the daemon needs to be
+   * cold-spawned. Electron's `process.argv[1]` points at the packaged
+   * main.js, not the CLI entry, so Electron callers (Phase 13.4) MUST
+   * pass this explicitly. Omit for CLI/TUI callers — those resolve
+   * correctly from `process.argv[1]`.
+   */
+  daemonEntry?: string;
 }
 
 export async function connectToDaemon(
   worktree: string,
   opts: ConnectToDaemonOptions = {},
 ): Promise<IpcClient> {
-  const { spawnTimeoutMs = 5_000, pollMs = 100 } = opts;
+  const { spawnTimeoutMs = 5_000, pollMs = 100, daemonEntry } = opts;
 
   // Escape hatch for CI/tests and for the MCP-debug workflow where the
   // daemon was started out-of-band. Matches the `RN_DEV_DAEMON_SOCK` hook
@@ -45,7 +53,7 @@ export async function connectToDaemon(
   unlinkStale(sockPath);
   unlinkStale(pidPath);
 
-  spawnDetachedDaemon(wt);
+  spawnDetachedDaemon(wt, daemonEntry);
   await waitForSocket(sockPath, spawnTimeoutMs, pollMs);
   return new IpcClient(sockPath);
 }
@@ -70,11 +78,14 @@ export function unlinkStale(path: string): void {
   }
 }
 
-export function spawnDetachedDaemon(worktree: string): void {
-  const entry = process.argv[1];
+export function spawnDetachedDaemon(
+  worktree: string,
+  daemonEntry?: string,
+): void {
+  const entry = daemonEntry ?? process.argv[1];
   if (typeof entry !== "string" || entry.length === 0) {
     throw new Error(
-      "connectToDaemon: cannot locate CLI entry (process.argv[1] empty)",
+      "connectToDaemon: cannot locate CLI entry (pass daemonEntry option or ensure process.argv[1] is set)",
     );
   }
   if (!existsSync(entry)) {
@@ -83,9 +94,6 @@ export function spawnDetachedDaemon(worktree: string): void {
     );
   }
 
-  // Phase 13.4 TODO: Electron's process.argv[1] points at main.js, not
-  // the CLI entry. Thread an explicit `daemonEntry` option through
-  // ConnectToDaemonOptions when Electron starts calling this.
   const child = spawn(
     process.execPath,
     [entry, "daemon", worktree, "--foreground"],

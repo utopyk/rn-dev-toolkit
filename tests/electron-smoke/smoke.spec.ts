@@ -262,6 +262,89 @@ test.describe("Electron smoke", () => {
     ).toHaveCount(0);
   });
 
+  test("DevTools tab mounts without crashing", async () => {
+    handle = await launchElectron();
+    const errors: string[] = [];
+    handle.page.on("pageerror", (err) => errors.push(err.message));
+    handle.page.on("console", (msg) => {
+      if (msg.type() === "error") errors.push(msg.text());
+    });
+
+    await handle.page.getByRole("button", { name: /devtools/i }).click();
+    // The panel renders SOMETHING (network table, empty-state, or a
+    // status banner) — exact content depends on whether the fake
+    // daemon's devtools adapter has emitted any captures. The smoke
+    // contract is "no console error", which catches the class of bug
+    // Martin asks about ("does the tab actually work").
+    await handle.page.waitForTimeout(1_000);
+    expect(errors, `DevTools console errors:\n${errors.join("\n")}`).toEqual([]);
+  });
+
+  test("Metro Logs tab mounts without crashing", async () => {
+    handle = await launchElectron();
+    const errors: string[] = [];
+    handle.page.on("pageerror", (err) => errors.push(err.message));
+    handle.page.on("console", (msg) => {
+      if (msg.type() === "error") errors.push(msg.text());
+    });
+
+    await handle.page.getByRole("button", { name: /metro logs/i }).click();
+    await handle.page.waitForTimeout(1_000);
+    expect(errors, `Metro Logs console errors:\n${errors.join("\n")}`).toEqual([]);
+  });
+
+  test("Lint shortcut button does not crash the renderer", async () => {
+    handle = await launchElectron();
+    const errors: string[] = [];
+    handle.page.on("pageerror", (err) => errors.push(err.message));
+    handle.page.on("console", (msg) => {
+      if (msg.type() === "error") errors.push(msg.text());
+    });
+
+    // Sidebar shortcut "[l] Lint" runs `npx eslint .` against the
+    // active instance's worktree. Smoke assertion: clicking the
+    // button doesn't trigger a renderer crash. The lint command
+    // itself probably exits non-zero against the smoke fixture
+    // (no eslint config) — that's fine, the renderer logs the
+    // failure to the service log without unmounting.
+    await handle.page.getByRole("button", { name: /\[l\]/i }).click();
+    await handle.page.waitForTimeout(1_000);
+    expect(errors, `Lint shortcut errors:\n${errors.join("\n")}`).toEqual([]);
+  });
+
+  test("Type Check shortcut button does not crash the renderer", async () => {
+    handle = await launchElectron();
+    const errors: string[] = [];
+    handle.page.on("pageerror", (err) => errors.push(err.message));
+    handle.page.on("console", (msg) => {
+      if (msg.type() === "error") errors.push(msg.text());
+    });
+
+    await handle.page.getByRole("button", { name: /\[t\]/i }).click();
+    await handle.page.waitForTimeout(1_000);
+    expect(errors, `Type Check shortcut errors:\n${errors.join("\n")}`).toEqual([]);
+  });
+
+  test("Reload + Dev Menu shortcuts call into the daemon without crashing the renderer", async () => {
+    handle = await launchElectron();
+    const errors: string[] = [];
+    handle.page.on("pageerror", (err) => errors.push(err.message));
+    handle.page.on("console", (msg) => {
+      if (msg.type() === "error") errors.push(msg.text());
+    });
+
+    // [r] Reload → metro:reload → daemon's MetroClient.reload(). [d]
+    // Dev Menu → metro:devMenu. Under fake-boot Metro is a stub that
+    // accepts both RPCs and emits a "log" line. Smoke contract: the
+    // RPCs round-trip without crashing the renderer or surfacing a
+    // pageerror.
+    await handle.page.getByRole("button", { name: /\[r\]/i }).click();
+    await handle.page.waitForTimeout(500);
+    await handle.page.getByRole("button", { name: /\[d\]/i }).click();
+    await handle.page.waitForTimeout(500);
+    expect(errors, `Reload/DevMenu shortcut errors:\n${errors.join("\n")}`).toEqual([]);
+  });
+
   test("Settings tab fails fast with a fix-this-message when no default profile matches the current branch", async () => {
     handle = await launchElectron({ profileMismatch: true });
     await handle.page.getByRole("button", { name: /settings/i }).click();

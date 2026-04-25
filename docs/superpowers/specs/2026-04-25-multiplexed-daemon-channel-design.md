@@ -111,6 +111,7 @@ The Lean D flag is not a bad-pattern mode-switch; it's a capability declaration 
 
 ### Kinds filter
 
+- Matched against the event message's `action` field (e.g. `metro/log`, `modules/state-changed`).
 - Glob-prefix only: `"modules/*"` matches `modules/state-changed`, `modules/crashed`, `modules/failed`. No regex, no general glob.
 - Validation: each entry must be a non-empty string. Each entry must end with `/*` for prefix match, or be an exact event-kind name. Invalid → `E_SUBSCRIBE_INVALID_KINDS`.
 - Empty array `[]` → no events delivered. Legitimate use: subscribe purely as refcount holder + RPC channel. (May be useful for future MCP variants that don't need any events.)
@@ -131,8 +132,8 @@ The Lean D flag is not a bad-pattern mode-switch; it's a capability declaration 
 ### Allowlist of actions over bidirectional subscribe socket
 
 Allowed:
-- All entries in `CLIENT_RPC_ACTIONS` (`metro/*`, `devtools/*`, `builder/*`, `watcher/*`).
-- All entries in `MODULES_ACTIONS` (`modules/*`, `marketplace/*`, including `modules/bind-sender`, `modules/host-call`).
+- All entries in `CLIENT_RPC_ACTIONS` (defined in [`src/daemon/client-rpcs.ts`](../../../src/daemon/client-rpcs.ts) — `metro/*`, `devtools/*`, `builder/*`, `watcher/*`).
+- All entries in `MODULES_ACTIONS` (defined in [`src/app/modules-ipc.ts`](../../../src/app/modules-ipc.ts) — `modules/*`, `marketplace/*`, including `modules/bind-sender`, `modules/host-call`).
 - `session/stop`, `session/status`.
 
 Explicitly NOT allowed (rejected even with the flag set):
@@ -261,13 +262,13 @@ const session = await connectToDaemonSession(projectRoot, profile, {
 
 ### Profile resolution
 
-MCP needs a profile to attach. Existing MCP startup logic for default profile selection stays. Clear error if no profile is configured.
+MCP needs a profile to attach. Existing default-profile selection logic in [`src/mcp/server.ts`](../../../src/mcp/server.ts) stays. Clear error if no profile is configured.
 
 ### Tool handlers needing binding identity (host-call)
 
 Use `session.modules.bindSender(moduleId)` once per module before the first host-call. The `ModuleHostClient` adapter handles bind-sender; under the multiplexed channel, the binding sticks to the subscribe socket's `connectionId`, so subsequent host-calls through `session.client.send` succeed.
 
-Caching: MCP can cache "this moduleId is bound on this session" across tool invocations. Re-bind on session reconnect (notifyDisconnected → reconnect → re-bind).
+Caching: a `Set<moduleId>` of "bound on this session" lives on `McpContext` (one entry per moduleId, scoped to the current `DaemonSession`). Cleared on `notifyDisconnected`; re-populated lazily as tool handlers re-bind.
 
 ### Lifecycle
 

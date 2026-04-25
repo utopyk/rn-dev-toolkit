@@ -2,17 +2,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { discoverModuleContributedTools } from "../module-proxy.js";
 import type { McpContext, McpFlags, ToolResult } from "../tools.js";
 import type { IpcMessage } from "../../core/ipc.js";
+import type { DaemonSession } from "../../app/client/session.js";
 
 // ---------------------------------------------------------------------------
-// Fake IpcClient — controllable per-test
+// Fake session client — controllable per-test
 // ---------------------------------------------------------------------------
 
-function makeIpcClient(options: {
+function makeSession(options: {
   modulesListPayload?: unknown;
   callPayload?: unknown;
   rejectList?: boolean;
   rejectCall?: boolean;
-}): McpContext["ipcClient"] {
+}): DaemonSession {
   const sendSpy = vi.fn(async (msg: IpcMessage) => {
     if (msg.action === "modules/list") {
       if (options.rejectList) throw new Error("unreachable");
@@ -35,9 +36,17 @@ function makeIpcClient(options: {
     throw new Error(`unexpected action ${msg.action}`);
   });
   return {
-    send: sendSpy,
-    isServerRunning: vi.fn(async () => true),
-  } as unknown as McpContext["ipcClient"];
+    client: { send: sendSpy },
+    metro: {} as DaemonSession["metro"],
+    devtools: {} as DaemonSession["devtools"],
+    builder: {} as DaemonSession["builder"],
+    watcher: {} as DaemonSession["watcher"],
+    modules: {} as DaemonSession["modules"],
+    worktreeKey: "root",
+    disconnect: vi.fn(),
+    release: vi.fn(async () => {}),
+    stop: vi.fn(async () => {}),
+  } as unknown as DaemonSession;
 }
 
 // ---------------------------------------------------------------------------
@@ -45,7 +54,7 @@ function makeIpcClient(options: {
 // ---------------------------------------------------------------------------
 
 function makeCtx(
-  ipcClient: McpContext["ipcClient"] | null,
+  session: DaemonSession | null,
 ): McpContext {
   return {
     projectRoot: "/tmp/fake",
@@ -53,7 +62,7 @@ function makeCtx(
     artifactStore: {} as McpContext["artifactStore"],
     metro: null,
     preflightEngine: {} as McpContext["preflightEngine"],
-    ipcClient,
+    session,
   };
 }
 
@@ -97,7 +106,7 @@ const echoRow = {
 // ---------------------------------------------------------------------------
 
 describe("discoverModuleContributedTools — discovery", () => {
-  it("returns [] when no ipcClient is attached (headless mode)", async () => {
+  it("returns [] when no session is attached (headless mode)", async () => {
     const tools = await discoverModuleContributedTools(
       makeCtx(null),
       makeFlags(),
@@ -106,31 +115,31 @@ describe("discoverModuleContributedTools — discovery", () => {
   });
 
   it("returns [] when the daemon doesn't answer modules/list", async () => {
-    const ipc = makeIpcClient({ rejectList: true });
+    const session = makeSession({ rejectList: true });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags(),
     );
     expect(tools).toEqual([]);
   });
 
   it("returns one ToolDefinition per manifest tool", async () => {
-    const ipc = makeIpcClient({
+    const session = makeSession({
       modulesListPayload: { modules: [echoRow] },
     });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags(),
     );
     expect(tools.map((t) => t.name)).toEqual(["echo__ping", "echo__destroy"]);
   });
 
   it("filters modules out via disabledModules", async () => {
-    const ipc = makeIpcClient({
+    const session = makeSession({
       modulesListPayload: { modules: [echoRow] },
     });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags({ disabledModules: new Set(["echo"]) }),
     );
     expect(tools).toEqual([]);
@@ -138,11 +147,11 @@ describe("discoverModuleContributedTools — discovery", () => {
 
   it("when enabledModules is non-empty, only those ids surface", async () => {
     const other = { ...echoRow, id: "other", tools: echoRow.tools.map((t) => ({ ...t, name: t.name.replace("echo__", "other__") })) };
-    const ipc = makeIpcClient({
+    const session = makeSession({
       modulesListPayload: { modules: [echoRow, other] },
     });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags({ enabledModules: new Set(["other"]) }),
     );
     expect(tools.map((t) => t.name)).toEqual(["other__ping", "other__destroy"]);
@@ -155,12 +164,12 @@ describe("discoverModuleContributedTools — discovery", () => {
 
 describe("discoverModuleContributedTools — handler invocation", () => {
   it("proxies call result to structuredContent on success", async () => {
-    const ipc = makeIpcClient({
+    const session = makeSession({
       modulesListPayload: { modules: [echoRow] },
       callPayload: { kind: "ok", result: { pong: true, echoed: { a: 1 } } },
     });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags(),
     );
     const ping = tools.find((t) => t.name === "echo__ping");
@@ -171,7 +180,7 @@ describe("discoverModuleContributedTools — handler invocation", () => {
   });
 
   it("surfaces modules/call errors as isError with the code in structuredContent", async () => {
-    const ipc = makeIpcClient({
+    const session = makeSession({
       modulesListPayload: { modules: [echoRow] },
       callPayload: {
         kind: "error",
@@ -180,7 +189,7 @@ describe("discoverModuleContributedTools — handler invocation", () => {
       },
     });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags(),
     );
     const ping = tools.find((t) => t.name === "echo__ping")!;
@@ -196,12 +205,12 @@ describe("discoverModuleContributedTools — handler invocation", () => {
 
 describe("discoverModuleContributedTools — destructiveHint gate", () => {
   it("rejects without confirmation when neither flag nor permissionsAccepted is present", async () => {
-    const ipc = makeIpcClient({
+    const session = makeSession({
       modulesListPayload: { modules: [echoRow] },
       callPayload: { kind: "ok", result: {} },
     });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags(),
     );
     const destroy = tools.find((t) => t.name === "echo__destroy")!;
@@ -211,12 +220,12 @@ describe("discoverModuleContributedTools — destructiveHint gate", () => {
   });
 
   it("allows the call when --allow-destructive-tools is set", async () => {
-    const ipc = makeIpcClient({
+    const session = makeSession({
       modulesListPayload: { modules: [echoRow] },
       callPayload: { kind: "ok", result: { deleted: true } },
     });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags({ allowDestructiveTools: true }),
     );
     const destroy = tools.find((t) => t.name === "echo__destroy")!;
@@ -226,12 +235,12 @@ describe("discoverModuleContributedTools — destructiveHint gate", () => {
   });
 
   it("allows the call when permissionsAccepted contains the tool name", async () => {
-    const ipc = makeIpcClient({
+    const session = makeSession({
       modulesListPayload: { modules: [echoRow] },
       callPayload: { kind: "ok", result: { deleted: true } },
     });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags(),
     );
     const destroy = tools.find((t) => t.name === "echo__destroy")!;
@@ -243,28 +252,38 @@ describe("discoverModuleContributedTools — destructiveHint gate", () => {
 
   it("strips permissionsAccepted from the args sent to the subprocess", async () => {
     const sentCalls: IpcMessage[] = [];
-    const ipc = {
-      send: vi.fn(async (msg: IpcMessage) => {
-        sentCalls.push(msg);
-        if (msg.action === "modules/list") {
+    const session = {
+      client: {
+        send: vi.fn(async (msg: IpcMessage) => {
+          sentCalls.push(msg);
+          if (msg.action === "modules/list") {
+            return {
+              id: msg.id,
+              type: "response",
+              action: msg.action,
+              payload: { modules: [echoRow] },
+            };
+          }
           return {
             id: msg.id,
             type: "response",
             action: msg.action,
-            payload: { modules: [echoRow] },
+            payload: { kind: "ok", result: {} },
           };
-        }
-        return {
-          id: msg.id,
-          type: "response",
-          action: msg.action,
-          payload: { kind: "ok", result: {} },
-        };
-      }),
-      isServerRunning: vi.fn(async () => true),
-    } as unknown as McpContext["ipcClient"];
+        }),
+      },
+      metro: {} as DaemonSession["metro"],
+      devtools: {} as DaemonSession["devtools"],
+      builder: {} as DaemonSession["builder"],
+      watcher: {} as DaemonSession["watcher"],
+      modules: {} as DaemonSession["modules"],
+      worktreeKey: "root",
+      disconnect: vi.fn(),
+      release: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+    } as unknown as DaemonSession;
 
-    const tools = await discoverModuleContributedTools(makeCtx(ipc), makeFlags());
+    const tools = await discoverModuleContributedTools(makeCtx(session), makeFlags());
     const destroy = tools.find((t) => t.name === "echo__destroy")!;
     await destroy.handler({
       permissionsAccepted: ["echo__destroy"],
@@ -284,9 +303,9 @@ describe("discoverModuleContributedTools — destructiveHint gate", () => {
 
 describe("discoverModuleContributedTools — description decoration", () => {
   it("appends the untrusted-input warning to every tool description", async () => {
-    const ipc = makeIpcClient({ modulesListPayload: { modules: [echoRow] } });
+    const session = makeSession({ modulesListPayload: { modules: [echoRow] } });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags(),
     );
     for (const tool of tools) {
@@ -295,9 +314,9 @@ describe("discoverModuleContributedTools — description decoration", () => {
   });
 
   it("prepends a [destructive] marker to destructive tool descriptions", async () => {
-    const ipc = makeIpcClient({ modulesListPayload: { modules: [echoRow] } });
+    const session = makeSession({ modulesListPayload: { modules: [echoRow] } });
     const tools = await discoverModuleContributedTools(
-      makeCtx(ipc),
+      makeCtx(session),
       makeFlags(),
     );
     const destroy = tools.find((t) => t.name === "echo__destroy")!;

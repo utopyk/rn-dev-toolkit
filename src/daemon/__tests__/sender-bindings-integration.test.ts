@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, afterAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   makeTestWorktree,
   spawnTestDaemon,
@@ -7,32 +7,21 @@ import {
 import { connectToDaemonSession } from "../../app/client/session.js";
 import type { Profile } from "../../core/types.js";
 
-// Phase 13.5 PR-D — end-to-end gate behavior.
+// Phase 13.6 PR-C — end-to-end gate behavior.
 //
-// Gate is default-off (controlled by `RN_DEV_HOSTCALL_BIND_GATE=1`)
-// because every existing production caller of `modules/host-call`
-// uses `IpcClient.send()` (fresh socket per call), and enforcing the
-// gate by default would break Electron's host-call bridge entirely.
-// PR-C will land the long-lived RPC channel that makes bind-sender
-// usable; the gate's default flips at that point.
+// Gate is default-ON. The env flag stays as an emergency off-switch
+// (`RN_DEV_HOSTCALL_BIND_GATE=0` to disable). Production callers
+// (Electron, MCP) ride a long-lived multiplexed subscribe socket
+// (connectToDaemonSession), so bind-sender and host-call share
+// connectionId.
 //
-// These tests opt the gate IN via env var so the binding behavior is
-// pinned. Tests that don't need the gate (bind-sender malformed,
-// per-socket-binding semantics) leave it on and exercise the path
-// directly.
+// These tests pin both behaviors: tests that need the gate ON leave
+// the env unset (default); the test that pins the gate-OFF semantic
+// sets RN_DEV_HOSTCALL_BIND_GATE=0 explicitly.
 
 describe("modules/bind-sender + host-call gate (integration)", () => {
   const cleanups: Array<() => void> = [];
   const liveHandles: TestDaemonHandle[] = [];
-  const prevGate = process.env.RN_DEV_HOSTCALL_BIND_GATE;
-
-  beforeAll(() => {
-    process.env.RN_DEV_HOSTCALL_BIND_GATE = "1";
-  });
-  afterAll(() => {
-    if (prevGate === undefined) delete process.env.RN_DEV_HOSTCALL_BIND_GATE;
-    else process.env.RN_DEV_HOSTCALL_BIND_GATE = prevGate;
-  });
 
   afterEach(async () => {
     for (const h of liveHandles.splice(0)) {
@@ -68,14 +57,9 @@ describe("modules/bind-sender + host-call gate (integration)", () => {
   }> {
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
-    // Pass the gate env var to the daemon process explicitly — the
-    // beforeAll above only sets it in the test process. spawnTestDaemon
-    // forwards process.env, so it does carry over, but be explicit.
+    // Gate is default-ON; no explicit env flag needed.
     const daemon = await spawnTestDaemon(worktree, {
-      env: {
-        RN_DEV_DAEMON_BOOT_MODE: "fake",
-        RN_DEV_HOSTCALL_BIND_GATE: "1",
-      },
+      env: { RN_DEV_DAEMON_BOOT_MODE: "fake" },
     });
     liveHandles.push(daemon);
     const session = await connectToDaemonSession(worktree, fakeProfile(worktree));
@@ -176,7 +160,7 @@ describe("modules/bind-sender + host-call gate (integration)", () => {
   }, 15_000);
 });
 
-describe("modules/host-call gate is default-off (no env flag)", () => {
+describe("modules/host-call gate explicitly disabled (RN_DEV_HOSTCALL_BIND_GATE=0)", () => {
   const cleanups: Array<() => void> = [];
   const liveHandles: TestDaemonHandle[] = [];
 
@@ -189,16 +173,18 @@ describe("modules/host-call gate is default-off (no env flag)", () => {
     }
   });
 
-  it("host-call without bind-sender succeeds when RN_DEV_HOSTCALL_BIND_GATE is unset", async () => {
-    // This is the load-bearing test: the gate must not break
-    // existing Electron callers. Until PR-C lands the long-lived
-    // RPC channel, the gate is default-off so production keeps
-    // working unchanged.
+  it("host-call without bind-sender succeeds when gate is explicitly off", async () => {
+    // Pins the gate-OFF semantic: when an operator sets
+    // RN_DEV_HOSTCALL_BIND_GATE=0, host-call proceeds without a
+    // prior bind-sender. This is the emergency off-switch path.
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
-    // Explicitly do NOT set RN_DEV_HOSTCALL_BIND_GATE.
+    // Explicitly disable the gate via env flag.
     const daemon = await spawnTestDaemon(worktree, {
-      env: { RN_DEV_DAEMON_BOOT_MODE: "fake" },
+      env: {
+        RN_DEV_DAEMON_BOOT_MODE: "fake",
+        RN_DEV_HOSTCALL_BIND_GATE: "0",
+      },
     });
     liveHandles.push(daemon);
     await connectToDaemonSession(worktree, {
@@ -230,9 +216,9 @@ describe("modules/host-call gate is default-off (no env flag)", () => {
     });
 
     // dev-space registers a `log` capability under fake-boot, so the
-    // call resolves to a real capability. The gate doesn't deny.
-    // Either we get { kind: "ok" } or some other unrelated error,
-    // but NOT MODULE_UNAVAILABLE-with-binding-message.
+    // call resolves to a real capability. With the gate disabled, the
+    // binding check is skipped — either we get { kind: "ok" } or some
+    // other unrelated error, but NOT MODULE_UNAVAILABLE-with-binding-message.
     const p = resp.payload as { kind?: string; code?: string; message?: string };
     if (p.kind === "error") {
       // If host-call errors for an unrelated reason (capability not

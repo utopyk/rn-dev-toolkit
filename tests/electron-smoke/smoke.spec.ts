@@ -110,10 +110,21 @@ async function launchElectron(opts: LaunchOptions = {}): Promise<ElectronHandle>
     ),
   );
 
+  // Each test gets its own Electron user-data-dir inside the same
+  // tmpRoot so localStorage (e.g. rndev.sidebarCollapsed) never
+  // bleeds from one test run into the next. Without this, a single
+  // session where the sidebar was collapsed would make every subsequent
+  // test fail to locate sidebar nav buttons by accessible name.
+  const userDataDir = join(tmpRoot, ".electron-user-data");
+  mkdirSync(userDataDir, { recursive: true });
+
   const app = await electron.launch({
     // Use the same launcher script `npm run dev:electron` uses — it
     // registers tsx for TypeScript support before loading main.ts.
-    args: [join(REPO_ROOT, "electron", "launcher.cjs")],
+    args: [
+      join(REPO_ROOT, "electron", "launcher.cjs"),
+      `--user-data-dir=${userDataDir}`,
+    ],
     cwd: tmpRoot,
     // Pipe both Electron main + spawned daemon stderr so failures in
     // CI surface the actual error (handler timeouts, daemon spawn
@@ -158,8 +169,13 @@ async function launchWithoutProfile(tmpRoot: string): Promise<ElectronHandle> {
   // 30s on awaitModulesClient; now main.ts calls
   // serviceBus.abortModulesClient with a fix-this-message that
   // surfaces verbatim in the renderer.
+  const userDataDir = join(tmpRoot, ".electron-user-data");
+  mkdirSync(userDataDir, { recursive: true });
   const app = await electron.launch({
-    args: [join(REPO_ROOT, "electron", "launcher.cjs")],
+    args: [
+      join(REPO_ROOT, "electron", "launcher.cjs"),
+      `--user-data-dir=${userDataDir}`,
+    ],
     cwd: tmpRoot,
     stderr: "pipe",
     stdout: "pipe",

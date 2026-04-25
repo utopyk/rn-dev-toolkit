@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { createToolDefinitions } from "../tools.js";
 import type { McpContext, ToolResult } from "../tools.js";
 import type { IpcMessage } from "../../core/ipc.js";
+import type { DaemonSession } from "../../app/client/session.js";
 
 // ---------------------------------------------------------------------------
 // Mock context factory
@@ -35,26 +36,36 @@ function makeMockContext(overrides: Partial<McpContext> = {}): McpContext {
       runAll: vi.fn(async () => new Map()),
       fix: vi.fn(async () => false),
     } as unknown as McpContext["preflightEngine"],
-    ipcClient: null,
+    session: null,
     ...overrides,
   };
 }
 
-function makeMockIpcClient(
+function makeMockSession(
   respond: (action: string, payload?: unknown) => unknown | Promise<unknown>
-): McpContext["ipcClient"] {
+): DaemonSession {
   return {
-    send: vi.fn(async (msg: IpcMessage) => {
-      const payload = await respond(msg.action, msg.payload);
-      return {
-        type: "response",
-        action: msg.action,
-        id: msg.id,
-        payload,
-      } satisfies IpcMessage;
-    }),
-    isServerRunning: vi.fn(async () => true),
-  } as unknown as McpContext["ipcClient"];
+    client: {
+      send: vi.fn(async (msg: IpcMessage) => {
+        const payload = await respond(msg.action, msg.payload);
+        return {
+          type: "response",
+          action: msg.action,
+          id: msg.id,
+          payload,
+        } satisfies IpcMessage;
+      }),
+    },
+    metro: {} as DaemonSession["metro"],
+    devtools: {} as DaemonSession["devtools"],
+    builder: {} as DaemonSession["builder"],
+    watcher: {} as DaemonSession["watcher"],
+    modules: {} as DaemonSession["modules"],
+    worktreeKey: "root",
+    disconnect: vi.fn(),
+    release: vi.fn(async () => {}),
+    stop: vi.fn(async () => {}),
+  } as unknown as DaemonSession;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +278,7 @@ describe("createToolDefinitions()", () => {
       ],
     };
 
-    it("returns no-session error when ipc client is null", async () => {
+    it("returns no-session error when session is null", async () => {
       const ctx = makeMockContext();
       const tools = createToolDefinitions(ctx);
       const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
@@ -279,7 +290,7 @@ describe("createToolDefinitions()", () => {
 
     it("proxies marketplace/list and returns { entries, registryUrl, registrySha256 }", async () => {
       const ctx = makeMockContext({
-        ipcClient: makeMockIpcClient((action) => {
+        session: makeMockSession((action) => {
           expect(action).toBe("marketplace/list");
           return marketplacePayload;
         }),
@@ -310,7 +321,7 @@ describe("createToolDefinitions()", () => {
 
     it("filter narrows by id + description substring (case-insensitive)", async () => {
       const ctx = makeMockContext({
-        ipcClient: makeMockIpcClient(() => marketplacePayload),
+        session: makeMockSession(() => marketplacePayload),
       });
       const tools = createToolDefinitions(ctx);
       const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
@@ -325,7 +336,7 @@ describe("createToolDefinitions()", () => {
 
     it("installedOnly hides installable-but-not-installed entries", async () => {
       const ctx = makeMockContext({
-        ipcClient: makeMockIpcClient(() => marketplacePayload),
+        session: makeMockSession(() => marketplacePayload),
       });
       const tools = createToolDefinitions(ctx);
       const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
@@ -361,7 +372,7 @@ describe("createToolDefinitions()", () => {
         ],
       };
       const ctx = makeMockContext({
-        ipcClient: makeMockIpcClient(() => withMetroLogs),
+        session: makeMockSession(() => withMetroLogs),
       });
       const tools = createToolDefinitions(ctx);
       const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
@@ -394,7 +405,7 @@ describe("createToolDefinitions()", () => {
         ],
       };
       const ctx = makeMockContext({
-        ipcClient: makeMockIpcClient(() => malformed),
+        session: makeMockSession(() => malformed),
       });
       const tools = createToolDefinitions(ctx);
       const tool = tools.find((t) => t.name === "rn-dev/modules-available")!;
@@ -408,7 +419,7 @@ describe("createToolDefinitions()", () => {
 
     it("propagates registry errors as isError results", async () => {
       const ctx = makeMockContext({
-        ipcClient: makeMockIpcClient(() => ({
+        session: makeMockSession(() => ({
           kind: "error",
           code: "E_REGISTRY_FETCH_FAILED",
           message: "network is down",

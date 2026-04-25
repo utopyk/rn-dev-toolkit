@@ -4,8 +4,8 @@
 // TUI consumer needs them.
 
 import { EventEmitter } from "node:events";
-import type { IpcClient } from "../../core/ipc.js";
 import type { AdapterSink, WatcherEventKind } from "./adapter-sink.js";
+import type { IpcSender } from "./session.js";
 
 export interface WatcherClientEvents {
   "action-complete": (evt: {
@@ -26,7 +26,7 @@ export class WatcherClient
   implements AdapterSink<WatcherEventKind>
 {
   constructor(
-    private client: IpcClient,
+    private client: IpcSender,
     private nextId: () => string,
   ) {
     super();

@@ -12,7 +12,7 @@ import { splitNamespacedToolName } from "./tool-namespacer.js";
  * `ToolDefinition[]` wired to the `modules/call` IPC action.
  *
  * Returns `[]` (silently) when:
- *   - no `ipcClient` is attached (headless MCP mode with no daemon), or
+ *   - no `session` is attached (headless MCP mode with no daemon), or
  *   - the daemon doesn't respond, or
  *   - the response payload is malformed.
  *
@@ -28,11 +28,11 @@ export async function discoverModuleContributedTools(
   ctx: McpContext,
   flags: McpFlags,
 ): Promise<ToolDefinition[]> {
-  if (!ctx.ipcClient) return [];
+  if (!ctx.session) return [];
 
   let rows: RegisteredModuleRow[];
   try {
-    const resp = await ctx.ipcClient.send(makeIpcMessage("modules/list", {}));
+    const resp = await ctx.session.client.send(makeIpcMessage("modules/list", {}));
     rows = extractRows(resp.payload);
   } catch {
     return [];
@@ -85,11 +85,11 @@ function buildProxyToolDefinition(
         }
       }
 
-      if (!ctx.ipcClient) {
+      if (!ctx.session) {
         return moduleUnavailableError(row.id, "no daemon running");
       }
 
-      const resp = await ctx.ipcClient.send(
+      const resp = await ctx.session.client.send(
         makeIpcMessage("modules/call", {
           moduleId: row.id,
           scopeUnit: row.scopeUnit,

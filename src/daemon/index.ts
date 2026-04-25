@@ -16,6 +16,11 @@ import { validateProfile } from "./profile-guard.js";
 import type { SessionEvent } from "./session.js";
 import { handleClientRpc, isClientRpcAction } from "./client-rpcs.js";
 import { MODULES_ACTIONS } from "../app/modules-ipc.js";
+import {
+  SubscribeRegistry,
+  parseKinds,
+  matchesKindFilter,
+} from "./subscribe-registry.js";
 
 // ---------------------------------------------------------------------------
 // Daemon entry for `rn-dev daemon <worktree>`.
@@ -45,6 +50,36 @@ import { MODULES_ACTIONS } from "../app/modules-ipc.js";
 // grow a shared version constant that both can import, retire the literal.
 const DAEMON_VERSION = "0.1.0";
 const HOST_RANGE = ">=0.1.0";
+
+// Phase 13.6 PR-C — actions always permitted on a subscribe socket,
+// even without `supportsBidirectionalRpc`. Pre-dispatch check in
+// handleMessage uses this set. Declared at module scope so it is
+// allocated once, not reconstructed on every message.
+const SUBSCRIBE_ALWAYS_ALLOWED = new Set<string>([
+  "events/subscribe", // re-subscribe: rejected separately in Task 1.5,
+  //                     but this gate must skip it so the re-subscribe
+  //                     path runs and replies.
+  "daemon/ping",
+  // daemon/shutdown is intentionally NOT in SUBSCRIBE_ALWAYS_ALLOWED —
+  // see SUBSCRIBE_NEVER_ALLOWED below. Allowing it here would bypass
+  // the never-allow guard and let subscribe sockets issue shutdown.
+]);
+
+// P1-7 — actions NEVER permitted on ANY subscribe socket, including
+// bidirectional ones. Single declarative source of truth. The pre-dispatch
+// guard in handleMessage checks this before the bidirectional gate, so both
+// gated (bidirectional) and ungated (non-bidirectional) subscribe sockets
+// are covered without per-case rejection branches in the switch.
+//
+// daemon/shutdown: a subscribe socket is a long-lived fan-out channel; it
+//   must not be able to nuke the daemon — the risk of an accidental or
+//   malicious shutdown is too high. Plain RPC connections can still call it.
+// session/start: pre-Phase-13.5 back-compat path; subscribe sockets
+//   boot via events/subscribe+profile instead.
+const SUBSCRIBE_NEVER_ALLOWED = new Set<string>([
+  "daemon/shutdown",
+  "session/start",
+]);
 
 export interface RunDaemonOptions {
   worktree: string;
@@ -145,10 +180,11 @@ export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
     process.env.RN_DEV_DAEMON_BOOT_MODE === "fake"
       ? fakeBootSessionServices
       : bootSessionServices;
-  const supervisor = new DaemonSupervisor({ worktree, ipc: server, bootFn });
+  const subscribeRegistry = new SubscribeRegistry();
+  const supervisor = new DaemonSupervisor({ worktree, ipc: server, bootFn, subscribeRegistry });
 
   server.on("message", (event: IpcMessageEvent) =>
-    handleMessage(event, supervisor, shutdown),
+    handleMessage(event, supervisor, subscribeRegistry, shutdown),
   );
 
   // Gate the bind with a restrictive umask so the socket file is 0o600
@@ -234,9 +270,56 @@ export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
 function handleMessage(
   event: IpcMessageEvent,
   supervisor: DaemonSupervisor,
+  subscribeRegistry: SubscribeRegistry,
   shutdown: () => Promise<void>,
 ): void {
   const { message, reply } = event;
+
+  // P1-7 — single declarative source of truth for subscribe-socket
+  // authorization. Two tiers of pre-dispatch enforcement; the switch
+  // cases themselves do NOT contain per-action rejection branches for
+  // subscribe sockets — all such rejections happen here.
+  //
+  // Tier 1: SUBSCRIBE_NEVER_ALLOWED — blocked on ALL subscribe sockets,
+  // including bidirectional ones. Checked before the bidirectional gate
+  // so both tiers of subscribers are covered.
+  if (
+    subscribeRegistry.has(event.connectionId) &&
+    SUBSCRIBE_NEVER_ALLOWED.has(message.action)
+  ) {
+    reply({
+      type: "response",
+      action: message.action,
+      id: message.id,
+      payload: {
+        code: "E_RPC_NOT_AUTHORIZED",
+        message: `action "${message.action}" is not allowed on a subscribe socket`,
+      },
+    });
+    return;
+  }
+
+  // Tier 2: bidirectional flag enforcement. A connection registered as a
+  // subscribe socket without supportsBidirectionalRpc can only call the
+  // always-allowed admin/re-subscribe set. Fresh-socket sends (not in
+  // subscribeRegistry) bypass this gate entirely.
+  if (
+    subscribeRegistry.has(event.connectionId) &&
+    !subscribeRegistry.isBidirectional(event.connectionId) &&
+    !SUBSCRIBE_ALWAYS_ALLOWED.has(message.action)
+  ) {
+    reply({
+      type: "response",
+      action: message.action,
+      id: message.id,
+      payload: {
+        code: "E_RPC_NOT_AUTHORIZED",
+        message: `action "${message.action}" requires supportsBidirectionalRpc on this subscribe socket`,
+      },
+    });
+    return;
+  }
+
   switch (message.action) {
     case "daemon/ping":
       reply({
@@ -248,6 +331,8 @@ function handleMessage(
       return;
 
     case "daemon/shutdown":
+      // Subscribe-socket rejection is handled pre-dispatch by
+      // SUBSCRIBE_NEVER_ALLOWED — no per-case check needed here.
       reply({
         type: "response",
         action: "daemon/shutdown",
@@ -261,9 +346,12 @@ function handleMessage(
       });
       return;
 
-    case "session/start":
+    case "session/start": {
+      // Subscribe-socket rejection is handled pre-dispatch by
+      // SUBSCRIBE_NEVER_ALLOWED — no per-case check needed here.
       void handleSessionStart(event, supervisor);
       return;
+    }
 
     case "session/stop":
       void handleSessionStop(event, supervisor);
@@ -274,7 +362,7 @@ function handleMessage(
       return;
 
     case "events/subscribe":
-      void handleEventsSubscribe(event, supervisor);
+      void handleEventsSubscribe(event, supervisor, subscribeRegistry);
       return;
 
     default:
@@ -423,27 +511,60 @@ function handleSessionStatus(
 async function handleEventsSubscribe(
   event: IpcMessageEvent,
   supervisor: DaemonSupervisor,
+  subscribeRegistry: SubscribeRegistry,
 ): Promise<void> {
-  // Phase 13.5 — events/subscribe is the canonical attacher path.
+  // Phase 13.6 — events/subscribe is the canonical attacher path.
   // Payload MUST carry a `profile`: it boots the session if stopped,
   // joins if running with matching profile, rejects on mismatch. The
   // connection's id is added to supervisor.attachedConnections; the
   // socket close auto-releases.
   //
-  // Listener-only subscribe (no profile) was retired pre-merge — the
-  // refcount invariant "every booted session has at least one
-  // attacher" can't hold otherwise.
+  // New in Phase 13.6: optional `kinds` filter (validated by
+  // parseKinds) gates per-event delivery; optional
+  // `supportsBidirectionalRpc` declares that the subscribe socket
+  // may also carry RPC requests (Task 1.4 enforces this).
   //
   // Listener registration ordering: register the supervisor.onEvent
   // listener BEFORE awaiting attach(). bootAsync's "running" edge
   // can fire on the same microtask drain that resolves attach(), and
   // a listener attached after the await would miss it.
-  const payload = event.message.payload as
-    | { profile?: unknown }
-    | null
-    | undefined;
+  // Reject re-subscribe on an already-subscribed socket.
+  if (subscribeRegistry.has(event.connectionId)) {
+    event.reply({
+      type: "response",
+      action: "events/subscribe",
+      id: event.message.id,
+      payload: {
+        code: "E_RPC_NOT_AUTHORIZED",
+        message:
+          "this connection is already subscribed; close and reopen to re-subscribe",
+      },
+    });
+    return;
+  }
+
+  // P1-3: runtime parser — replace the raw `as` cast with a typed guard.
+  // Mirrors parseSessionEventEnvelope + parseSubscribeResponse discipline
+  // from Phase 13.5 (Kieran P1-3 on PR #17).
+  const payload = parseSubscribePayload(event.message.payload);
+
+  // Parse kinds first — invalid kinds aborts before any side effects.
+  const kindsResult = parseKinds(payload.kinds);
+  if (!kindsResult.ok) {
+    event.reply({
+      type: "response",
+      action: "events/subscribe",
+      id: event.message.id,
+      payload: { code: kindsResult.code, message: kindsResult.message },
+    });
+    return;
+  }
+  const kindFilter = kindsResult.kinds;
+
+  const bidirectional = payload.supportsBidirectionalRpc === true;
 
   const push = (evt: SessionEvent): void => {
+    if (!matchesKindFilter(kindFilter, evt.kind)) return;
     event.reply({
       type: "event",
       action: "session/event",
@@ -452,9 +573,17 @@ async function handleEventsSubscribe(
     });
   };
   const detach = supervisor.onEvent(push);
+
+  // Register before any await, so socket-close cleanup always
+  // matches a registered entry.
+  subscribeRegistry.register(event.connectionId, {
+    bidirectional,
+  });
+
   const subscribeConnId = event.connectionId;
   event.onClose(() => {
     detach();
+    subscribeRegistry.clearConnection(subscribeConnId);
     void supervisor.release(subscribeConnId);
   });
 
@@ -463,7 +592,7 @@ async function handleEventsSubscribe(
   // No refcount; the connection just receives the event stream until
   // the socket closes. Phase 13.6 may delete this branch after
   // migrating the last session-boot.test.ts callers.
-  if (!payload || payload.profile === undefined) {
+  if (payload.profile === undefined) {
     event.reply({
       type: "response",
       action: "events/subscribe",
@@ -475,6 +604,7 @@ async function handleEventsSubscribe(
   const validation = validateProfile(payload.profile);
   if (!validation.ok) {
     detach();
+    subscribeRegistry.clearConnection(event.connectionId);
     event.reply({
       type: "response",
       action: "events/subscribe",
@@ -488,6 +618,7 @@ async function handleEventsSubscribe(
   });
   if (attachResult.kind === "error") {
     detach();
+    subscribeRegistry.clearConnection(event.connectionId);
     event.reply({
       type: "response",
       action: "events/subscribe",
@@ -510,6 +641,33 @@ async function handleEventsSubscribe(
       attached: attachResult.attached,
     },
   });
+}
+
+/**
+ * P1-3 — runtime parser for the events/subscribe wire payload. Mirrors the
+ * `parseSessionEventEnvelope` / `parseSubscribeResponse` discipline established
+ * in Phase 13.5 (Kieran P1-3 on PR #17). Replaces the raw `as { profile?:
+ * unknown; … }` cast in `handleEventsSubscribe` with an explicit narrowing
+ * that drops unrecognised fields instead of forwarding them unchecked.
+ *
+ * Returns a safe default (`{ profile: undefined, kinds: undefined,
+ * supportsBidirectionalRpc: false }`) when the payload is absent or malformed,
+ * so every callsite can assume the return type is always fully initialised.
+ */
+function parseSubscribePayload(raw: unknown): {
+  profile: unknown;
+  kinds: unknown;
+  supportsBidirectionalRpc: boolean;
+} {
+  if (!raw || typeof raw !== "object") {
+    return { profile: undefined, kinds: undefined, supportsBidirectionalRpc: false };
+  }
+  const p = raw as Record<string, unknown>;
+  return {
+    profile: "profile" in p ? p.profile : undefined,
+    kinds: "kinds" in p ? p.kinds : undefined,
+    supportsBidirectionalRpc: p.supportsBidirectionalRpc === true,
+  };
 }
 
 function detachAndExit(worktree: string, daemonEntryOverride?: string): never {

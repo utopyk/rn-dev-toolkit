@@ -84,6 +84,7 @@ export function Sidebar({
           <button
             key={mod.id}
             className={`sidebar-item sidebar-module${activeTab === mod.id ? ' active' : ''}`}
+            aria-label={mod.label}
             onClick={() => onTabChange(mod.id)}
           >
             <span className="sidebar-module-icon"><ModuleIcon hint={mod.hint} size={18} /></span>
@@ -99,6 +100,7 @@ export function Sidebar({
             <button
               key={panel.id}
               className={`sidebar-item sidebar-module${activeTab === panel.id ? ' active' : ''}`}
+              aria-label={panel.title}
               onClick={() => onTabChange(panel.id)}
             >
               <span className="sidebar-module-icon"><ModuleIcon hint={panel.icon} size={18} /></span>

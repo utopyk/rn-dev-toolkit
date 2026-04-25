@@ -65,6 +65,15 @@ export interface BootSessionServicesOptions {
    * on the same wire the daemon already listens on.
    */
   ipc: IpcServer;
+  /**
+   * Phase 13.6 PR-C P0-1 — bidirectional-gate enforcement. The daemon
+   * passes its `SubscribeRegistry` here so `registerModulesIpc` can
+   * guard `modules/host-call` and `modules/bind-sender` against
+   * non-bidirectional subscribe-socket senders. The TUI path omits it
+   * (the TUI socket is not multiplexed — every send is a fresh RPC
+   * socket, not a subscribe socket, so there is nothing to gate).
+   */
+  subscribeRegistry?: import("../../daemon/subscribe-registry.js").SubscribeRegistry;
 }
 
 export interface SessionServices {
@@ -326,6 +335,7 @@ export async function bootSessionServices(
   const modulesIpc = registerModulesIpc(ipc, {
     manager: moduleHost,
     registry: moduleRegistry,
+    subscribeRegistry: opts.subscribeRegistry,
   });
 
   emit("\u2714 All services started");

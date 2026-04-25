@@ -55,6 +55,31 @@ export function registerModulesPanelsIpc(
     return deps;
   };
 
+  // Phase 13.6 PR-C P0-2 — bind-on-first-use for the gate-on default.
+  // The daemon now requires modules/bind-sender before modules/host-call can
+  // succeed (gate default-on). All adapter calls run through the same
+  // multiplexed subscribe-socket so bind-sender and host-call share the same
+  // connectionId — one bind per (modulesClient instance, moduleId) is enough.
+  // The set is cleared when the daemon disconnects (modulesClient emits
+  // "disconnected") so a reconnect starts fresh and re-binds automatically.
+  const boundModuleIds = new Set<string>();
+  let disconnectListenerAttached = false;
+  const clearBoundModules = (): void => {
+    boundModuleIds.clear();
+    disconnectListenerAttached = false;
+  };
+
+  const ensureBound = async (deps: ModulesPanelsIpcDeps, moduleId: string): Promise<void> => {
+    // Attach the disconnect-cleanup listener once per modulesClient instance.
+    if (!disconnectListenerAttached) {
+      disconnectListenerAttached = true;
+      deps.modulesClient.once("disconnected", clearBoundModules);
+    }
+    if (boundModuleIds.has(moduleId)) return;
+    await deps.modulesClient.bindSender(moduleId);
+    boundModuleIds.add(moduleId);
+  };
+
   ipcMain.handle("modules:list-panels", async () => {
     try {
       const deps = await resolveDeps();
@@ -242,6 +267,20 @@ export function registerModulesPanelsIpc(
           kind: "error" as const,
           code: "MODULE_UNAVAILABLE" as const,
           message: "modules:host-call rejected: sender is not bound to the requested module",
+        };
+      }
+      // Phase 13.6 PR-C P0-2 — bind-on-first-use. The daemon gate is
+      // default-on; issue modules/bind-sender on the shared subscribe socket
+      // before the first host-call for each moduleId so bind + call share
+      // the same connectionId. Idempotent — subsequent calls for the same
+      // moduleId skip the bind RPC.
+      try {
+        await ensureBound(deps, payload.moduleId);
+      } catch (err) {
+        return {
+          kind: "error" as const,
+          code: "MODULE_UNAVAILABLE" as const,
+          message: `modules:host-call bind failed: ${err instanceof Error ? err.message : String(err)}`,
         };
       }
       return deps.modulesClient.hostCall({

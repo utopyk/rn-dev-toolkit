@@ -44,6 +44,12 @@ export interface DaemonSupervisorOptions {
   ipc: IpcServer;
   /** Pluggable boot function. Production uses `bootSessionServices`; tests inject a fake. */
   bootFn: SessionBootFn;
+  /**
+   * Phase 13.6 PR-C P0-1 — passed through to `BootSessionServicesOptions`
+   * so `registerModulesIpc` can close the bidirectional gate bypass on
+   * `modules/host-call` and `modules/bind-sender`.
+   */
+  subscribeRegistry?: import("../daemon/subscribe-registry.js").SubscribeRegistry;
 }
 
 export interface StartSessionOptions {
@@ -98,6 +104,7 @@ export class DaemonSupervisor extends EventEmitter {
   private readonly worktree: string;
   private readonly ipc: IpcServer;
   private readonly bootFn: SessionBootFn;
+  private readonly subscribeRegistry: import("../daemon/subscribe-registry.js").SubscribeRegistry | undefined;
   private state: SessionState = INITIAL_SESSION_STATE;
   /** Populated while the session is running; null in stopped/starting. */
   private wired: WiredServices | null = null;
@@ -134,6 +141,7 @@ export class DaemonSupervisor extends EventEmitter {
     this.worktree = opts.worktree;
     this.ipc = opts.ipc;
     this.bootFn = opts.bootFn;
+    this.subscribeRegistry = opts.subscribeRegistry;
     this.sessionWorktreeKey = this.worktree;
   }
 
@@ -429,6 +437,7 @@ export class DaemonSupervisor extends EventEmitter {
       emit,
       hostVersion,
       ipc: this.ipc,
+      subscribeRegistry: this.subscribeRegistry,
     });
 
     // Epoch gate — if start/stop has advanced the counter since we

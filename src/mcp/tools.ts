@@ -5,7 +5,8 @@ import type { ProfileStore } from "../core/profile.js";
 import type { ArtifactStore } from "../core/artifact.js";
 import type { MetroManager } from "../core/metro.js";
 import type { PreflightEngine } from "../core/preflight.js";
-import type { IpcClient, IpcMessage } from "../core/ipc.js";
+import type { IpcMessage } from "../core/ipc.js";
+import type { DaemonSession } from "../app/client/session.js";
 import type { Platform } from "../core/types.js";
 import { listDevices, bootDevice } from "../core/device.js";
 import { getWorktrees } from "../core/project.js";
@@ -48,7 +49,14 @@ export interface McpContext {
   artifactStore: ArtifactStore;
   metro: MetroManager | null;
   preflightEngine: PreflightEngine;
-  ipcClient: IpcClient | null;
+  /**
+   * Phase 13.6 PR-C — replaced raw `IpcClient` with the multiplexed
+   * DaemonSession. `session.client.send` rides the long-lived
+   * subscribe socket, preserving connectionId for bind-sender +
+   * host-call. `null` when MCP starts before a daemon exists or after
+   * the daemon connection drops.
+   */
+  session: DaemonSession | null;
   /** Optional — older call sites pre-date the flag system; default OFF. */
   flags?: McpFlags;
 }
@@ -185,9 +193,9 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         },
       },
       handler: async (args) => {
-        if (ctx.ipcClient) {
+        if (ctx.session) {
           try {
-            const resp = await ctx.ipcClient.send(
+            const resp = await ctx.session.client.send(
               makeIpcMessage("start-session", args)
             );
             return resp.payload ?? { status: "started" };
@@ -227,9 +235,9 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         },
       },
       handler: async (args) => {
-        if (ctx.ipcClient) {
+        if (ctx.session) {
           try {
-            const resp = await ctx.ipcClient.send(
+            const resp = await ctx.session.client.send(
               makeIpcMessage("stop-session", args)
             );
             return resp.payload ?? { status: "stopped" };
@@ -251,9 +259,9 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       description: "List all active development sessions",
       inputSchema: { type: "object", properties: {} },
       handler: async () => {
-        if (ctx.ipcClient) {
+        if (ctx.session) {
           try {
-            const resp = await ctx.ipcClient.send(
+            const resp = await ctx.session.client.send(
               makeIpcMessage("list-sessions")
             );
             return resp.payload ?? [];
@@ -279,9 +287,9 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       description: "Reload the running app",
       inputSchema: { type: "object", properties: {} },
       handler: async () => {
-        if (ctx.ipcClient) {
+        if (ctx.session) {
           try {
-            const resp = await ctx.ipcClient.send(
+            const resp = await ctx.session.client.send(
               makeIpcMessage("reload")
             );
             return resp.payload ?? { status: "reloaded" };
@@ -321,9 +329,9 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       description: "Open device developer menu",
       inputSchema: { type: "object", properties: {} },
       handler: async () => {
-        if (ctx.ipcClient) {
+        if (ctx.session) {
           try {
-            const resp = await ctx.ipcClient.send(
+            const resp = await ctx.session.client.send(
               makeIpcMessage("dev-menu")
             );
             return resp.payload ?? { status: "opened" };
@@ -360,9 +368,9 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
             }));
           }
         }
-        if (ctx.ipcClient) {
+        if (ctx.session) {
           try {
-            const resp = await ctx.ipcClient.send(
+            const resp = await ctx.session.client.send(
               makeIpcMessage("metro-status")
             );
             return resp.payload ?? { status: "unknown" };
@@ -736,8 +744,8 @@ function ipcAction(
   action: string,
   payload?: unknown
 ): Promise<IpcMessage | null> {
-  if (!ctx.ipcClient) return Promise.resolve(null);
-  return ctx.ipcClient
+  if (!ctx.session) return Promise.resolve(null);
+  return ctx.session.client
     .send({
       type: "command",
       action,

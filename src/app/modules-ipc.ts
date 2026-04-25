@@ -31,6 +31,7 @@ import type { IpcMessage, IpcServer, IpcMessageEvent } from "../core/ipc.js";
 import type {
   ModuleHostManager,
 } from "../core/module-host/manager.js";
+import type { SubscribeRegistry } from "../daemon/subscribe-registry.js";
 import {
   ModuleRegistry,
   type RegisteredModule,
@@ -107,11 +108,20 @@ export interface ModulesIpcOptions {
    * Phase 13.5 — per-connection sender-binding table. Always present
    * once `registerModulesIpc` runs. Tests that exercise the
    * dispatcher directly omit it; the host-call gate is gated on
-   * `RN_DEV_HOSTCALL_BIND_GATE` env flag (default off until PR-C
-   * lands the long-lived RPC channel that makes bind-sender usable
-   * from production callers).
+   * `RN_DEV_HOSTCALL_BIND_GATE` env flag.
    */
   senderBindings?: SenderBindings;
+  /**
+   * Phase 13.6 PR-C — bidirectional-gate enforcement inside the modules-ipc
+   * listener. When set, the listener applies the same gate check that
+   * `handleMessage` in `src/daemon/index.ts` does: non-bidirectional
+   * subscribe-socket connections are rejected before dispatch so they cannot
+   * reach `modules/host-call` or `modules/bind-sender` even if the daemon's
+   * top-level handleMessage already replied E_RPC_NOT_AUTHORIZED. Without
+   * this check both EventEmitter listeners fire (Node has no stop-propagation)
+   * and the side effects persist despite the rejected first response.
+   */
+  subscribeRegistry?: SubscribeRegistry;
 }
 
 /**
@@ -754,19 +764,20 @@ export async function hostCall(
     };
   }
 
-  // Phase 13.5 — sender-binding gate, env-flag gated to default-off
-  // until PR-C lands the long-lived RPC channel. With every existing
-  // production caller using `IpcClient.send()` (fresh socket per
-  // call), enforcing the gate by default would break Electron's
-  // host-call bridge entirely. Operators opt in via
-  // `RN_DEV_HOSTCALL_BIND_GATE=1`; once PR-C is in, the default flips.
+  // Phase 13.6 PR-C — sender-binding gate, default-ON. Production callers
+  // (Electron, MCP) attach via connectToDaemonSession, which rides a
+  // long-lived multiplexed subscribe socket — bind-sender + host-call
+  // share connectionId on the same connection. The env flag stays as an
+  // emergency off-switch:
+  //   - unset / "1" / any non-"0" value → enforced (default)
+  //   - "0" → disabled (host-call without prior bind succeeds)
   //
   // The undefined-connectionId branch denies (rather than skipping)
   // because `bindSenderAction` already requires connectionId; the
   // two halves of the gate now agree on what an anonymous caller
   // means: rejection.
   const gateEnabled =
-    process.env.RN_DEV_HOSTCALL_BIND_GATE === "1" &&
+    process.env.RN_DEV_HOSTCALL_BIND_GATE !== "0" &&
     opts.senderBindings !== undefined;
   if (gateEnabled) {
     if (
@@ -849,10 +860,22 @@ export type BindSenderReply =
   | { kind: "ok" }
   | { kind: "error"; code: "BIND_INVALID_PAYLOAD"; message: string };
 
+/**
+ * P1-6 — moduleId length and charset validation. Bounds match npm-style
+ * package-name constraints (lowercase alphanumeric, hyphens, dots, at-scope;
+ * max 128 chars). The regex is deliberately permissive for scoped packages
+ * (`@org/pkg`) and dotted subnames; the pre-install manifest validation
+ * enforces stricter shape constraints. The goal here is to prevent
+ * oversized or control-character-laden strings from reaching the
+ * senderBindings Map and the audit log.
+ */
+const MODULE_ID_RE = /^[@a-z0-9][a-z0-9._\-/@]{0,126}$/;
+
 function parseBindSenderRequest(payload: unknown): { moduleId: string } | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as Record<string, unknown>;
   if (typeof p.moduleId !== "string" || p.moduleId.length === 0) return null;
+  if (p.moduleId.length > 128 || !MODULE_ID_RE.test(p.moduleId)) return null;
   return { moduleId: p.moduleId };
 }
 
@@ -1039,6 +1062,9 @@ export function registerModulesIpc(
     ...options,
     moduleEvents,
     senderBindings,
+    // subscribeRegistry is threaded through as-is; undefined means
+    // "no subscribe connections tracked" — gate is simply skipped.
+    subscribeRegistry: options.subscribeRegistry,
   };
 
   // Bridge ModuleHostManager lifecycle events → moduleEvents so subscribers
@@ -1098,6 +1124,23 @@ export function registerModulesIpc(
 
     if (event.message.action === "modules/subscribe") {
       handleSubscribe(moduleEvents, event);
+      return;
+    }
+
+    // Phase 13.6 PR-C — P0-1 security gate. Node's EventEmitter has no
+    // stop-propagation: both `handleMessage` (daemon/index.ts) and this
+    // listener fire on every IPC message. For subscribe-socket connections
+    // that are NOT bidirectional, `handleMessage` already replied
+    // E_RPC_NOT_AUTHORIZED and returned — but this listener still fires and
+    // would dispatch the action, persisting bind-sender bindings or executing
+    // host-call capabilities. Guard here so the two halves of the gate agree.
+    // Fresh-socket sends (not in subscribeRegistry) bypass this guard
+    // intentionally — they are the normal RPC path.
+    if (
+      effectiveOptions.subscribeRegistry?.has(event.connectionId) &&
+      !effectiveOptions.subscribeRegistry.isBidirectional(event.connectionId)
+    ) {
+      // handleMessage already sent E_RPC_NOT_AUTHORIZED; do NOT reply again.
       return;
     }
 

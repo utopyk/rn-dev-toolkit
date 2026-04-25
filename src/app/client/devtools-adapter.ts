@@ -5,7 +5,6 @@
 // delta announces identifiers, the list call resolves them).
 
 import { EventEmitter } from "node:events";
-import type { IpcClient } from "../../core/ipc.js";
 import type {
   CaptureListResult,
   DevToolsStatus,
@@ -13,6 +12,7 @@ import type {
   NetworkFilter,
 } from "../../core/devtools/types.js";
 import type { AdapterSink, DevToolsEventKind } from "./adapter-sink.js";
+import type { IpcSender } from "./session.js";
 
 export interface DevToolsClientEvents {
   status: (evt: Record<string, unknown>) => void;
@@ -30,7 +30,7 @@ export class DevToolsClient
   implements AdapterSink<DevToolsEventKind>
 {
   constructor(
-    private client: IpcClient,
+    private client: IpcSender,
     private nextId: () => string,
   ) {
     super();

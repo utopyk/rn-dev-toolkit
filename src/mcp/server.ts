@@ -11,7 +11,7 @@ import { discoverModuleContributedTools } from "./module-proxy.js";
 import { ProfileStore } from "../core/profile.js";
 import { ArtifactStore } from "../core/artifact.js";
 import { createDefaultPreflightEngine } from "../core/preflight.js";
-import { IpcClient, type IpcMessage } from "../core/ipc.js";
+import { connectToDaemonSession, type DaemonSession } from "../app/client/session.js";
 import { detectProjectRoot } from "../core/project.js";
 
 /**
@@ -108,13 +108,33 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
   const projectRoot = detectProjectRoot(process.cwd()) ?? process.cwd();
   const rnDevDir = path.join(projectRoot, ".rn-dev");
 
+  const profileStore = new ProfileStore(path.join(rnDevDir, "profiles"));
+  // Resolve a profile for connectToDaemonSession: prefer the first
+  // `isDefault === true` entry, then any entry, then null (degrade to
+  // built-ins-only mode — same posture as the old IpcClient-null fallback).
+  const profiles = profileStore.list();
+  const profile = profiles.find((p) => p.isDefault) ?? profiles[0] ?? null;
+
+  let session: DaemonSession | null = null;
+  if (profile) {
+    try {
+      session = await connectToDaemonSession(projectRoot, profile, {
+        kinds: ["modules/*"], // MCP doesn't need metro/builder/devtools firehose
+      });
+    } catch {
+      // Daemon unreachable at startup — degrade to built-ins-only mode
+      // (mirrors the old IpcClient-null fallback).
+      session = null;
+    }
+  }
+
   const ctx: McpContext = {
     projectRoot,
-    profileStore: new ProfileStore(path.join(rnDevDir, "profiles")),
+    profileStore,
     artifactStore: new ArtifactStore(path.join(rnDevDir, "artifacts")),
     metro: null, // MCP server runs standalone, no metro manager
     preflightEngine: createDefaultPreflightEngine(projectRoot),
-    ipcClient: new IpcClient(path.join(rnDevDir, "sock")),
+    session,
     flags,
   };
 
@@ -166,69 +186,27 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Phase 3d: subscribe to the daemon's module-event stream so we can refresh
-  // the tool snapshot and notify connected clients when modules change.
-  // Silent best-effort: if no daemon is running we stay on the startup
+  // Phase 13.6 PR-C: subscribe to the daemon's module-event stream via the
+  // session's ModuleHostClient (which receives modules/* events from the
+  // events/subscribe channel opened by connectToDaemonSession). When modules
+  // change state we refresh the tool snapshot and notify connected clients.
+  // Silent best-effort: if no session is running we stay on the startup
   // snapshot. Callers can always re-handshake.
-  void subscribeToModuleChanges({
-    ctx,
-    flags,
-    notifyToolListChanged: () => server.sendToolListChanged(),
-    refreshTools: async () => {
-      const next = await discoverModuleContributedTools(ctx, flags);
-      moduleTools = next;
-    },
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Phase 3d — module-change subscription. Exported for unit tests.
-// ---------------------------------------------------------------------------
-
-export interface SubscribeToModuleChangesArgs {
-  ctx: McpContext;
-  flags: McpFlags;
-  notifyToolListChanged: () => Promise<void>;
-  refreshTools: () => Promise<void>;
-}
-
-export async function subscribeToModuleChanges(
-  args: SubscribeToModuleChangesArgs,
-): Promise<{ close: () => void } | null> {
-  const { ctx, notifyToolListChanged, refreshTools } = args;
-  if (!ctx.ipcClient) return null;
-
-  const subscribeMessage: IpcMessage = {
-    type: "command",
-    action: "modules/subscribe",
-    payload: {},
-    id: `mcp-subscribe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-  };
-
-  try {
-    const sub = await ctx.ipcClient.subscribe(subscribeMessage, {
-      onEvent: async () => {
-        try {
-          await refreshTools();
-        } catch {
-          // If the refetch fails (daemon flaky), keep the old snapshot and
-          // still notify — a re-handshake by the agent will retry.
-        }
-        try {
-          await notifyToolListChanged();
-        } catch {
-          // Transport may be closed (client already disconnected).
-        }
-      },
-      onError: () => {
-        // Connection hiccup — give up silently; the next MCP session
-        // will re-subscribe on startup.
-      },
+  if (ctx.session) {
+    ctx.session.modules.on("modules-event", async () => {
+      try {
+        const next = await discoverModuleContributedTools(ctx, flags);
+        moduleTools = next;
+      } catch {
+        // If the refetch fails (daemon flaky), keep the old snapshot and
+        // still notify — a re-handshake by the agent will retry.
+      }
+      try {
+        await server.sendToolListChanged();
+      } catch {
+        // Transport may be closed (client already disconnected).
+      }
     });
-    return { close: sub.close };
-  } catch {
-    // No daemon, or daemon failed the subscribe handshake. Static tool list
-    // is still serviceable — drop the subscription quietly.
-    return null;
   }
 }
+

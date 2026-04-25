@@ -15,7 +15,11 @@ describe("ModuleHostClient", () => {
   const noopId = (): string => "id";
 
   it("implements AdapterSink<ModuleHostEventKind>", () => {
+    // Phase 13.6 PR-C — constructor split: (sender, rawClient, nextId).
+    // The tests here only exercise dispatch/notifyDisconnected, so passing
+    // noopClient for both sender and rawClient is sufficient.
     const sink: AdapterSink<ModuleHostEventKind> = new ModuleHostClient(
+      noopClient,
       noopClient,
       noopId,
     );
@@ -24,7 +28,7 @@ describe("ModuleHostClient", () => {
   });
 
   it("emits 'modules-event' with state=to when to==='active'", () => {
-    const host = new ModuleHostClient(noopClient, noopId);
+    const host = new ModuleHostClient(noopClient, noopClient, noopId);
     const moduleEvent = vi.fn();
     host.on("modules-event", moduleEvent);
 
@@ -47,7 +51,7 @@ describe("ModuleHostClient", () => {
     // Matches the pre-13.4 registerModulesIpc filter — renderer only
     // cares about transitions touching `active`. Internal state-machine
     // ticks (e.g. `starting → running`) should not wake the renderer.
-    const host = new ModuleHostClient(noopClient, noopId);
+    const host = new ModuleHostClient(noopClient, noopClient, noopId);
     const moduleEvent = vi.fn();
     host.on("modules-event", moduleEvent);
 
@@ -62,7 +66,7 @@ describe("ModuleHostClient", () => {
   });
 
   it("emits 'modules-event' on modules/crashed", () => {
-    const host = new ModuleHostClient(noopClient, noopId);
+    const host = new ModuleHostClient(noopClient, noopClient, noopId);
     const moduleEvent = vi.fn();
     host.on("modules-event", moduleEvent);
 
@@ -81,7 +85,7 @@ describe("ModuleHostClient", () => {
   });
 
   it("emits 'modules-event' on modules/failed", () => {
-    const host = new ModuleHostClient(noopClient, noopId);
+    const host = new ModuleHostClient(noopClient, noopClient, noopId);
     const moduleEvent = vi.fn();
     host.on("modules-event", moduleEvent);
 
@@ -100,7 +104,7 @@ describe("ModuleHostClient", () => {
   });
 
   it("drops malformed state-changed payloads loudly instead of emitting undefined fields", () => {
-    const host = new ModuleHostClient(noopClient, noopId);
+    const host = new ModuleHostClient(noopClient, noopClient, noopId);
     const moduleEvent = vi.fn();
     host.on("modules-event", moduleEvent);
 
@@ -116,7 +120,7 @@ describe("ModuleHostClient", () => {
   });
 
   it("drops malformed crashed/failed payloads with missing reason", () => {
-    const host = new ModuleHostClient(noopClient, noopId);
+    const host = new ModuleHostClient(noopClient, noopClient, noopId);
     const moduleEvent = vi.fn();
     host.on("modules-event", moduleEvent);
 
@@ -133,7 +137,7 @@ describe("ModuleHostClient", () => {
   });
 
   it("re-emits as 'disconnected' via notifyDisconnected", () => {
-    const host = new ModuleHostClient(noopClient, noopId);
+    const host = new ModuleHostClient(noopClient, noopClient, noopId);
     const listener = vi.fn();
     host.on("disconnected", listener);
     host.notifyDisconnected(new Error("gone"));
@@ -154,6 +158,9 @@ function makeStubClient(): {
   send: ReturnType<typeof vi.fn>;
 } {
   const send = vi.fn();
+  // Phase 13.6 PR-C: `client` is passed as both `sender` (proxied IpcSender)
+  // and `rawClient` (full IpcClient) in tests — these tests only exercise
+  // RPC `.send()` calls, not `subscribeToEvents()`, so both roles use the same stub.
   return { client: { send } as unknown as IpcClient, send };
 }
 
@@ -166,7 +173,7 @@ describe("ModuleHostClient — RPC methods", () => {
       id: "id-0",
       payload: { modules: [{ id: "one", version: "1.0.0" }] },
     });
-    const host = new ModuleHostClient(client, () => "id-0");
+    const host = new ModuleHostClient(client, client, () => "id-0");
     const result = await host.list();
     expect(send).toHaveBeenCalledWith({
       type: "command",
@@ -184,7 +191,7 @@ describe("ModuleHostClient — RPC methods", () => {
       id: "id-1",
       payload: { modules: [{ moduleId: "m", title: "m", panels: [] }] },
     });
-    const host = new ModuleHostClient(client, () => "id-1");
+    const host = new ModuleHostClient(client, client, () => "id-1");
     const result = await host.listPanels();
     expect(send).toHaveBeenCalledWith({
       type: "command",
@@ -212,7 +219,7 @@ describe("ModuleHostClient — RPC methods", () => {
         },
       },
     });
-    const host = new ModuleHostClient(client, () => "id-2");
+    const host = new ModuleHostClient(client, client, () => "id-2");
     const result = await host.resolvePanel("m", "p");
     expect(send).toHaveBeenCalledWith({
       type: "command",
@@ -231,7 +238,7 @@ describe("ModuleHostClient — RPC methods", () => {
       id: "id-3",
       payload: { kind: "ok", result: { pong: true } },
     });
-    const host = new ModuleHostClient(client, () => "id-3");
+    const host = new ModuleHostClient(client, client, () => "id-3");
     const result = await host.call({
       moduleId: "m",
       tool: "ping",
@@ -254,7 +261,7 @@ describe("ModuleHostClient — RPC methods", () => {
       id: "id-4",
       payload: { kind: "ok", result: "echoed" },
     });
-    const host = new ModuleHostClient(client, () => "id-4");
+    const host = new ModuleHostClient(client, client, () => "id-4");
     const result = await host.hostCall({
       moduleId: "m",
       capabilityId: "log",
@@ -283,7 +290,7 @@ describe("ModuleHostClient — RPC methods", () => {
       id: "id-5",
       payload: { moduleId: "m", config: { k: "v" } },
     });
-    const host = new ModuleHostClient(client, () => "id-5");
+    const host = new ModuleHostClient(client, client, () => "id-5");
     await host.configGet("m");
     expect(send).toHaveBeenCalledWith({
       type: "command",
@@ -301,7 +308,7 @@ describe("ModuleHostClient — RPC methods", () => {
       id: "id-6",
       payload: { moduleId: "m", config: {} },
     });
-    const host = new ModuleHostClient(client, () => "id-6");
+    const host = new ModuleHostClient(client, client, () => "id-6");
     await host.configGet("m", "wt-1");
     expect(send).toHaveBeenCalledWith({
       type: "command",
@@ -319,7 +326,7 @@ describe("ModuleHostClient — RPC methods", () => {
       id: "id-7",
       payload: { kind: "ok", config: { k: "v" } },
     });
-    const host = new ModuleHostClient(client, () => "id-7");
+    const host = new ModuleHostClient(client, client, () => "id-7");
     const result = await host.configSet({
       moduleId: "m",
       patch: { k: "v" },
@@ -347,7 +354,7 @@ describe("ModuleHostClient — RPC methods", () => {
         tarballSha256: "deadbeef",
       },
     });
-    const host = new ModuleHostClient(client, () => "id-8");
+    const host = new ModuleHostClient(client, client, () => "id-8");
     const result = await host.install({
       moduleId: "m",
       permissionsAccepted: [],
@@ -369,7 +376,7 @@ describe("ModuleHostClient — RPC methods", () => {
       id: "id-9",
       payload: { kind: "ok", moduleId: "m", removed: "/x/m", keptData: false },
     });
-    const host = new ModuleHostClient(client, () => "id-9");
+    const host = new ModuleHostClient(client, client, () => "id-9");
     const result = await host.uninstall({ moduleId: "m" });
     expect(send).toHaveBeenCalledWith({
       type: "command",
@@ -393,7 +400,7 @@ describe("ModuleHostClient — RPC methods", () => {
         entries: [],
       },
     });
-    const host = new ModuleHostClient(client, () => "id-10");
+    const host = new ModuleHostClient(client, client, () => "id-10");
     const result = await host.marketplaceList();
     expect(send).toHaveBeenCalledWith({
       type: "command",
@@ -411,7 +418,7 @@ describe("ModuleHostClient — RPC methods", () => {
       id: "id-11",
       payload: { kind: "ok", entry: {}, installed: false, registrySha256: "abc" },
     });
-    const host = new ModuleHostClient(client, () => "id-11");
+    const host = new ModuleHostClient(client, client, () => "id-11");
     const result = await host.marketplaceInfo("m");
     expect(send).toHaveBeenCalledWith({
       type: "command",
@@ -420,5 +427,39 @@ describe("ModuleHostClient — RPC methods", () => {
       payload: { moduleId: "m" },
     });
     expect((result as { kind: string }).kind).toBe("ok");
+  });
+
+  // Phase 13.6 PR-C P0-2: bindSender issues modules/bind-sender over the
+  // shared subscribe socket so host-call can share the same connectionId.
+  it("bindSender(moduleId): action=modules/bind-sender with { moduleId }, resolves on ok", async () => {
+    const { client, send } = makeStubClient();
+    send.mockResolvedValueOnce({
+      type: "response",
+      action: "modules/bind-sender",
+      id: "id-12",
+      payload: { kind: "ok" },
+    });
+    const host = new ModuleHostClient(client, client, () => "id-12");
+    await expect(host.bindSender("my-module")).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledWith({
+      type: "command",
+      action: "modules/bind-sender",
+      id: "id-12",
+      payload: { moduleId: "my-module" },
+    });
+  });
+
+  it("bindSender(moduleId): rejects with error message when daemon returns error kind", async () => {
+    const { client, send } = makeStubClient();
+    send.mockResolvedValueOnce({
+      type: "response",
+      action: "modules/bind-sender",
+      id: "id-13",
+      payload: { kind: "error", code: "BIND_INVALID_PAYLOAD", message: "bad payload" },
+    });
+    const host = new ModuleHostClient(client, client, () => "id-13");
+    await expect(host.bindSender("bad-module")).rejects.toThrow(
+      "bindSender(bad-module): BIND_INVALID_PAYLOAD — bad payload",
+    );
   });
 });

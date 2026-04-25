@@ -5,9 +5,9 @@
 // the underlying Builder emit them.
 
 import { EventEmitter } from "node:events";
-import type { IpcClient } from "../../core/ipc.js";
 import type { BuildOptions } from "../../core/builder.js";
 import type { AdapterSink, BuilderEventKind } from "./adapter-sink.js";
+import type { IpcSender } from "./session.js";
 
 export interface BuilderClientEvents {
   line: (evt: { text: string; stream: "stdout" | "stderr"; replace?: boolean }) => void;
@@ -33,7 +33,7 @@ export class BuilderClient
   implements AdapterSink<BuilderEventKind>
 {
   constructor(
-    private client: IpcClient,
+    private client: IpcSender,
     private nextId: () => string,
   ) {
     super();

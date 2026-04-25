@@ -35,8 +35,25 @@ import { BuilderClient } from "./builder-adapter.js";
 import { WatcherClient } from "./watcher-adapter.js";
 import { ModuleHostClient } from "./module-host-adapter.js";
 
+/**
+ * Minimal send-only interface used by adapter constructors. All adapter
+ * RPC calls use only `.send()`; the narrowed type enforces this
+ * statically (metro, devtools, builder, watcher). ModuleHostClient
+ * takes the full IpcClient additionally for its `subscribeToEvents`
+ * call, which opens an independent `modules/subscribe` stream.
+ */
+export interface IpcSender {
+  send: IpcClient["send"];
+}
+
 export interface DaemonSession {
-  client: IpcClient;
+  /**
+   * Phase 13.6 PR-C — narrowed to IpcSender (send-only proxy).
+   * Every call to `session.client.send()` is multiplexed through the
+   * long-lived `events/subscribe` socket so that `modules/bind-sender`
+   * and `modules/host-call` share the same `connectionId`.
+   */
+  client: IpcSender;
   metro: MetroClient;
   devtools: DevToolsClient;
   builder: BuilderClient;
@@ -75,6 +92,17 @@ export interface DaemonSession {
 export interface ConnectToDaemonSessionOptions extends ConnectToDaemonOptions {
   /** Upper bound for waiting on the session to transition to "running". */
   sessionReadyTimeoutMs?: number;
+  /**
+   * Per-subscriber event-kind filter. Default = all kinds (every
+   * session event delivered). Pass `["modules/*"]` for MCP to skip
+   * the metro/builder/devtools firehose.
+   *
+   * `session/status` is automatically appended to any non-empty
+   * caller-supplied filter — `connectToDaemonSession` itself reads
+   * the `starting → running` edge to resolve, and silently filtering
+   * that out would hang the boot. Callers don't need to remember.
+   */
+  kinds?: string[];
 }
 
 export async function connectToDaemonSession(
@@ -86,11 +114,37 @@ export async function connectToDaemonSession(
 
   const client = await connectToDaemon(projectRoot, connectOpts);
   const idGen = makeIdGenerator();
-  const metro = new MetroClient(client, idGen);
-  const devtools = new DevToolsClient(client, idGen);
-  const builder = new BuilderClient(client, idGen);
-  const watcher = new WatcherClient(client, idGen);
-  const modules = new ModuleHostClient(client, idGen);
+
+  // Phase 13.6 PR-C — deferred-proxy pattern.
+  // Adapters are constructed before subscribe resolves (preserving the
+  // original construction order so notifyDisconnected closures are valid),
+  // but every `.send()` call they issue is routed through a placeholder
+  // that throws until the subscribe socket is ready. After `sub` resolves,
+  // `resolvedSend` is wired to `sub.send` — at that point, every adapter
+  // and `session.client.send()` call rides the same long-lived socket,
+  // giving bind-sender and host-call the same `connectionId`.
+  let resolvedSend: IpcClient["send"] | null = null;
+  const channelClient: IpcSender = {
+    send: (msg: IpcMessage) => {
+      if (!resolvedSend) {
+        // Return a rejected promise, NOT a synchronous throw. IpcSender.send
+        // returns Promise<IpcMessage>; a synchronous throw breaks the contract
+        // and causes callers that don't wrap in try/catch to swallow the error
+        // silently. Realistically unreachable in production — adapters are
+        // constructed before subscribe resolves but never call send until after
+        // the await in connectToDaemonSession — but the typed contract must
+        // match. (P0-3 Phase 13.6 PR-C reviewer fix.)
+        return Promise.reject(new Error("session.client.send: subscribe not yet resolved"));
+      }
+      return resolvedSend(msg);
+    },
+  };
+
+  const metro = new MetroClient(channelClient, idGen);
+  const devtools = new DevToolsClient(channelClient, idGen);
+  const builder = new BuilderClient(channelClient, idGen);
+  const watcher = new WatcherClient(channelClient, idGen);
+  const modules = new ModuleHostClient(channelClient, client, idGen);
 
   let worktreeKey: string | null = null;
   let resolveRunning!: () => void;
@@ -169,12 +223,25 @@ export async function connectToDaemonSession(
   // joins the session in a single round-trip. `onClose` / `onError`
   // route into `notifyDisconnected` so an unexpected daemon death
   // surfaces as a 'disconnected' event on every adapter.
+  // Auto-augment kinds with session/status — `connectToDaemonSession`
+  // depends on that edge to resolve. If the caller filters it out
+  // (e.g. MCP passing only ["modules/*"]), boot would hang.
+  const effectiveKinds = opts.kinds !== undefined
+    ? (opts.kinds.includes("session/status")
+        ? opts.kinds
+        : [...opts.kinds, "session/status"])
+    : undefined;
+
   const sub = await client.subscribe(
     {
       type: "command",
       action: "events/subscribe",
       id: idGen(),
-      payload: { profile },
+      payload: {
+        profile,
+        supportsBidirectionalRpc: true,
+        ...(effectiveKinds !== undefined ? { kinds: effectiveKinds } : {}),
+      },
     },
     {
       onEvent: onIncomingEvent,
@@ -191,6 +258,11 @@ export async function connectToDaemonSession(
     );
   }
 
+  // Phase 13.6 PR-C — wire the deferred proxy now that sub is open.
+  // Every subsequent session.client.send() and every adapter .send()
+  // call will use sub.send, keeping the same long-lived connectionId.
+  resolvedSend = (msg: IpcMessage) => sub.send(msg);
+
   const readyTimer = setTimeout(() => {
     rejectRunning(
       new Error(
@@ -205,7 +277,7 @@ export async function connectToDaemonSession(
   if (subPayload.status === "running" && subPayload.started === false) {
     if (!worktreeKey) {
       try {
-        const statusResp = await client.send({
+        const statusResp = await sub.send({
           type: "command",
           action: "session/status",
           id: idGen(),
@@ -253,7 +325,7 @@ export async function connectToDaemonSession(
 
   const stop = async (): Promise<void> => {
     try {
-      await client.send({
+      await sub.send({
         type: "command",
         action: "session/stop",
         id: idGen(),
@@ -264,7 +336,7 @@ export async function connectToDaemonSession(
   };
 
   return {
-    client,
+    client: channelClient,
     metro,
     devtools,
     builder,

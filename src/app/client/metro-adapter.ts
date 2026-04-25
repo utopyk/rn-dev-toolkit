@@ -11,9 +11,10 @@
 // 1:1 relationship rather than carry a redundant identifier.
 
 import { EventEmitter } from "node:events";
-import type { IpcClient, IpcMessage } from "../../core/ipc.js";
+import type { IpcMessage } from "../../core/ipc.js";
 import type { MetroInstance } from "../../core/types.js";
 import type { AdapterSink, MetroEventKind } from "./adapter-sink.js";
+import type { IpcSender } from "./session.js";
 
 export interface MetroClientEvents {
   status: (evt: { status: string }) => void;
@@ -28,7 +29,7 @@ export interface MetroClientEvents {
 
 export class MetroClient extends EventEmitter implements AdapterSink<MetroEventKind> {
   constructor(
-    private client: IpcClient,
+    private client: IpcSender,
     private nextId: () => string,
   ) {
     super();

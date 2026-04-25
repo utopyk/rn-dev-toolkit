@@ -3,6 +3,8 @@ import path from 'path';
 import { ProfileStore } from '../../src/core/profile.js';
 import { getCurrentBranch } from '../../src/core/project.js';
 import { listDevices } from '../../src/core/device.js';
+import { attachDaemonSession } from './services.js';
+import type { Profile } from '../../src/core/types.js';
 import {
   instances,
   state,
@@ -14,15 +16,17 @@ import {
 } from './state.js';
 
 // Phase 13.4.1 — one daemon = one worktree = one session. A second
-// instance against the same daemon is not supported in this release;
+// instance against the same daemon is NOT supported in this release;
 // the multi-session story lands with Phase 13.5 ref-counted
-// `DaemonSession.release()` semantics. `instances:create` still
-// materializes the renderer-side instance record (the wizard flow
-// needs it) but surfaces a loud warning that a restart is required
-// before services attach.
+// `DaemonSession.release()` semantics. But the FIRST instance flow
+// (wizard from a no-default-profile boot) DOES need to attach a
+// daemon session — previously this branch surfaced "restart required"
+// even though attach is mechanically possible. Now we attach iff
+// state.daemonSession is null, return MULTI_INSTANCE_NOT_SUPPORTED
+// only when one is already running.
 const MULTI_INSTANCE_NOT_SUPPORTED_MSG =
   'This release supports one active instance per project. ' +
-  'Restart the app to attach services to the newly-created profile.';
+  'Close + reopen the active instance, or restart the app to attach services to a different profile.';
 
 export function registerInstanceHandlers() {
   ipcMain.handle('instances:list', async () => {
@@ -107,12 +111,45 @@ export function registerInstanceHandlers() {
     // Notify renderer of the new instance
     send('instance:created', toSummary(instance));
 
-    // Phase 13.4.1: no in-process startInstanceServices — services live
-    // in the daemon and only the first `startRealServices` call on boot
-    // opens a session for the default profile. Return `ok: false` so
-    // the wizard treats this as a failure the user has to resolve (app
-    // restart) — returning `ok: true` would silently pretend services
-    // attached. Arch P1 on PR #20.
+    // No active daemon session yet (e.g. wizard from a fresh launch
+    // with no matching default profile)? Attach one for THIS profile so
+    // Settings/Marketplace/etc. work without an app restart. The
+    // attached session publishes on serviceBus.modulesClient, which
+    // wakes any in-flight `awaitModulesClient` rejection caused by an
+    // earlier `abortModulesClient` call.
+    if (!state.daemonSession) {
+      try {
+        // The wizard doesn't include `projectRoot` in its profile
+        // payload (it's the same one for every profile in this
+        // launch); fill it in from state so the daemon's profile-
+        // guard doesn't reject with `E_PROFILE_PATH_NOT_STRING`.
+        const sessionProfile: Profile = {
+          ...profileData,
+          projectRoot: state.projectRoot,
+        };
+        await attachDaemonSession(sessionProfile, state.projectRoot);
+        const msg = `Daemon session attached for profile "${profileData.name ?? id}".`;
+        appendLog(instance, 'service', msg);
+        send('instance:log', { instanceId: id, text: msg });
+        return { ok: true, instance: toSummary(instance) };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const msg = `Failed to attach daemon session: ${message}`;
+        appendLog(instance, 'service', msg);
+        send('instance:log', { instanceId: id, text: msg });
+        return {
+          ok: false,
+          code: 'DAEMON_ATTACH_FAILED' as const,
+          error: msg,
+          instance: toSummary(instance),
+        };
+      }
+    }
+
+    // A session already exists for a different profile — multi-instance
+    // would need ref-counted `DaemonSession.release()` semantics that
+    // land in Phase 13.5. Surface a clear "close + reopen" message
+    // rather than silently pretend services attached.
     appendLog(instance, 'service', MULTI_INSTANCE_NOT_SUPPORTED_MSG);
     send('instance:log', {
       instanceId: id,

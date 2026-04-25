@@ -280,4 +280,58 @@ test.describe("Electron smoke", () => {
       handle.page.getByText(/did not publish within 30000ms/i),
     ).toHaveCount(0);
   });
+
+  test("instances:create attaches a daemon session when none is active (no restart required)", async () => {
+    // Reproduces Martin's wizard flow: the app launches with no
+    // matching default profile, so `startRealServices` returns null
+    // and `serviceBus.abortModulesClient` arms the fast-fail. The
+    // user runs the setup wizard which calls `instances:create`;
+    // pre-fix that returned MULTI_INSTANCE_NOT_SUPPORTED and the
+    // user had to restart. Post-fix: `instances:create` notices
+    // `state.daemonSession` is null and calls `attachDaemonSession`,
+    // which clears the abort + publishes `serviceBus.modulesClient`
+    // for the new session. Settings then loads without a restart.
+    handle = await launchElectron({ profileMismatch: true });
+
+    // Drive the IPC directly — clicking through the multi-step
+    // wizard is brittle. The wizard ultimately invokes
+    // `instances:create` with a profile object; we mimic that.
+    const result = await handle.page.evaluate(
+      async (): Promise<{ ok: boolean; code?: string; error?: string }> => {
+        const w = window as unknown as {
+          rndev: { invoke: (ch: string, ...args: unknown[]) => Promise<unknown> };
+        };
+        return (await w.rndev.invoke("instances:create", {
+          name: "smoke-attached",
+          isDefault: true,
+          worktree: null,
+          branch: "main",
+          platform: "ios",
+          mode: "quick",
+          metroPort: 8099,
+          devices: {},
+          buildVariant: "debug",
+          preflight: { checks: [], frequency: "once" },
+          onSave: [],
+          env: {},
+        })) as { ok: boolean; code?: string; error?: string };
+      },
+    );
+
+    expect(result.ok, `instances:create should succeed: ${JSON.stringify(result)}`).toBe(
+      true,
+    );
+    expect(result.code).not.toBe("MULTI_INSTANCE_NOT_SUPPORTED");
+
+    // After attach, Settings should load the form (not the abort
+    // message) — confirming the modules:event 'ready' clear-and-republish
+    // path works.
+    await handle.page.getByRole("button", { name: /settings/i }).click();
+    await expect(
+      handle.page.getByRole("combobox", { name: /theme/i }),
+    ).toBeVisible({ timeout: 10_000 });
+    await expect(
+      handle.page.getByText(/no default profile is configured/i),
+    ).toHaveCount(0);
+  });
 });

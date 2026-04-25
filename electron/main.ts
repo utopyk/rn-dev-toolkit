@@ -1,9 +1,10 @@
 import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { setupIpcBridge, startRealServices } from './ipc/index.js';
+import { setElectronQuitting } from './ipc/services.js';
+import { state } from './ipc/state.js';
 import { detectProjectRoot } from '../src/core/project.js';
 import { serviceBus } from '../src/app/service-bus.js';
-import type { DaemonSession } from '../src/app/client/session.js';
 
 const isDev = !app.isPackaged;
 
@@ -16,14 +17,10 @@ let mainWindow: BrowserWindow | null = null;
 // The 13.4 env-gated opt-in (`RN_DEV_ELECTRON_DAEMON_CLIENT=1`) is
 // gone — the in-process duplicate it guarded against (services.ts
 // double-Metro) went away with the services.ts collapse.
-let daemonSession: DaemonSession | null = null;
-
-// Suppresses the `disconnected` event that fires if the daemon socket
-// drops in the same tick as a user-initiated window quit — cosmetic
-// noise: the user is leaving, we don't need "⚠ Daemon disconnected"
-// in a service log they're about to tear down. Flipped in
-// `window-all-closed`. Security P1 on PR #18.
-let electronQuitting = false;
+//
+// The active session lives at `state.daemonSession` (electron/ipc/state.ts);
+// `attachDaemonSession` populates it. Main reads it on window-quit
+// to drive `disconnect()`.
 
 /** Wait for Vite dev server to be ready, trying ports 5173-5180, with retries */
 async function waitForVite(maxRetries = 30): Promise<number> {
@@ -109,9 +106,7 @@ async function createWindow() {
     setTimeout(() => {
       startRealServices(projectRoot)
         .then((session) => {
-          daemonSession = session;
           if (session) {
-            wireDaemonDisconnectListener(session);
             console.log(
               `[electron] Daemon client connected — worktreeKey=${session.worktreeKey}`,
             );
@@ -120,6 +115,11 @@ async function createWindow() {
             // will show the wizard. Tell every awaiting modules:* handler
             // to fail fast instead of timing out at 30s; the renderer
             // surfaces this string verbatim, so phrase it as a fix.
+            // Once the wizard finishes, `instances:create` calls
+            // `attachDaemonSession` which publishes a fresh
+            // `serviceBus.modulesClient` event — that clears the cached
+            // abort reason, so a follow-up Settings/Marketplace mount
+            // works without a restart.
             const reason =
               'No default profile is configured for this project. Run the setup wizard to create one.';
             console.log(`[electron] ${reason}`);
@@ -141,56 +141,25 @@ async function createWindow() {
   });
 }
 
-function wireDaemonDisconnectListener(session: DaemonSession): void {
-  // When the daemon drops unexpectedly, surface it in the service
-  // log exactly once AND invalidate every handler's cached adapter
-  // ref so a subsequent reconnect can re-populate deps. Every adapter
-  // fires its own `disconnected` event independently; we attach to
-  // all five so any listener can see which surface drifted first in
-  // future diagnostics, but a single-flight guard keeps the log noise
-  // bounded. Kieran P0 on PR #18 + Arch P0 on PR #20.
-  let disconnectLogged = false;
-  const surfaceDisconnect = (surface: string, err?: Error): void => {
-    if (electronQuitting) return;
-    if (disconnectLogged) return;
-    disconnectLogged = true;
-    const message = err instanceof Error ? err.message : 'unknown';
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send(
-        'service:log',
-        `⚠ Daemon disconnected (${surface}): ${message}`,
-      );
-    }
-    // Invalidate serviceBus-cached handler deps so the next session's
-    // `setModulesClient(newClient)` fires registrars again.
-    serviceBus.clearModulesClient();
-  };
-  session.metro.on('disconnected', (err) => surfaceDisconnect('metro', err));
-  session.devtools.on('disconnected', (err) => surfaceDisconnect('devtools', err));
-  session.builder.on('disconnected', (err) => surfaceDisconnect('builder', err));
-  session.watcher.on('disconnected', (err) => surfaceDisconnect('watcher', err));
-  session.modules.on('disconnected', (err) => surfaceDisconnect('modules', err));
-}
-
 app.whenReady().then(createWindow);
 
 app.on('window-all-closed', () => {
   // Set the quitting flag BEFORE calling disconnect so an involuntary
   // socket drop in the same tick doesn't fire a spurious "Daemon
   // disconnected" warning at a window that's about to tear down.
-  electronQuitting = true;
+  setElectronQuitting(true);
 
   // Phase 13.4 — disconnect (don't stop) so any other client
   // attached to the same daemon (CLI, MCP) keeps working after the
   // Electron window goes away. `stop()` here would be wrong: it
   // tells the daemon to tear the session down for everyone.
-  if (daemonSession) {
+  if (state.daemonSession) {
     try {
-      daemonSession.disconnect();
+      state.daemonSession.disconnect();
     } catch {
       /* best-effort on shutdown */
     }
-    daemonSession = null;
+    state.daemonSession = null;
   }
   app.quit();
 });

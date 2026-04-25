@@ -34,6 +34,7 @@ import { getCurrentBranch } from '../../src/core/project.js';
 import { listDevices } from '../../src/core/device.js';
 import { detectAllPackageManagers, detectPackageManager } from '../../src/core/clean.js';
 import { connectElectronToDaemon } from '../daemon-connect.js';
+import { serviceBus } from '../../src/app/service-bus.js';
 import type { DaemonSession } from '../../src/app/client/session.js';
 import type { Profile } from '../../src/core/types.js';
 import { instances, state, send, appendLog, toSummary, findFreePort, type InstanceState } from './state.js';
@@ -197,6 +198,64 @@ async function settleCodeSigning(
   }
 }
 
+// Single-flight guard for the disconnect log. The daemon's five
+// adapters each fire their own `disconnected` event when the socket
+// drops; we want one user-visible log line, not five. Reset whenever
+// a fresh session attaches.
+let disconnectLoggedFor: DaemonSession | null = null;
+let electronQuittingFlag = false;
+
+/**
+ * Surface daemon disconnect on a single adapter so the user gets one
+ * log line + a fast-fail signal for any in-flight modules: handlers.
+ * Exported so `electron/main.ts` can flip the quitting flag during
+ * `window-all-closed` to suppress the cosmetic "daemon disconnected"
+ * notice during a clean app quit.
+ */
+export function setElectronQuitting(flag: boolean): void {
+  electronQuittingFlag = flag;
+}
+
+/**
+ * Connect to (or cold-spawn) the per-worktree daemon for `profile`,
+ * publish every adapter on the serviceBus, wire the disconnect-listener
+ * dance, and remember the session in `state.daemonSession`. Used by
+ * `startRealServices` on boot AND by `instances:create` when the user
+ * completes the setup wizard from a no-default-profile launch — the
+ * latter previously surfaced the misleading "restart required"
+ * message even though attaching a session post-mount is mechanically
+ * straightforward.
+ */
+export async function attachDaemonSession(
+  profile: Profile,
+  projectRoot: string,
+): Promise<DaemonSession> {
+  const session = await connectElectronToDaemon({ projectRoot, profile });
+  state.daemonSession = session;
+  // Reset the single-flight guard so the next disconnect actually logs.
+  disconnectLoggedFor = session;
+  const surfaceDisconnect = (surface: string, err?: Error): void => {
+    if (electronQuittingFlag) return;
+    if (disconnectLoggedFor !== session) return;
+    disconnectLoggedFor = null;
+    const message = err instanceof Error ? err.message : 'unknown';
+    if (state.mainWindow && !state.mainWindow.isDestroyed()) {
+      state.mainWindow.webContents.send(
+        'service:log',
+        `⚠ Daemon disconnected (${surface}): ${message}`,
+      );
+    }
+    serviceBus.clearModulesClient();
+    state.daemonSession = null;
+  };
+  session.metro.on('disconnected', (err) => surfaceDisconnect('metro', err));
+  session.devtools.on('disconnected', (err) => surfaceDisconnect('devtools', err));
+  session.builder.on('disconnected', (err) => surfaceDisconnect('builder', err));
+  session.watcher.on('disconnected', (err) => surfaceDisconnect('watcher', err));
+  session.modules.on('disconnected', (err) => surfaceDisconnect('modules', err));
+  return session;
+}
+
 /**
  * Wire daemon-adapter events to the renderer's `instance:*` channels.
  * Renderer keeps its per-instance rendering model without having to
@@ -309,10 +368,7 @@ export async function startRealServices(
   // starts its session, and publishes every adapter on the serviceBus.
   // The modules ipcMain handlers hanging off `serviceBus.modulesClient`
   // become live as soon as this resolves.
-  const session = await connectElectronToDaemon({
-    projectRoot: targetProjectRoot,
-    profile: defaultProfile,
-  });
+  const session = await attachDaemonSession(defaultProfile, targetProjectRoot);
 
   wireInstanceEvents(instance, session);
   return session;

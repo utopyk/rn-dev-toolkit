@@ -5,6 +5,7 @@ import type { ArtifactStore } from '../../src/core/artifact.js';
 import type { Builder } from '../../src/core/builder.js';
 import type { FileWatcher } from '../../src/core/watcher.js';
 import type { RunMode } from '../../src/core/types.js';
+import type { DaemonSession } from '../../src/app/client/session.js';
 
 export interface InstanceState {
   id: string;
@@ -47,6 +48,13 @@ export const state = {
   watcher: null as FileWatcher | null,
   projectRoot: null as string | null,
   artifactStore: null as ArtifactStore | null,
+  // The live daemon-client session for the active profile. Populated
+  // by the first attach (either `startRealServices` on boot or
+  // `instances:create` when the user runs the wizard from a no-default-
+  // profile state). Used by `instances:create` to decide whether the
+  // wizard should attach a fresh session or surface
+  // MULTI_INSTANCE_NOT_SUPPORTED.
+  daemonSession: null as DaemonSession | null,
 };
 
 export function send(channel: string, ...args: any[]) {

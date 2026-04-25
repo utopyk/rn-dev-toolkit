@@ -32,7 +32,13 @@ export interface ModuleConfigFormProps {
 
 type ConfigGetReply =
   | { moduleId: string; config: Record<string, unknown> }
-  | { error: string };
+  | { error: string }
+  // Phase 13.4.1 — the Electron handler also returns this shape when
+  // the daemon-client adapter hasn't published yet
+  // (`E_CONFIG_SERVICES_PENDING`). Without this branch, the renderer
+  // falls through to `setConfig(reply.config)` where `reply.config`
+  // is undefined and the form crashes during the next render.
+  | { kind: 'error'; code: string; message: string };
 
 type ConfigSetReply =
   | { kind: 'ok'; config: Record<string, unknown> }
@@ -81,6 +87,18 @@ export function ModuleConfigForm({
         }
         if ('error' in reply) {
           setLoadError(reply.error);
+          return;
+        }
+        if ('kind' in reply && reply.kind === 'error') {
+          setLoadError(`${reply.code}: ${reply.message}`);
+          return;
+        }
+        // After the two error-shape checks above, `reply` must be the
+        // success shape `{moduleId, config}`. TS doesn't narrow on the
+        // `'kind' in reply` discriminator alone, so an explicit
+        // `'config' in reply` guard pins it.
+        if (!('config' in reply)) {
+          setLoadError('Unexpected modules:config-get reply shape');
           return;
         }
         setLoadError(null);

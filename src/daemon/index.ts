@@ -11,6 +11,7 @@ import { bootSessionServices } from "../core/session/boot.js";
 import { fakeBootSessionServices } from "./fake-boot.js";
 import { spawnDetachedDaemon } from "./spawn.js";
 import { sweepOrphanModules } from "./orphan-sweep.js";
+import { registerDaemon, unregisterDaemon } from "./registry.js";
 import { validateProfile } from "./profile-guard.js";
 import type { SessionEvent } from "./session.js";
 import { handleClientRpc, isClientRpcAction } from "./client-rpcs.js";
@@ -167,6 +168,24 @@ export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
     /* best-effort */
   }
 
+  // Phase 13.5 — write the active-daemon registry entry AFTER the
+  // socket is bound + chmod'd. registerDaemon's own stale-entry sweep
+  // cleans up any row left by a previous crash. Failure is non-fatal;
+  // the socket is the load-bearing artifact, the registry is just a
+  // discovery side-channel.
+  try {
+    registerDaemon(worktree, {
+      pid: process.pid,
+      sockPath,
+      since: new Date().toISOString(),
+      hostVersion: DAEMON_VERSION,
+    });
+  } catch (err) {
+    process.stderr.write(
+      `rn-dev daemon: registry register failed (${err instanceof Error ? err.message : String(err)}) — continuing\n`,
+    );
+  }
+
   let shuttingDown = false;
   async function shutdown(): Promise<void> {
     if (shuttingDown) return;
@@ -185,6 +204,14 @@ export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
       lock.release();
     } catch {
       /* ignore */
+    }
+    // Best-effort registry cleanup. Crashed daemons (no graceful
+    // shutdown) leave a stale row that the next boot's
+    // registerDaemon sweep removes.
+    try {
+      unregisterDaemon(worktree);
+    } catch {
+      /* best-effort */
     }
     process.exit(0);
   }

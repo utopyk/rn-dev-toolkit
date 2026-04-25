@@ -60,11 +60,26 @@ export function ModuleConfigForm({
   const invoke = useIpcInvoke();
   const [config, setConfig] = useState<Record<string, unknown>>({});
   const [draft, setDraft] = useState<Record<string, unknown>>({});
+  const [status, setStatus] = useState<
+    { kind: 'idle' } | { kind: 'saving' } | { kind: 'error'; message: string }
+  >({ kind: 'idle' });
+  const [justSaved, setJustSaved] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  // Tracked separately from `loadError` so the retry-on-services-ready
+  // path can distinguish "still booting" from a hard error the user
+  // should see (E_CONFIG_MODULE_UNKNOWN, etc.). When `loadPending` is
+  // true the render shows a benign spinner instead of the alarming
+  // "Failed to load config" banner.
+  const [loadPending, setLoadPending] = useState(true);
+
   // Kept in sync with state so the modules:event handler can read the
   // latest config + draft without depending on them (closure stability
   // keeps useIpcOn from churning subscriptions on every keystroke).
+  // Same trick for `loadPending` so the kind:'ready' retry path
+  // doesn't depend on the loadPending state value.
   const configRef = useRef(config);
   const draftRef = useRef(draft);
+  const loadPendingRef = useRef(true);
   useEffect(() => {
     configRef.current = config;
     draftRef.current = draft;
@@ -72,22 +87,6 @@ export function ModuleConfigForm({
   useEffect(() => {
     loadPendingRef.current = loadPending;
   }, [loadPending]);
-  const [status, setStatus] = useState<
-    { kind: 'idle' } | { kind: 'saving' } | { kind: 'error'; message: string }
-  >({ kind: 'idle' });
-  const [justSaved, setJustSaved] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  // Snapshot of `loadPending` for the modules:event callback; same
-  // identity-stability trick the config/draft refs use so subscriptions
-  // don't churn when the load completes.
-  const loadPendingRef = useRef(true);
-
-  // Tracked separately from `loadError` so the retry-on-services-ready
-  // path can distinguish "still booting" from a hard error the user
-  // should see (E_CONFIG_MODULE_UNKNOWN, etc.). When `loadPending` is
-  // true the render shows a benign spinner instead of the alarming
-  // "Failed to load config" banner.
-  const [loadPending, setLoadPending] = useState(true);
 
   const fetchConfig = useCallback(() => {
     let active = true;

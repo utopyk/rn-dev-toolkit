@@ -31,6 +31,14 @@ export interface IpcMessageEvent {
    * NOT prevent the remaining listeners from running.
    */
   onClose: (listener: () => void) => void;
+  /**
+   * Stable id for the underlying socket. All `IpcMessageEvent`s emitted
+   * from the same accepted connection share this id; closed and
+   * subsequently-reopened connections get distinct ids. Used by the daemon
+   * to track per-connection state (Phase 13.5 ref-counted sessions, module
+   * sender bindings) without leaking the raw `net.Socket` to handlers.
+   */
+  connectionId: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -39,6 +47,8 @@ export interface IpcMessageEvent {
 
 export class IpcServer extends EventEmitter {
   private server: net.Server | null = null;
+  /** Monotonic counter feeding `connectionId`. Wraps in practice never. */
+  private nextConnectionSeq = 1;
 
   constructor(private socketPath: string) {
     super();
@@ -60,6 +70,7 @@ export class IpcServer extends EventEmitter {
       }
 
       const srv = net.createServer((socket) => {
+        const connectionId = `c${this.nextConnectionSeq++}`;
         let buffer = "";
         const closeListeners: Array<() => void> = [];
 
@@ -97,6 +108,7 @@ export class IpcServer extends EventEmitter {
               message,
               reply,
               onClose,
+              connectionId,
             } satisfies IpcMessageEvent);
           }
         });
@@ -154,6 +166,24 @@ export class IpcServer extends EventEmitter {
       // Destroy all open connections so close() resolves promptly
       // (net.Server.close() only stops accepting new connections by default)
       (this.server as unknown as { closeAllConnections?: () => void }).closeAllConnections?.();
+
+      // Belt-and-suspenders: Bun's Node net compat occasionally leaves
+      // closeAllConnections() as a no-op on still-pending sockets, and
+      // server.close()'s callback then never fires. Force-resolve after
+      // a short grace period — the unlink + null assignment idempotent.
+      setTimeout(() => {
+        if (this.server) {
+          this.server = null;
+          if (existsSync(this.socketPath)) {
+            try {
+              unlinkSync(this.socketPath);
+            } catch {
+              /* ignore */
+            }
+          }
+          resolve();
+        }
+      }, 500);
     });
   }
 
@@ -292,7 +322,18 @@ export class IpcClient {
             continue;
           }
 
-          if (!confirmed && parsed.id === message.id) {
+          // Only the `response` matching the subscribe id confirms the
+          // subscription. The daemon may push `event`-typed messages
+          // sharing the same id (events/subscribe used the request id
+          // as the subscription id) BEFORE the response if the
+          // handler registers its event listener early — Phase 13.5
+          // tightens this to avoid a race where the first event was
+          // mistaken for the confirmation.
+          if (
+            !confirmed &&
+            parsed.id === message.id &&
+            parsed.type === "response"
+          ) {
             confirmed = true;
             resolve({ initial: parsed, close });
             continue;

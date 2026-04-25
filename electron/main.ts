@@ -149,17 +149,20 @@ app.on('window-all-closed', () => {
   // disconnected" warning at a window that's about to tear down.
   setElectronQuitting(true);
 
-  // Phase 13.4 — disconnect (don't stop) so any other client
-  // attached to the same daemon (CLI, MCP) keeps working after the
-  // Electron window goes away. `stop()` here would be wrong: it
-  // tells the daemon to tear the session down for everyone.
+  // Phase 13.5 — close the subscribe socket; the daemon's socket-close
+  // auto-release decrements its session refcount and tears the session
+  // down if Electron was the last attacher. Any other clients (CLI,
+  // MCP) attached to the same daemon stay running. `stop()` here would
+  // be wrong: it's the kill-for-everyone path regardless of refcount.
   if (state.daemonSession) {
+    const session = state.daemonSession;
+    state.daemonSession = null;
+    state.daemonSessionProfileName = null;
     try {
-      state.daemonSession.disconnect();
+      session.disconnect();
     } catch {
       /* best-effort on shutdown */
     }
-    state.daemonSession = null;
   }
   app.quit();
 });

@@ -51,10 +51,13 @@ export const state = {
   // The live daemon-client session for the active profile. Populated
   // by the first attach (either `startRealServices` on boot or
   // `instances:create` when the user runs the wizard from a no-default-
-  // profile state). Used by `instances:create` to decide whether the
-  // wizard should attach a fresh session or surface
-  // MULTI_INSTANCE_NOT_SUPPORTED.
+  // profile state). Phase 13.5 — we also track the profile name the
+  // session is bound to so `instances:create` can detect a same-profile
+  // join (the new instance just shares the live session) vs a
+  // cross-profile attach attempt (the daemon's E_PROFILE_MISMATCH gate
+  // would reject; we surface that directly).
   daemonSession: null as DaemonSession | null,
+  daemonSessionProfileName: null as string | null,
 };
 
 export function send(channel: string, ...args: any[]) {

@@ -71,13 +71,26 @@ describe("GUI quit / MCP survive (integration)", () => {
     };
 
     // --- MCP-like observer: raw IpcClient, long-lived subscription. ---
+    // Phase 13.5 — MCP must be an attacher (subscribe with profile) to
+    // hold a refcount that keeps the session alive when the GUI client
+    // disconnects. A listener-only subscription wouldn't survive the
+    // GUI's auto-release on socket-close. This mirrors what the real
+    // MCP server will do once it flips to a daemon-client (PR-C).
     const mcp = new IpcClient(daemon.sockPath);
     const mcpEvents: IpcMessage[] = [];
     const mcpSub = await mcp.subscribe(
-      { type: "command", action: "events/subscribe", id: "mcp-sub-1" },
+      {
+        type: "command",
+        action: "events/subscribe",
+        id: "mcp-sub-1",
+        payload: { profile },
+      },
       { onEvent: (evt) => mcpEvents.push(evt) },
     );
     expect(mcpSub.initial.type).toBe("response");
+    expect(
+      (mcpSub.initial.payload as { subscribed?: boolean }).subscribed,
+    ).toBe(true);
 
     // --- "Electron" client: the same `connectToDaemonSession` pathway
     //     Electron main will use in Phase 13.4. `connectToDaemon`

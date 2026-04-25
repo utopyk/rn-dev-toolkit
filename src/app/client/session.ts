@@ -7,16 +7,17 @@
 // Lifecycle:
 //   - `connectToDaemon` ensures a daemon is running at
 //     <projectRoot>/.rn-dev/sock (auto-spawns if not).
-//   - `events/subscribe` opens a single long-lived socket; every
-//     adapter observes events through it.
-//   - `session/start { profile }` kicks the daemon's supervisor.
+//   - `events/subscribe { profile }` opens a single long-lived socket
+//     that holds the daemon's session refcount. The daemon boots the
+//     session if stopped, joins if running with matching profile,
+//     rejects on profile mismatch.
 //   - Callers await the "running" transition before treating the
-//     session as usable — the daemon returns `starting` immediately.
-//   - `stop()` issues `session/stop` then closes the subscription.
-//   - `disconnect()` closes the subscription WITHOUT asking the daemon
-//     to teardown. Electron's window-close goes through this; a
-//     second client (MCP, another GUI instance) keeps the session
-//     alive. Phase 13.4 prereq #1.
+//     session as usable — the daemon's attach response includes the
+//     starting/running status edge so joiners short-circuit cleanly.
+//   - `stop()` issues `session/stop` (kill-for-everyone) then closes.
+//   - `release()` / `disconnect()` close the subscription socket; the
+//     daemon's socket-close auto-release decrements the refcount, and
+//     last-release triggers a session teardown.
 //
 // The adapters are shaped for React (EventEmitter + async methods) but
 // bear no direct dependency on React; MCP + Electron clients in 13.4
@@ -50,19 +51,24 @@ export interface DaemonSession {
   modules: ModuleHostClient;
   worktreeKey: string;
   /**
-   * Closes the event subscription + client without asking the daemon
-   * to tear down the session. The daemon keeps the services alive for
-   * any other connected client (another TUI, MCP, Electron renderer).
-   * Idempotent — safe to call after the daemon already died.
+   * Phase 13.5 trichotomy of session-end methods:
+   *   - `disconnect()` / `release()` — close the subscribe socket. The
+   *     daemon's socket-close auto-release decrements its session
+   *     refcount; last-release triggers teardown. Today these are
+   *     observably equivalent (no separate wire RPC); `release()` is
+   *     kept as the semantic name shared-daemon callers should reach
+   *     for, and is the call site where a future audit-log RPC will
+   *     hook in.
+   *   - `stop()` — kill-for-everyone. Sends `session/stop` regardless
+   *     of refcount, tearing the session down for every attached
+   *     client. The CLI's "quit the TUI" flow uses this when the user
+   *     actually means "return the daemon to idle."
+   *
+   * All three are idempotent; safe to call after the daemon already
+   * died.
    */
   disconnect: () => void;
-  /**
-   * Graceful session teardown: sends `session/stop` so the supervisor
-   * drives its `running → stopping → stopped` transitions, then closes
-   * the subscription. Used by the CLI path where the user quitting the
-   * TUI legitimately means "return the daemon to idle". For shared-
-   * daemon clients (Electron, MCP) prefer `disconnect()`.
-   */
+  release: () => Promise<void>;
   stop: () => Promise<void>;
 }
 
@@ -87,11 +93,21 @@ export async function connectToDaemonSession(
   const modules = new ModuleHostClient(client, idGen);
 
   let worktreeKey: string | null = null;
-  let resolveRunning: (() => void) | null = null;
-  let rejectRunning: ((err: Error) => void) | null = null;
+  let resolveRunning!: () => void;
+  let rejectRunning!: (err: Error) => void;
   const runningPromise = new Promise<void>((res, rej) => {
     resolveRunning = res;
     rejectRunning = rej;
+  });
+  // The eager catch silences `runningPromise` rejections when the
+  // function throws BEFORE `await runningPromise` runs (e.g. subscribe
+  // rejected, or notifyDisconnected fires from the subscribe socket
+  // close before we reach the await). Attaching here ensures Node's
+  // unhandled-rejection detector always sees a handler. The await
+  // chain below attaches its own handler when reached, so legitimate
+  // rejections still surface to the caller.
+  runningPromise.catch(() => {
+    /* see comment above */
   });
 
   // Track whether the caller has asked us to close. A voluntary close
@@ -107,7 +123,7 @@ export async function connectToDaemonSession(
     // Unblock any caller still awaiting the running transition —
     // otherwise a daemon death mid-boot hangs `connectToDaemonSession`
     // for the full sessionReadyTimeoutMs.
-    rejectRunning?.(
+    rejectRunning(
       err ?? new Error("connectToDaemonSession: daemon disconnected during boot"),
     );
     metro.notifyDisconnected(err);
@@ -130,9 +146,9 @@ export async function connectToDaemonSession(
     if (evt.kind === "session/status") {
       const status = readStatus(evt.data);
       if (status === "running") {
-        resolveRunning?.();
+        resolveRunning();
       } else if (status === "stopped" || status === "stopping") {
-        rejectRunning?.(
+        rejectRunning(
           new Error(
             `connectToDaemonSession: session transitioned to "${status}" before reaching "running"`,
           ),
@@ -148,17 +164,18 @@ export async function connectToDaemonSession(
     });
   };
 
-  // Subscribe BEFORE session/start so we don't miss the starting ->
-  // running edge. The daemon publishes every event to every live
-  // subscriber, so one subscription here covers every adapter.
-  //
-  // `onClose` / `onError` route into `notifyDisconnected` so an
-  // unexpected daemon death surfaces as a 'disconnected' event on
-  // every adapter (Phase 13.4 prereq #1). The 13.3 subscription had
-  // no failure path — acceptable for the TUI (user can ctrl-C and
-  // restart), not acceptable for Electron or long-lived MCP.
+  // Phase 13.5 — refcount lives on the events/subscribe socket. The
+  // profile travels in the subscribe payload so the daemon boots or
+  // joins the session in a single round-trip. `onClose` / `onError`
+  // route into `notifyDisconnected` so an unexpected daemon death
+  // surfaces as a 'disconnected' event on every adapter.
   const sub = await client.subscribe(
-    { type: "command", action: "events/subscribe", id: idGen() },
+    {
+      type: "command",
+      action: "events/subscribe",
+      id: idGen(),
+      payload: { profile },
+    },
     {
       onEvent: onIncomingEvent,
       onClose: () => notifyDisconnected(),
@@ -166,39 +183,40 @@ export async function connectToDaemonSession(
     },
   );
 
+  const subPayload = parseSubscribeResponse(sub.initial.payload);
+  if (!subPayload.subscribed) {
+    sub.close();
+    throw new Error(
+      `connectToDaemonSession: events/subscribe rejected (${subPayload.code ?? "unknown"}): ${subPayload.message ?? ""}`,
+    );
+  }
+
   const readyTimer = setTimeout(() => {
-    rejectRunning?.(
+    rejectRunning(
       new Error(
         `connectToDaemonSession: session did not reach "running" within ${sessionReadyTimeoutMs}ms`,
       ),
     );
   }, sessionReadyTimeoutMs);
 
-  let startPayload: { status?: string; code?: string; message?: string };
-  try {
-    const startResp = await client.send({
-      type: "command",
-      action: "session/start",
-      id: idGen(),
-      payload: { profile },
-    });
-    startPayload = startResp.payload as {
-      status?: string;
-      code?: string;
-      message?: string;
-    };
-  } catch (err) {
-    clearTimeout(readyTimer);
-    sub.close();
-    throw err;
-  }
-
-  if (startPayload.code) {
-    clearTimeout(readyTimer);
-    sub.close();
-    throw new Error(
-      `connectToDaemonSession: session/start rejected (${startPayload.code}): ${startPayload.message ?? ""}`,
-    );
+  // Joiner: session was already running before we attached → no
+  // "running" edge will recur, so resolve the gate now and backfill
+  // worktreeKey via session/status.
+  if (subPayload.status === "running" && subPayload.started === false) {
+    if (!worktreeKey) {
+      try {
+        const statusResp = await client.send({
+          type: "command",
+          action: "session/status",
+          id: idGen(),
+        });
+        const wk = parseStatusResponse(statusResp.payload).worktreeKey;
+        if (wk) worktreeKey = wk;
+      } catch {
+        // Backfill is best-effort — the next event will populate it.
+      }
+    }
+    resolveRunning();
   }
 
   try {
@@ -224,6 +242,15 @@ export async function connectToDaemonSession(
     sub.close();
   };
 
+  const release = async (): Promise<void> => {
+    // Phase 13.5 — close the subscribe socket; the daemon's
+    // socket-close auto-release decrements its session refcount and
+    // tears the session down if we were the last attacher. Kept as a
+    // distinct method (vs `disconnect()`) so a future audit-log RPC
+    // can hook in here without callers having to migrate.
+    disconnect();
+  };
+
   const stop = async (): Promise<void> => {
     try {
       await client.send({
@@ -245,7 +272,62 @@ export async function connectToDaemonSession(
     modules,
     worktreeKey,
     disconnect,
+    release,
     stop,
+  };
+}
+
+/**
+ * Phase 13.5 — runtime parser for the daemon's events/subscribe
+ * response. The wire is `unknown` so type assertions would let a
+ * malicious or buggy daemon return wrong-typed fields and have them
+ * pass through to the joiner short-circuit unchecked. Mirrors the
+ * existing `parseSessionEventEnvelope` discipline.
+ */
+interface SubscribeAck {
+  subscribed: true;
+  status?: "stopped" | "starting" | "running" | "stopping";
+  started?: boolean;
+  attached?: number;
+}
+interface SubscribeReject {
+  subscribed: false;
+  code?: string;
+  message?: string;
+}
+function parseSubscribeResponse(
+  payload: unknown,
+): SubscribeAck | SubscribeReject {
+  if (!payload || typeof payload !== "object") {
+    return { subscribed: false };
+  }
+  const p = payload as Record<string, unknown>;
+  if (p.subscribed !== true) {
+    return {
+      subscribed: false,
+      code: typeof p.code === "string" ? p.code : undefined,
+      message: typeof p.message === "string" ? p.message : undefined,
+    };
+  }
+  return {
+    subscribed: true,
+    status:
+      p.status === "stopped" ||
+      p.status === "starting" ||
+      p.status === "running" ||
+      p.status === "stopping"
+        ? p.status
+        : undefined,
+    started: typeof p.started === "boolean" ? p.started : undefined,
+    attached: typeof p.attached === "number" ? p.attached : undefined,
+  };
+}
+
+function parseStatusResponse(payload: unknown): { worktreeKey?: string } {
+  if (!payload || typeof payload !== "object") return {};
+  const p = payload as Record<string, unknown>;
+  return {
+    worktreeKey: typeof p.worktreeKey === "string" ? p.worktreeKey : undefined,
   };
 }
 

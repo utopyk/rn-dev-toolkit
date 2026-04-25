@@ -52,7 +52,12 @@ describe("connectToDaemonSession disconnect lifecycle", () => {
     projectRoot: worktree,
   });
 
-  it("disconnect() closes client sockets without stopping the daemon session", async () => {
+  it("disconnect() closes client sockets without stopping the daemon session (when another client remains attached)", async () => {
+    // Phase 13.5 — refcount semantic: disconnect() decrements the
+    // daemon's session refcount. With ONE attacher, disconnect tears
+    // the session down (matches the new "no clients left = no point
+    // running" contract). With TWO attachers, the second's refcount
+    // keeps the session alive — that's what this test asserts.
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
 
@@ -61,33 +66,40 @@ describe("connectToDaemonSession disconnect lifecycle", () => {
     });
     liveHandles.push(daemon);
 
-    const session = await connectToDaemonSession(worktree, makeProfile(worktree));
+    const sessionA = await connectToDaemonSession(worktree, makeProfile(worktree));
+    const sessionB = await connectToDaemonSession(worktree, makeProfile(worktree));
 
-    // Register a disconnected listener — disconnect() must NOT fire it.
-    let disconnectedFired = false;
-    session.metro.on("disconnected", () => {
-      disconnectedFired = true;
+    // Register a disconnected listener — voluntary disconnect must
+    // NOT fire it on either session.
+    let aDisconnectedFired = false;
+    let bDisconnectedFired = false;
+    sessionA.metro.on("disconnected", () => {
+      aDisconnectedFired = true;
+    });
+    sessionB.metro.on("disconnected", () => {
+      bDisconnectedFired = true;
     });
 
-    session.disconnect();
+    sessionA.disconnect();
 
-    // Give the daemon a beat to register the socket close.
+    // Give the daemon a beat to process the socket close + auto-release.
     await new Promise((r) => setTimeout(r, 100));
 
-    // Voluntary disconnect doesn't emit disconnected — the adapter
-    // stays "unused but not erroring" from the caller's perspective.
-    expect(disconnectedFired).toBe(false);
+    // Voluntary disconnect doesn't emit disconnected on the
+    // disconnecting adapter — the adapter stays "unused but not
+    // erroring" from the caller's perspective.
+    expect(aDisconnectedFired).toBe(false);
+    // Session B is still attached, so its adapters didn't disconnect.
+    expect(bDisconnectedFired).toBe(false);
 
-    // Fresh client can still query the daemon — the session wasn't
-    // torn down.
-    const { IpcClient } = await import("../../../core/ipc.js");
-    const client2 = new IpcClient(daemon.sockPath);
-    const status = await client2.send({
+    // The daemon's session is still running because B holds a refcount.
+    const status = await sessionB.client.send({
       type: "command",
       action: "session/status",
-      id: "status-after-disconnect",
+      id: "status-after-a-disconnect",
     });
     expect((status.payload as { status?: string }).status).toBe("running");
+    expect((status.payload as { attached?: number }).attached).toBe(1);
   }, 15_000);
 
   it("fires 'disconnected' on every adapter when the daemon dies unexpectedly", async () => {

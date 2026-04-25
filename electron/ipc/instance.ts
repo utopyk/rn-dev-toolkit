@@ -15,18 +15,16 @@ import {
   type InstanceState,
 } from './state.js';
 
-// Phase 13.4.1 — one daemon = one worktree = one session. A second
-// instance against the same daemon is NOT supported in this release;
-// the multi-session story lands with Phase 13.5 ref-counted
-// `DaemonSession.release()` semantics. But the FIRST instance flow
-// (wizard from a no-default-profile boot) DOES need to attach a
-// daemon session — previously this branch surfaced "restart required"
-// even though attach is mechanically possible. Now we attach iff
-// state.daemonSession is null, return MULTI_INSTANCE_NOT_SUPPORTED
-// only when one is already running.
-const MULTI_INSTANCE_NOT_SUPPORTED_MSG =
-  'This release supports one active instance per project. ' +
-  'Close + reopen the active instance, or restart the app to attach services to a different profile.';
+// Phase 13.5 — `MULTI_INSTANCE_NOT_SUPPORTED` retired. The daemon now
+// supports multiple ref-counted attachers via session/release; what
+// Electron rejects below is specifically the "same Electron process,
+// second instance with a *different* profile" case, because Electron
+// only carries one DaemonSession in main-process state. The
+// daemon-side gate is `E_PROFILE_MISMATCH` from supervisor.attach() —
+// we surface that directly rather than the old "restart the app"
+// guidance, which masked the real reason. Cross-profile multi-attach
+// in the same Electron is Phase 13.6+ work (it needs main-process
+// state to hold N sessions).
 
 export function registerInstanceHandlers() {
   ipcMain.handle('instances:list', async () => {
@@ -146,20 +144,41 @@ export function registerInstanceHandlers() {
       }
     }
 
-    // A session already exists for a different profile — multi-instance
-    // would need ref-counted `DaemonSession.release()` semantics that
-    // land in Phase 13.5. Surface a clear "close + reopen" message
-    // rather than silently pretend services attached.
-    appendLog(instance, 'service', MULTI_INSTANCE_NOT_SUPPORTED_MSG);
+    // Same-profile second instance: the daemon already has a live
+    // session for this profile, so we just track the new Electron-side
+    // instance record without opening a second daemon session. The
+    // existing `state.daemonSession` keeps publishing events that the
+    // renderer can route to either instance.
+    const activeProfileName = state.daemonSessionProfileName;
+    const incomingProfileName = profileData.name;
+    if (
+      activeProfileName !== null &&
+      incomingProfileName !== undefined &&
+      activeProfileName === incomingProfileName
+    ) {
+      const msg = `Sharing daemon session "${activeProfileName}" with new instance.`;
+      appendLog(instance, 'service', msg);
+      send('instance:log', { instanceId: id, text: msg });
+      return { ok: true, instance: toSummary(instance) };
+    }
+
+    // Different-profile second instance: the daemon would reject the
+    // attach with E_PROFILE_MISMATCH; we surface that directly. Single-
+    // Electron-process multi-profile is a Phase 13.6+ story.
+    const mismatchMsg =
+      `Daemon already running a different profile in this project. ` +
+      `Cross-profile multi-attach in one Electron app isn't supported yet — ` +
+      `restart the app to switch profiles.`;
+    appendLog(instance, 'service', mismatchMsg);
     send('instance:log', {
       instanceId: id,
-      text: MULTI_INSTANCE_NOT_SUPPORTED_MSG,
+      text: mismatchMsg,
     });
 
     return {
       ok: false,
-      code: 'MULTI_INSTANCE_NOT_SUPPORTED' as const,
-      error: MULTI_INSTANCE_NOT_SUPPORTED_MSG,
+      code: 'PROFILE_MISMATCH' as const,
+      error: mismatchMsg,
       instance: toSummary(instance),
     };
   });

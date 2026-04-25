@@ -58,6 +58,30 @@ export type StopSessionResult =
   | { kind: "ok"; status: "stopping" | "stopped" }
   | { kind: "error"; code: string; message: string };
 
+/**
+ * Result of `attach()`. `started` distinguishes the first-attacher
+ * (who triggered the boot) from subsequent joiners (who are sharing
+ * an already-running or starting session). Callers don't need to
+ * branch on this for correctness — the supervisor resolves all
+ * lifecycle differences internally — but logging and audit consumers
+ * find it useful.
+ */
+export type AttachSessionResult =
+  | {
+      kind: "ok";
+      status: SessionStatus;
+      started: boolean;
+      attached: number;
+    }
+  | { kind: "error"; code: string; message: string };
+
+export interface ReleaseSessionResult {
+  kind: "ok";
+  attached: number;
+  /** True iff this release dropped the last attacher → supervisor.stop(). */
+  stoppedSession: boolean;
+}
+
 type WiredServices = {
   services: SessionServices;
   detach: () => void;
@@ -96,6 +120,14 @@ export class DaemonSupervisor extends EventEmitter {
    * Arch reviewer P1 on identity drift.
    */
   private sessionWorktreeKey: string;
+  /**
+   * Phase 13.5 — connections currently attached to the active session.
+   * First entry triggers the boot; last release tears down. The id is
+   * `IpcMessageEvent.connectionId` so the daemon dispatcher can map a
+   * client socket to its attachment without leaking the raw `net.Socket`
+   * across the supervisor surface.
+   */
+  private attachedConnections = new Set<string>();
 
   constructor(opts: DaemonSupervisorOptions) {
     super();
@@ -128,6 +160,125 @@ export class DaemonSupervisor extends EventEmitter {
    */
   getWorktree(): string {
     return this.worktree;
+  }
+
+  /** Phase 13.5 — count of connections currently attached. */
+  getAttachedCount(): number {
+    return this.attachedConnections.size;
+  }
+
+  /**
+   * Phase 13.5 — stable worktree-hashed key for the active session.
+   * Exposed so the daemon's `session/status` handler can hand it back
+   * to joiners that subscribed too late to catch it on the
+   * session/status event stream.
+   */
+  getSessionWorktreeKey(): string {
+    return this.sessionWorktreeKey;
+  }
+
+  /**
+   * Phase 13.5 — attach a connection to the active session, booting
+   * it on the first attach if no session is running.
+   *
+   * Semantics:
+   *   - status === "stopped" → boot the session (existing `start()` path)
+   *     and add `connectionId` to the attached set. `started: true`.
+   *   - status === "starting" | "running" → idempotent add of
+   *     `connectionId` to the attached set. If a profile is supplied,
+   *     it must match the active profile (else `E_PROFILE_MISMATCH`).
+   *   - status === "stopping" → reject with `E_SESSION_STOPPING`. The
+   *     caller should wait for `stopped` and retry; this matches the
+   *     existing `stop()` invariant that a stopping session is
+   *     committed and a fresh `start()` is required.
+   *
+   * Idempotent on `connectionId` — calling `attach` twice from the same
+   * connection is a no-op for the refcount.
+   */
+  async attach(
+    connectionId: string,
+    opts: StartSessionOptions,
+  ): Promise<AttachSessionResult> {
+    if (this.state.status === "stopping") {
+      return {
+        kind: "error",
+        code: "E_SESSION_STOPPING",
+        message: "session is stopping; wait for stopped before attaching",
+      };
+    }
+
+    if (this.state.status === "starting" || this.state.status === "running") {
+      // Profile mismatch is a hard reject — the second attacher must
+      // not silently end up with a different session than they asked
+      // for. Same-name + same-worktree is the cheap equality check;
+      // deep-equal would be safer but the profile shape is large and
+      // the daemon already accepted the original via validateProfile,
+      // so the pair (name, worktree) is sufficient as a sanity gate.
+      const active = this.activeProfile;
+      if (
+        active &&
+        (active.name !== opts.profile.name ||
+          (active.worktree ?? "") !== (opts.profile.worktree ?? ""))
+      ) {
+        return {
+          kind: "error",
+          code: "E_PROFILE_MISMATCH",
+          message: `daemon already running profile "${active.name}"; cannot attach to "${opts.profile.name}"`,
+        };
+      }
+      this.attachedConnections.add(connectionId);
+      return {
+        kind: "ok",
+        status: this.state.status,
+        started: false,
+        attached: this.attachedConnections.size,
+      };
+    }
+
+    // stopped — first attacher boots the session.
+    const startResult = await this.start(opts);
+    if (startResult.kind === "error") {
+      return startResult;
+    }
+    this.attachedConnections.add(connectionId);
+    return {
+      kind: "ok",
+      status: startResult.status,
+      started: true,
+      attached: this.attachedConnections.size,
+    };
+  }
+
+  /**
+   * Phase 13.5 — release a connection from the active session. Last
+   * release tears down (delegates to `stop()`); intermediate releases
+   * just remove the connection from the attached set.
+   *
+   * Idempotent — releasing an unknown connectionId is a no-op (matches
+   * the socket-close path which fires unconditionally).
+   *
+   * Concurrent release safety: stop() clears attachedConnections, so a
+   * release racing alongside a stop() returns wasAttached=false on the
+   * second branch and short-circuits — no double tear-down.
+   */
+  async release(connectionId: string): Promise<ReleaseSessionResult> {
+    const wasAttached = this.attachedConnections.delete(connectionId);
+    if (!wasAttached) {
+      return {
+        kind: "ok",
+        attached: this.attachedConnections.size,
+        stoppedSession: false,
+      };
+    }
+    if (this.attachedConnections.size === 0 && this.state.status !== "stopped") {
+      await this.stop();
+      return { kind: "ok", attached: 0, stoppedSession: true };
+    }
+    return {
+      kind: "ok",
+      attached: this.attachedConnections.size,
+      stoppedSession: false,
+    };
   }
 
   async start(opts: StartSessionOptions): Promise<StartSessionResult> {
@@ -167,6 +318,15 @@ export class DaemonSupervisor extends EventEmitter {
         // may have already reset the state.
         if (this.bootEpoch === myEpoch) {
           this.activeProfile = null;
+          // Phase 13.5 — drop the first attacher's refcount entry on
+          // boot failure. Otherwise the connId added by attach() before
+          // bootAsync ran stays in the set across a transition to
+          // "stopped"; the next attach (from a new client whose
+          // dispatcher sees state=stopped) re-enters the first-
+          // attacher branch and boots a fresh session, but the stale
+          // entry then blocks last-release teardown until that conn's
+          // socket eventually closes.
+          this.attachedConnections.clear();
           this.transition("stopped");
         }
       },
@@ -182,6 +342,11 @@ export class DaemonSupervisor extends EventEmitter {
 
   async stop(): Promise<StopSessionResult> {
     if (this.state.status === "stopped") {
+      // Even when already stopped, scrub the attached set: callers
+      // hitting session/stop expect the kill-for-everyone semantics
+      // and a stale entry would block the next attach() from booting
+      // a fresh session via the "first attacher" branch.
+      this.attachedConnections.clear();
       return { kind: "ok", status: "stopped" };
     }
     if (this.state.status === "stopping") {
@@ -192,6 +357,11 @@ export class DaemonSupervisor extends EventEmitter {
     // publish check and disposes rather than overwriting state we're
     // about to clear.
     this.bootEpoch++;
+    // session/stop is the kill-for-everyone path (Phase 13.5 — distinct
+    // from session/release, which is the ref-counted detach). Empty the
+    // attached set so a refcount race ("a release lands during stop's
+    // teardown") can't double-dispatch a stop.
+    this.attachedConnections.clear();
     this.transition("stopping");
 
     // Wait for any boot in progress to finish its teardown. Without

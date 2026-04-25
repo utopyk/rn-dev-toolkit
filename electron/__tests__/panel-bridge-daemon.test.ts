@@ -59,27 +59,29 @@ describe("Phase 13.4.1 panel-bridge daemon RPCs (merge gate)", () => {
     }
   });
 
-  async function bootSession(worktree: string): Promise<TestDaemonHandle> {
+  async function bootSession(
+    worktree: string,
+  ): Promise<{ daemon: TestDaemonHandle; session: Awaited<ReturnType<typeof connectToDaemonSession>> }> {
     const daemon = await spawnTestDaemon(worktree, {
       env: { RN_DEV_DAEMON_BOOT_MODE: "fake" },
     });
     liveHandles.push(daemon);
     // The modules IPC dispatcher only registers after the session is
     // running — mirror what Electron does by using connectToDaemonSession.
+    // Phase 13.5 — disconnect() now decrements the daemon's session
+    // refcount; with this client as the only attacher, disconnecting
+    // would tear the session down before the test can issue its
+    // modules/* RPCs. Keep the session attached until afterEach tears
+    // down the daemon process (which closes our socket implicitly).
     const session = await connectToDaemonSession(worktree, fakeProfile(worktree));
-    // We don't need the session's adapters for these tests; stopping the
-    // session would also unregister the dispatcher, so leave it running
-    // until afterEach tears down the daemon. `disconnect()` drops our
-    // subscription without touching the daemon-side session.
-    session.disconnect();
-    return daemon;
+    return { daemon, session };
   }
 
   it("modules/host-call returns MODULE_UNAVAILABLE when moduleId is not registered", async () => {
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
 
-    const daemon = await bootSession(worktree);
+    const { daemon } = await bootSession(worktree);
 
     const resp = await daemon.client.send({
       type: "command",
@@ -103,7 +105,7 @@ describe("Phase 13.4.1 panel-bridge daemon RPCs (merge gate)", () => {
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
 
-    const daemon = await bootSession(worktree);
+    const { daemon } = await bootSession(worktree);
 
     const resp = await daemon.client.send({
       type: "command",
@@ -121,7 +123,7 @@ describe("Phase 13.4.1 panel-bridge daemon RPCs (merge gate)", () => {
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
 
-    const daemon = await bootSession(worktree);
+    const { daemon } = await bootSession(worktree);
 
     const resp = await daemon.client.send({
       type: "command",
@@ -144,7 +146,7 @@ describe("Phase 13.4.1 panel-bridge daemon RPCs (merge gate)", () => {
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
 
-    const daemon = await bootSession(worktree);
+    const { daemon } = await bootSession(worktree);
 
     const resp = await daemon.client.send({
       type: "command",

@@ -232,6 +232,7 @@ export async function attachDaemonSession(
 ): Promise<DaemonSession> {
   const session = await connectElectronToDaemon({ projectRoot, profile });
   state.daemonSession = session;
+  state.daemonSessionProfileName = profile.name ?? null;
   // Reset the single-flight guard so the next disconnect actually logs.
   disconnectLoggedFor = session;
   const surfaceDisconnect = (surface: string, err?: Error): void => {
@@ -247,6 +248,7 @@ export async function attachDaemonSession(
     }
     serviceBus.clearModulesClient();
     state.daemonSession = null;
+    state.daemonSessionProfileName = null;
   };
   session.metro.on('disconnected', (err) => surfaceDisconnect('metro', err));
   session.devtools.on('disconnected', (err) => surfaceDisconnect('devtools', err));

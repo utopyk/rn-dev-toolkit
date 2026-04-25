@@ -1559,11 +1559,16 @@ With (around the existing block):
 ```typescript
 import { connectToDaemonSession } from "../app/client/session.js";
 
-// Resolve default profile via existing logic. Bail clearly if missing.
-const profile = await selectDefaultProfile(profileStore);
+// Resolve default profile. NO existing helper today in src/mcp/server.ts —
+// the implementer needs to either (a) reuse logic from src/core/profile.ts
+// (grep for `isDefault`), (b) reuse the TUI's first-run picker pattern in
+// src/app/first-run.ts, or (c) write a small helper here:
+//   const profiles = await profileStore.list();
+//   const profile = profiles.find((p) => p.isDefault) ?? profiles[0];
+const profile = await resolveDefaultProfile(profileStore);
 if (!profile) {
   throw new Error(
-    "MCP server: no default profile configured. Configure one via `rn-dev save-profile` first.",
+    "MCP server: no profile configured. Configure one via `rn-dev save-profile` first.",
   );
 }
 
@@ -1622,12 +1627,15 @@ Replace each. Mechanical work.
 
 - [ ] **Step 4: Drop the standalone `subscribeToModuleChanges` raw subscribe**
 
-The existing `subscribeToModuleChanges` at `server.ts:195-` opens its own subscribe socket via `ctx.ipcClient.subscribe`. Under PR-C, MCP's session ALREADY subscribes to `modules/*` via `connectToDaemonSession`. The `module-host-adapter.ts`'s ModuleHostClient emits matching events; subscribe to those instead:
+The existing `subscribeToModuleChanges` at `server.ts:195-` opens its own subscribe socket via `ctx.ipcClient.subscribe`. Under PR-C, MCP's session ALREADY subscribes to `modules/*` via `connectToDaemonSession`. The `module-host-adapter.ts`'s `ModuleHostClient` emits a single `"modules-event"` with a discriminated `kind` field (`"state-changed" | "crashed" | "failed"`); subscribe to that instead:
 
 ```typescript
-// In startMcpServer, after ctx is built:
+// In startMcpServer, after ctx is built. Verify exact event name and
+// payload shape against src/app/client/module-host-adapter.ts before
+// wiring — the adapter emits "modules-event" with { kind, ... }.
 if (ctx.session) {
-  ctx.session.modules.on("state-changed", async () => {
+  ctx.session.modules.on("modules-event", async (evt) => {
+    if (evt.kind !== "state-changed") return;
     try {
       const next = await discoverModuleContributedTools(ctx, flags);
       moduleTools = next;

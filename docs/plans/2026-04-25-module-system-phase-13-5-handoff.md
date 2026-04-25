@@ -89,7 +89,14 @@ stale entry).
 validation, dead `EMPTY_REGISTRY`), Sec P2 (random temp-filename
 suffix), Simplicity P0 (dead readFileSync import).
 
-### PR-D — per-conn sender bindings for `modules/host-call` ([PR #23](https://github.com/utopyk/rn-dev-cli/pull/23), open at handoff time)
+### PR-D — per-conn sender bindings for `modules/host-call` ([PR #23](https://github.com/utopyk/rn-dev-cli/pull/23), squashed as `e448920`)
+
+**Shipped default-off** behind `RN_DEV_HOSTCALL_BIND_GATE=1` env flag
+(Sec + Kieran P0 finding: gate-on-by-default would break Electron's
+host-call bridge entirely since `IpcClient.send()` opens a fresh
+socket per call → no path for a production caller to bind-sender on
+the same socket they later host-call from). PR-C must land the long-
+lived RPC channel before the default flips.
 
 Daemon-side authorization gate. Pre-13.5, hostCall trusted
 `payload.moduleId` because there was at most one client per daemon.
@@ -177,8 +184,9 @@ From `docs/plans/2026-04-25-next-session-prompt-phase-13-5.md`:
 
 ## Verification at end of session
 
-After PR-A + PR-B merged (PR-D pending):
-- vitest: 985 / 0 (originally 942 → +43 new in this phase)
+All three PRs merged:
+- vitest: 983 / 0 (originally 942 → +41 net new in this phase, after
+  some test consolidation in PR-D's review fixes)
 - tsc root: 149 (pre-existing wizard, unchanged)
 - tsc electron: 0
 - bun run build: green
@@ -205,18 +213,37 @@ After PR-A + PR-B merged (PR-D pending):
 - Audit-log entries for daemon register/unregister.
 - `version: 1` field in registry JSON for forward-compat.
 
-### PR-D reviewer feedback (status TBD at handoff)
+### PR-D reviewer feedback applied
 
-3 reviewers dispatched, status pending. Notable expected items based
-on the documented known-limitation:
-- The per-socket-binding limitation is the biggest open question.
-  PR-C will need to address by routing bind-sender + host-call over
-  the long-lived events/subscribe socket.
+3 reviewers (Sec + Kieran TS + Simplicity) all flagged a P0:
+gate-on-by-default would break Electron's host-call bridge. Adopted
+Sec's recommendation (b): env-flag default-off. Default flips when
+PR-C lands the long-lived RPC channel.
+
+Other applied:
+- Sec/Kieran P0-2 — connectionId === undefined now denies (not
+  skips) when the gate is enabled.
+- Simplicity P0 — dropped dead `size()`/`boundModules()` methods
+  (mirroring PR-A's `attachWithoutProfile` precedent).
+- Simplicity P0 — collapsed `senderBindings` tri-state to bi-state.
+- Simplicity P1 — dropped self-refuting "is registered?" pre-check.
+- Kieran P1-2 — `parseBindSenderRequest` runtime parser replaces
+  dishonest cast.
+- Sec P1-2 — bind-sender now writes audit-log entries.
+- Simplicity P1 — trimmed 25-line header comment to 7 lines.
+
+Deferred to PR-C / Phase 13.6:
+- Long-lived RPC channel that makes bind-sender usable from
+  production callers; once it lands, flip the gate default-on.
+- subCode field for differentiated error codes (Kieran P1-1).
+- Narrow cleanup race window (Sec finding #5).
+- Real adversary-prevention via per-module bearer tokens or
+  SO_PEERCRED — Phase 14+ (Sec finding #2).
 
 ## Branching state at handoff
 
 - `main`: PR-A + PR-B squash-merged.
-- `feat/module-system-phase-13-5-d`: PR-D branch, [PR #23](https://github.com/utopyk/rn-dev-cli/pull/23) open.
+- `feat/module-system-phase-13-5-d`: deleted (squash-merged via gh).
 - `feat/module-system-phase-13-5-b`: deleted (squash-merged via gh).
 - `feat/module-system-phase-13-5`: deleted (PR-A squash-merged via gh).
 - Stale branches `pr-22` (local artifact from interactive merge): can be deleted.

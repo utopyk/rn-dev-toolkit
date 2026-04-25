@@ -18,19 +18,16 @@ shipped 2026-04-25 in an autonomous overnight session:
   `a480425`) — active-daemon registry at
   `~/.rn-dev/registry.json`. O_EXCL RMW lock; tightened shape
   validation. 13 new tests.
-- PR-D ([#23](https://github.com/utopyk/rn-dev-cli/pull/23)) — per-conn
-  sender bindings for `modules/host-call`. Status at handoff:
-  **review pending; check PR-23 review feedback before continuing.**
+- PR-D ([#23](https://github.com/utopyk/rn-dev-cli/pull/23), `e448920`)
+  — per-conn sender bindings for `modules/host-call`. Shipped
+  **default-off** via `RN_DEV_HOSTCALL_BIND_GATE=1` env flag (Sec +
+  Kieran P0: gate-on-by-default would break Electron's host-call
+  bridge). 11 new tests, including a load-bearing default-off check.
 
 Read the Phase 13.5 handoff doc:
 [`docs/plans/2026-04-25-module-system-phase-13-5-handoff.md`](2026-04-25-module-system-phase-13-5-handoff.md).
 
 ## This session: Phase 13.6
-
-### 0. Address PR-23 review feedback first
-
-Reviewers were dispatched at handoff time; their comments live on
-the PR. Resolve P0/P1, then `gh pr merge 23 --squash --delete-branch`.
 
 ### 1. PR-C — flip MCP server to daemon-client (the keystone remaining)
 

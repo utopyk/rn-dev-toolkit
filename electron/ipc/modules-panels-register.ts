@@ -38,31 +38,59 @@ import type { PanelSenderRegistry } from "../panel-sender-registry.js";
  * errors.
  */
 export function registerModulesPanelsIpc(
-  getDeps: () => ModulesPanelsIpcDeps | null,
+  getDeps: () => Promise<ModulesPanelsIpcDeps>,
   getSenderRegistry?: () => PanelSenderRegistry | null,
 ): ModulesPanelsIpcHandle {
   let activeKey: string | null = null;
+  // Latest resolved deps, cached synchronously so `getActiveBounds`
+  // can read the bounds map without an async hop. `getActiveBounds` is
+  // invoked from the panel-bridge's resize callback path; by then the
+  // panel has already been activated, which means an `await resolveDeps()`
+  // path already resolved at least once. Updated on every successful
+  // resolve below.
+  let lastDeps: ModulesPanelsIpcDeps | null = null;
+  const resolveDeps = async (): Promise<ModulesPanelsIpcDeps> => {
+    const deps = await getDeps();
+    lastDeps = deps;
+    return deps;
+  };
 
   ipcMain.handle("modules:list-panels", async () => {
-    const deps = getDeps();
-    if (!deps) return { modules: [] };
-    return deps.modulesClient.listPanels();
+    try {
+      const deps = await resolveDeps();
+      return deps.modulesClient.listPanels();
+    } catch {
+      // Hard failure to ever reach the daemon — surface empty rather
+      // than a malformed payload the renderer's table would crash on.
+      // The user-facing log still gets the disconnect notice via main.ts.
+      return { modules: [] };
+    }
   });
 
   // Phase 5c — full module rows for the Marketplace renderer panel.
   // Projects through the daemon's `modules/list` RPC so one
   // RegisteredModule → one row shape regardless of transport.
   ipcMain.handle("modules:list", async () => {
-    const deps = getDeps();
-    if (!deps) return { modules: [] };
-    return deps.modulesClient.list();
+    try {
+      const deps = await resolveDeps();
+      return deps.modulesClient.list();
+    } catch {
+      return { modules: [] };
+    }
   });
 
   ipcMain.handle(
     "modules:activate-panel",
     async (event, payload: ActivatePanelPayload) => {
-      const deps = getDeps();
-      if (!deps) return { ok: false, error: "modules-panels: services not ready yet" };
+      let deps: ModulesPanelsIpcDeps;
+      try {
+        deps = await resolveDeps();
+      } catch (err) {
+        return {
+          ok: false,
+          error: `modules-panels: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
       // Panel lifecycle channels are driven by the host UI (main renderer),
       // not by module panels themselves — reject non-host senders.
       const senderReg = getSenderRegistry?.();
@@ -102,8 +130,7 @@ export function registerModulesPanelsIpc(
 
   ipcMain.handle(
     "modules:deactivate-panel",
-    (event, payload: DeactivatePanelPayload) => {
-      const deps = getDeps();
+    async (event, payload: DeactivatePanelPayload) => {
       const key = `${payload.moduleId}:${payload.panelId}`;
       if (activeKey === key) activeKey = null;
       const senderReg = getSenderRegistry?.();
@@ -113,15 +140,19 @@ export function registerModulesPanelsIpc(
           error: "modules:deactivate-panel may only be invoked by the host UI",
         };
       }
-      if (!deps) return { ok: true };
+      let deps: ModulesPanelsIpcDeps;
+      try {
+        deps = await resolveDeps();
+      } catch {
+        return { ok: true };
+      }
       return deactivatePanel(deps, payload);
     },
   );
 
   ipcMain.handle(
     "modules:set-panel-bounds",
-    (event, payload: SetPanelBoundsPayload) => {
-      const deps = getDeps();
+    async (event, payload: SetPanelBoundsPayload) => {
       const senderReg = getSenderRegistry?.();
       if (senderReg && senderReg.resolve(event.sender)?.kind !== "host") {
         return {
@@ -129,7 +160,12 @@ export function registerModulesPanelsIpc(
           error: "modules:set-panel-bounds may only be invoked by the host UI",
         };
       }
-      if (!deps) return { ok: true };
+      let deps: ModulesPanelsIpcDeps;
+      try {
+        deps = await resolveDeps();
+      } catch {
+        return { ok: true };
+      }
       return setPanelBounds(deps, payload);
     },
   );
@@ -142,12 +178,16 @@ export function registerModulesPanelsIpc(
   ipcMain.handle(
     "modules:call-tool",
     async (event, payload: CallToolPayload) => {
-      const deps = getDeps();
-      if (!deps) {
+      let deps: ModulesPanelsIpcDeps;
+      try {
+        deps = await resolveDeps();
+      } catch (err) {
         return {
           kind: "error" as const,
           code: "MODULE_UNAVAILABLE" as const,
-          message: "modules-panels: services not ready yet",
+          message:
+            "modules-panels: " +
+            (err instanceof Error ? err.message : String(err)),
         };
       }
       const senderReg = getSenderRegistry?.();
@@ -174,12 +214,16 @@ export function registerModulesPanelsIpc(
   ipcMain.handle(
     "modules:host-call",
     async (event, payload: HostCallPayload) => {
-      const deps = getDeps();
-      if (!deps) {
+      let deps: ModulesPanelsIpcDeps;
+      try {
+        deps = await resolveDeps();
+      } catch (err) {
         return {
           kind: "error" as const,
           code: "MODULE_UNAVAILABLE" as const,
-          message: "modules-panels: services not ready yet",
+          message:
+            "modules-panels: " +
+            (err instanceof Error ? err.message : String(err)),
         };
       }
       // Phase 5b hardening — bind event.sender to the moduleId the panel
@@ -220,8 +264,7 @@ export function registerModulesPanelsIpc(
       ipcMain.removeHandler("modules:host-call");
     },
     getActiveBounds: () => {
-      const deps = getDeps();
-      return activeKey && deps ? deps.bounds.get(activeKey) : undefined;
+      return activeKey && lastDeps ? lastDeps.bounds.get(activeKey) : undefined;
     },
   };
 }

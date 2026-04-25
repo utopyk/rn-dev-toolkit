@@ -65,76 +65,57 @@ export function ModuleConfigForm({
   >({ kind: 'idle' });
   const [justSaved, setJustSaved] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // Tracked separately from `loadError` so the retry-on-services-ready
-  // path can distinguish "still booting" from a hard error the user
-  // should see (E_CONFIG_MODULE_UNKNOWN, etc.). When `loadPending` is
-  // true the render shows a benign spinner instead of the alarming
-  // "Failed to load config" banner.
   const [loadPending, setLoadPending] = useState(true);
 
   // Kept in sync with state so the modules:event handler can read the
   // latest config + draft without depending on them (closure stability
   // keeps useIpcOn from churning subscriptions on every keystroke).
-  // Same trick for `loadPending` so the kind:'ready' retry path
-  // doesn't depend on the loadPending state value.
   const configRef = useRef(config);
   const draftRef = useRef(draft);
-  const loadPendingRef = useRef(true);
   useEffect(() => {
     configRef.current = config;
     draftRef.current = draft;
   }, [config, draft]);
-  useEffect(() => {
-    loadPendingRef.current = loadPending;
-  }, [loadPending]);
 
-  const fetchConfig = useCallback(() => {
+  // Phase 13.4.1 — the Electron handler's `getDeps()` is now an
+  // awaitable promise that resolves once the daemon-client adapter
+  // publishes. The renderer's `invoke` pends until the main process
+  // has live deps, so we no longer need a "retry on ready" path or a
+  // pending-vs-error code split. The only remaining error shapes
+  // are: missing-reply, daemon `{error: string}`, and a residual
+  // `{kind:'error'}` from genuine errors (sender-mismatch, validation).
+  useEffect(() => {
     let active = true;
     setStatus({ kind: 'idle' });
+    setLoadPending(true);
     invoke<ConfigGetReply | null>('modules:config-get', { moduleId, scopeUnit }).then(
       (reply) => {
         if (!active) return;
+        setLoadPending(false);
         if (!reply) {
           setLoadError('IPC returned no response');
-          setLoadPending(false);
           return;
         }
         if ('error' in reply) {
           setLoadError(reply.error);
-          setLoadPending(false);
           return;
         }
         if ('kind' in reply && reply.kind === 'error') {
-          // E_CONFIG_SERVICES_PENDING means the daemon-client adapter
-          // hasn't published yet — the boot-window race. Stay in pending
-          // state without surfacing an error; the `modules:event` ready
-          // ping below triggers a retry. Any other error code is
-          // surfaced loudly because the user can't resolve it by waiting.
-          if (reply.code === 'E_CONFIG_SERVICES_PENDING') {
-            return;
-          }
           setLoadError(`${reply.code}: ${reply.message}`);
-          setLoadPending(false);
           return;
         }
-        // After the error-shape checks above, `reply` must be the
-        // success shape `{moduleId, config}`. TS doesn't narrow on the
-        // `'kind' in reply` discriminator alone, so an explicit
-        // `'config' in reply` guard pins it.
         if (!('config' in reply)) {
           setLoadError('Unexpected modules:config-get reply shape');
-          setLoadPending(false);
           return;
         }
         setLoadError(null);
-        setLoadPending(false);
         setConfig(reply.config);
         setDraft(reply.config);
       },
       (err: unknown) => {
         if (!active) return;
-        setLoadError(err instanceof Error ? err.message : String(err));
         setLoadPending(false);
+        setLoadError(err instanceof Error ? err.message : String(err));
       },
     );
     return () => {
@@ -142,26 +123,14 @@ export function ModuleConfigForm({
     };
   }, [invoke, moduleId, scopeUnit]);
 
-  useEffect(() => {
-    return fetchConfig();
-  }, [fetchConfig]);
-
   // Live-update from external config-changed events (another window / the
-  // TUI, or `modules:config-set` from a subprocess module). Also retries
-  // the initial load on the synthetic `kind: 'ready'` ping that
-  // `electron/ipc/index.ts::registerModulePanelsHandlers` fires when the
-  // daemon-client adapter first publishes — closes the boot-window race
-  // where Settings mounts before services attach. Reads latest config +
-  // draft via refs so the callback identity is stable across renders —
-  // otherwise `useIpcOn` would churn subscriptions per keystroke.
+  // TUI, or `modules:config-set` from a subprocess module). Reads latest
+  // config + draft via refs so the callback identity is stable across
+  // renders — otherwise `useIpcOn` would churn subscriptions per keystroke.
   useIpcOn(
     'modules:event',
     useCallback(
       (event: ConfigChangedEvent | { kind: string; moduleId: string }) => {
-        if (event.kind === 'ready') {
-          if (loadPendingRef.current) fetchConfig();
-          return;
-        }
         if (event.kind !== 'config-changed') return;
         if (event.moduleId !== moduleId) return;
         const fresh = (event as ConfigChangedEvent).config ?? {};
@@ -172,7 +141,7 @@ export function ModuleConfigForm({
           setDraft(fresh);
         }
       },
-      [moduleId, fetchConfig],
+      [moduleId],
     ),
   );
 

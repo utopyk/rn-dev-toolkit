@@ -5,3 +5,4 @@ dist-renderer/
 .superpowers/
 .claude/
 renderer/node_modules/
+test-results/

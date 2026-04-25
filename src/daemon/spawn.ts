@@ -120,9 +120,20 @@ export function spawnDetachedDaemon(
     );
   }
 
+  // process.execPath under Electron is the Electron binary — spawning
+  // it with our CLI entry would launch a second Electron app, not a
+  // Node process. The daemon entry is either a .tsx (dev: needs bun
+  // or a Node + tsx loader) or compiled .js (runs under any Node-
+  // compatible runtime). Pick the right interpreter:
+  //   - .tsx + RN_DEV_DAEMON_INTERPRETER set → use that (CI override)
+  //   - .tsx → bun (every dev path the project supports)
+  //   - .js → process.execPath when it looks like node, else node
+  const interpreter = pickDaemonInterpreter(entry);
   const child = spawn(
-    process.execPath,
-    [entry, "daemon", worktree, "--foreground"],
+    interpreter,
+    interpreter === "bun"
+      ? ["run", entry, "daemon", worktree, "--foreground"]
+      : [entry, "daemon", worktree, "--foreground"],
     {
       detached: true,
       stdio: "ignore",
@@ -131,6 +142,20 @@ export function spawnDetachedDaemon(
   );
   child.unref();
   return child;
+}
+
+function pickDaemonInterpreter(entry: string): string {
+  const override = process.env.RN_DEV_DAEMON_INTERPRETER;
+  if (override) return override;
+  if (entry.endsWith(".tsx") || entry.endsWith(".ts")) return "bun";
+  // Compiled .js — process.execPath works UNLESS the parent is
+  // Electron (where execPath is the Electron binary). Detect Electron
+  // by sniffing for the electron-specific globals injected at boot.
+  const isElectron =
+    typeof process.versions === "object" &&
+    "electron" in (process.versions as Record<string, unknown>);
+  if (isElectron) return "node";
+  return process.execPath;
 }
 
 export async function waitForSocket(

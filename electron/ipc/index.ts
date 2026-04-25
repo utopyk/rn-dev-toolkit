@@ -40,6 +40,51 @@ import {
 // moduleId payloads.
 const senderRegistry = new PanelSenderRegistry();
 
+// Shared "wait for daemon-client to publish" gate. Handlers that need a
+// live `ModuleHostClient` (modules-config / modules-install /
+// modules-panels) await this instead of synchronously checking
+// `serviceBus.modulesClient`. Closes the boot-window race where a
+// renderer panel mounts before `connectElectronToDaemon` resolves and
+// the handler returns an empty/pending shape that the renderer can't
+// distinguish from "really nothing here". Phase 13.4.1 follow-up.
+//
+// Resolves with the client once published; rejects after `MODULES_CLIENT_TIMEOUT_MS`
+// so a daemon-spawn failure doesn't hang the renderer's invoke
+// indefinitely. Resets on `modulesClient` null (daemon disconnect) so
+// a reconnect re-arms the wait.
+const MODULES_CLIENT_TIMEOUT_MS = 30_000;
+let currentModulesClient: import('../../src/app/client/module-host-adapter.js').ModuleHostClient | null = null;
+let pendingClientPromise: Promise<import('../../src/app/client/module-host-adapter.js').ModuleHostClient> | null = null;
+
+export function awaitModulesClient(): Promise<import('../../src/app/client/module-host-adapter.js').ModuleHostClient> {
+  if (currentModulesClient) return Promise.resolve(currentModulesClient);
+  if (pendingClientPromise) return pendingClientPromise;
+  pendingClientPromise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      serviceBus.off('modulesClient', onClient);
+      pendingClientPromise = null;
+      reject(
+        new Error(
+          `awaitModulesClient: daemon client did not publish within ${MODULES_CLIENT_TIMEOUT_MS}ms`,
+        ),
+      );
+    }, MODULES_CLIENT_TIMEOUT_MS);
+    const onClient = (client: import('../../src/app/client/module-host-adapter.js').ModuleHostClient | null): void => {
+      if (!client) return;
+      clearTimeout(timer);
+      serviceBus.off('modulesClient', onClient);
+      pendingClientPromise = null;
+      resolve(client);
+    };
+    serviceBus.on('modulesClient', onClient);
+  });
+  return pendingClientPromise;
+}
+
+serviceBus.on('modulesClient', (client) => {
+  currentModulesClient = client ?? null;
+});
+
 export { startRealServices } from './services.js';
 
 /**
@@ -141,7 +186,21 @@ function registerModulePanelsHandlers(window: BrowserWindow): void {
   let deps: ModulesPanelsIpcDeps | null = null;
 
   const handle = registerModulesPanelsIpc(
-    () => deps,
+    async () => {
+      if (deps) return deps;
+      // Wait for modulesClient to publish, then deps will populate via
+      // the listener below; loop a tick to pick it up.
+      await awaitModulesClient();
+      // The listener that builds `deps` runs synchronously after the
+      // serviceBus emit; by the time the awaitModulesClient promise
+      // resolves, `deps` is populated.
+      if (!deps) {
+        throw new Error(
+          'modules-panels: modulesClient published but deps were not initialized',
+        );
+      }
+      return deps;
+    },
     () => senderRegistry,
   );
 
@@ -221,7 +280,16 @@ function registerModulesConfigHandlers(): void {
   let deps: ModulesConfigIpcDeps | null = null;
 
   registerModulesConfigIpc(
-    () => deps,
+    async () => {
+      if (deps) return deps;
+      await awaitModulesClient();
+      if (!deps) {
+        throw new Error(
+          'modules-config: modulesClient published but deps were not initialized',
+        );
+      }
+      return deps;
+    },
     () => senderRegistry,
   );
 
@@ -260,7 +328,16 @@ function registerModulesInstallHandlers(): void {
 
   senderRegistry.allowHostWrite('marketplace');
   registerModulesInstallIpc(
-    () => deps,
+    async () => {
+      if (deps) return deps;
+      await awaitModulesClient();
+      if (!deps) {
+        throw new Error(
+          'modules-install: modulesClient published but deps were not initialized',
+        );
+      }
+      return deps;
+    },
     () => senderRegistry,
   );
 

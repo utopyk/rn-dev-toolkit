@@ -2,11 +2,13 @@
 // `modules-config.ts` so the pure logic there can be imported in vitest
 // without triggering `import { ipcMain } from "electron"` at module load.
 //
-// Channels are registered eagerly — deps are looked up per call via
-// `getDeps()` so the renderer can safely invoke `modules:config-get`
-// before `startRealServices` finishes publishing `moduleHost` +
-// `moduleRegistry` + `moduleEventsBus`. Missing deps return a clear
-// error rather than "No handler registered".
+// Handlers `await getDeps()` instead of synchronously checking — the
+// returned promise resolves immediately if the daemon-client adapter
+// has already published, or pends until it does. Closes the boot-
+// window race where a renderer panel mounts before
+// `connectElectronToDaemon` resolves; the previous "return E_CONFIG_SERVICES_PENDING
+// + retry on modules:event ready" path lost events when the renderer
+// subscribed AFTER the synthetic ping fired.
 
 import { ipcMain } from "electron";
 import {
@@ -22,18 +24,22 @@ export interface ModulesConfigIpcHandle {
   dispose: () => void;
 }
 
+const FAILED_DEPS_REPLY = (msg: string) => ({
+  kind: "error" as const,
+  code: "E_CONFIG_SERVICES_PENDING" as const,
+  message: msg,
+});
+
 export function registerModulesConfigIpc(
-  getDeps: () => ModulesConfigIpcDeps | null,
+  getDeps: () => Promise<ModulesConfigIpcDeps>,
   getSenderRegistry?: () => PanelSenderRegistry | null,
 ): ModulesConfigIpcHandle {
-  ipcMain.handle("modules:config-get", (event, payload: ConfigGetPayload) => {
-    const deps = getDeps();
-    if (!deps) {
-      return {
-        kind: "error" as const,
-        code: "E_CONFIG_SERVICES_PENDING" as const,
-        message: "modules-config: services not ready yet",
-      };
+  ipcMain.handle("modules:config-get", async (event, payload: ConfigGetPayload) => {
+    let deps: ModulesConfigIpcDeps;
+    try {
+      deps = await getDeps();
+    } catch (err) {
+      return FAILED_DEPS_REPLY(err instanceof Error ? err.message : String(err));
     }
     // Read path — host UI can read any moduleId (Marketplace panel
     // enumerates all states; Settings reads its own + potentially peers).
@@ -50,14 +56,12 @@ export function registerModulesConfigIpc(
     return handleConfigGet(deps, payload);
   });
 
-  ipcMain.handle("modules:config-set", (event, payload: ConfigSetPayload) => {
-    const deps = getDeps();
-    if (!deps) {
-      return {
-        kind: "error" as const,
-        code: "E_CONFIG_SERVICES_PENDING" as const,
-        message: "modules-config: services not ready yet",
-      };
+  ipcMain.handle("modules:config-set", async (event, payload: ConfigSetPayload) => {
+    let deps: ModulesConfigIpcDeps;
+    try {
+      deps = await getDeps();
+    } catch (err) {
+      return FAILED_DEPS_REPLY(err instanceof Error ? err.message : String(err));
     }
     // Write path — Phase 6 Security P1-1. Host UI can only write to
     // moduleIds in its allowlist (see allowHostWrite). A renderer XSS

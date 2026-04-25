@@ -15,10 +15,20 @@
 // calling without a corresponding fake method surfaces as a type error,
 // not a runtime crash.
 
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { MetroLogsStore } from "../core/metro-logs/buffer.js";
 import { CapabilityRegistry } from "../core/module-host/capabilities.js";
 import { registerModulesIpc } from "../app/modules-ipc.js";
+import { ModuleConfigStore } from "../modules/config-store.js";
+import {
+  devSpaceManifest,
+  lintTestManifest,
+  settingsManifest,
+} from "../modules/built-in/manifests.js";
+import { registerMarketplaceBuiltIn } from "../modules/built-in/marketplace.js";
 import type {
   BootSessionServicesOptions,
   SessionServices,
@@ -74,6 +84,7 @@ interface FakeModuleHostSurface {
   // first acquire/inspect/shutdown call would crash at runtime with
   // "is not a function".
   readonly capabilities: CapabilityRegistry;
+  readonly configStore: ModuleConfigStore;
   inspect(moduleId: string, scopeUnit: string): null;
   acquire(): Promise<never>;
   release(): Promise<void>;
@@ -97,6 +108,18 @@ export async function fakeBootSessionServices(
   const moduleHost = makeFakeModuleHost(capabilities);
   const metroLogsStore = new MetroLogsStore();
   const moduleRegistry = opts.moduleRegistry;
+
+  // Register the four built-in modules so `modules/list` returns them
+  // under fake boot — same parity the real `createModuleSystem` gives
+  // production. Without this, the smoke suite's Marketplace assertion
+  // (and any test that opens the Settings tab) would see an empty
+  // module list. Phase 13.4.1 follow-up — the previous fake-boot
+  // skipped registration because pre-flip the in-process bootstrap
+  // handled it Electron-side.
+  moduleRegistry.registerBuiltIn(devSpaceManifest);
+  moduleRegistry.registerBuiltIn(lintTestManifest);
+  moduleRegistry.registerBuiltIn(settingsManifest);
+  registerMarketplaceBuiltIn({ moduleRegistry, capabilities });
 
   // Phase 13.4.1 — register the modules IPC dispatcher on the daemon's
   // shared socket so integration tests that exercise `modules/*` RPCs
@@ -225,6 +248,16 @@ function makeFakeModuleHost(
   const emitter = new EventEmitter() as EventEmitter & FakeModuleHostSurface;
   Object.defineProperty(emitter, "capabilities", {
     value: capabilities,
+    writable: false,
+    enumerable: true,
+  });
+  // Real ModuleConfigStore writing to a per-test tmpdir so concurrent
+  // smoke runs + integration tests don't fight over the same on-disk
+  // config files. The store is throwaway — afterEach cleanup deletes
+  // the worktree but not this dir; OS tmpdir gc handles it.
+  const configDir = mkdtempSync(join(tmpdir(), "rn-dev-fake-cfg-"));
+  Object.defineProperty(emitter, "configStore", {
+    value: new ModuleConfigStore({ modulesDir: configDir }),
     writable: false,
     enumerable: true,
   });

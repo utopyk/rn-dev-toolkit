@@ -139,9 +139,16 @@ export function App() {
             'instances:getLogs',
             inst.id,
           ).then((logs) => {
+            // `sections` defaults to [] — the daemon-flipped Electron
+            // doesn't emit `instance:section:*` events anymore (Phase
+            // 13.4.1 collapsed services.ts), so persisted log
+            // snapshots only carry flat lines. DevSpace reads
+            // `sections.some(...)` to drive its error-summary banner;
+            // an undefined here would crash the whole renderer.
             instanceLogsRef.current.set(inst.id, {
               serviceLines: logs?.serviceLines ?? [],
               metroLines: logs?.metroLines ?? [],
+              sections: [],
             });
             setLogVersion(v => v + 1);
           });

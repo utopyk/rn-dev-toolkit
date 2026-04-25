@@ -30,37 +30,46 @@ import type { Profile } from "../src/core/types.js";
 
 /**
  * Locate the rn-dev CLI entry so `connectToDaemon` can cold-spawn a
- * daemon from Electron. Electron's `process.argv[1]` points at the
- * packaged `main.js`, not this repo's `src/index.tsx`; omitting this
- * fails with "CLI entry does not exist on disk".
+ * daemon from Electron. Two valid source layouts in dev:
+ *   - **tsx-driven** (`bun run dev:gui` / `npm run dev:electron` /
+ *     Playwright smoke): main.ts + this file run from
+ *     `<repo>/electron/`. CLI entry is at `<repo>/src/index.tsx`
+ *     (one directory up).
+ *   - **compiled** (`bun run build`): bundle output sits at
+ *     `<repo>/dist/electron/daemon-connect.js`. CLI entry is at
+ *     `<repo>/src/index.tsx` (two directories up).
+ * The previous single-path heuristic only handled the compiled
+ * layout; Phase 13.4.1 dropping the env gate exposed the dev-path
+ * gap as "CLI entry does not exist on disk" the moment the daemon
+ * client became the only path. Probe both, fail loudly only after
+ * neither resolves.
  *
- * Dev path (this file → dist/electron/daemon-connect.js):
- *   dirname(import.meta.url) = <repo>/dist/electron
- *   go up two levels + join src/index.tsx.
- *
- * Packaged path (asar) is NOT wired in Phase 13.4 — callers get a
- * loud throw rather than a silent ENOENT from `spawnDetachedDaemon`.
- * A packaged-build entry point lands with the installer work in
- * Phase 13.5. Kieran + Security P1 on PR #18 (silent ENOENT was
- * the anti-pattern flagged against Martin's "fail fast with clear
- * messages" rule).
+ * Packaged Electron (`app.isPackaged`) still throws — installer
+ * work in Phase 13.5 wires the asar layout.
  */
 function resolveDaemonEntry(): string {
   if (app.isPackaged) {
     throw new Error(
-      "resolveDaemonEntry: packaged Electron is not supported in Phase 13.4. " +
-        "Run via `bun run electron` until the packaged-build daemon entry is " +
-        "wired in Phase 13.5.",
+      "resolveDaemonEntry: packaged Electron is not supported yet. " +
+        "Run via `bun run electron` / `npm run dev:gui` until the " +
+        "packaged-build daemon entry is wired in Phase 13.5.",
     );
   }
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const resolved = path.resolve(here, "..", "..", "src", "index.tsx");
-  if (!existsSync(resolved)) {
-    throw new Error(
-      `resolveDaemonEntry: CLI entry not found at ${resolved} — unexpected layout (symlinked repo, non-standard dist path, stale build?).`,
-    );
+  const candidates = [
+    // Dev: <repo>/electron/daemon-connect.ts → <repo>/src/index.tsx
+    path.resolve(here, "..", "src", "index.tsx"),
+    // Compiled: <repo>/dist/electron/daemon-connect.js → <repo>/src/index.tsx
+    path.resolve(here, "..", "..", "src", "index.tsx"),
+  ];
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
   }
-  return resolved;
+  throw new Error(
+    `resolveDaemonEntry: CLI entry not found. Tried:\n  ${candidates.join(
+      "\n  ",
+    )}\nUnexpected layout (symlinked repo, non-standard dist path, stale build?).`,
+  );
 }
 
 export interface ConnectElectronToDaemonOptions {

@@ -56,12 +56,6 @@ export interface ModulesInstallIpcHandle {
   dispose: () => void;
 }
 
-const PENDING_DEPS_REPLY = {
-  kind: "error" as const,
-  code: "E_INSTALL_SERVICES_PENDING" as const,
-  message: "marketplace: services not ready yet",
-};
-
 const FORBIDDEN_REPLY = {
   kind: "error" as const,
   code: "E_SENDER_FORBIDDEN" as const,
@@ -71,14 +65,26 @@ const FORBIDDEN_REPLY = {
 };
 
 export function registerModulesInstallIpc(
-  getDeps: () => ModulesInstallIpcDeps | null,
+  getDeps: () => Promise<ModulesInstallIpcDeps>,
   getSenderRegistry?: () => PanelSenderRegistry | null,
 ): ModulesInstallIpcHandle {
+  const failedReply = (err: unknown) => ({
+    kind: "error" as const,
+    code: "E_INSTALL_SERVICES_PENDING" as const,
+    message:
+      "marketplace: " +
+      (err instanceof Error ? err.message : String(err)),
+  });
+
   ipcMain.handle(
     "modules:install",
     async (event, payload: ModuleInstallRequest) => {
-      const deps = getDeps();
-      if (!deps) return PENDING_DEPS_REPLY;
+      let deps: ModulesInstallIpcDeps;
+      try {
+        deps = await getDeps();
+      } catch (err) {
+        return failedReply(err);
+      }
       const senderReg = getSenderRegistry?.();
       if (senderReg && !senderReg.canWrite(event.sender, MARKETPLACE_WRITE_PRINCIPAL)) {
         return FORBIDDEN_REPLY;
@@ -100,8 +106,12 @@ export function registerModulesInstallIpc(
       event,
       payload: { moduleId: string; scopeUnit?: string; keepData?: boolean },
     ) => {
-      const deps = getDeps();
-      if (!deps) return PENDING_DEPS_REPLY;
+      let deps: ModulesInstallIpcDeps;
+      try {
+        deps = await getDeps();
+      } catch (err) {
+        return failedReply(err);
+      }
       const senderReg = getSenderRegistry?.();
       if (senderReg && !senderReg.canWrite(event.sender, MARKETPLACE_WRITE_PRINCIPAL)) {
         return FORBIDDEN_REPLY;
@@ -118,17 +128,23 @@ export function registerModulesInstallIpc(
   );
 
   ipcMain.handle("marketplace:list", async () => {
-    const deps = getDeps();
-    if (!deps) return PENDING_DEPS_REPLY;
-    return deps.modulesClient.marketplaceList();
+    try {
+      const deps = await getDeps();
+      return deps.modulesClient.marketplaceList();
+    } catch (err) {
+      return failedReply(err);
+    }
   });
 
   ipcMain.handle(
     "marketplace:info",
     async (_event, payload: { moduleId: string }) => {
-      const deps = getDeps();
-      if (!deps) return PENDING_DEPS_REPLY;
-      return deps.modulesClient.marketplaceInfo(payload.moduleId);
+      try {
+        const deps = await getDeps();
+        return deps.modulesClient.marketplaceInfo(payload.moduleId);
+      } catch (err) {
+        return failedReply(err);
+      }
     },
   );
 

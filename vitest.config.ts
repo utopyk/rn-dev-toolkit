@@ -17,6 +17,11 @@ export default defineConfig({
       "**/.git/**",
       "**/.cache/**",
       "**/.claude/**",
+      // Playwright smoke specs live under tests/electron-smoke; their
+      // runner is `npx playwright test`. Exclude here so vitest doesn't
+      // try to load them under its test environment (they import
+      // @playwright/test which assumes its own runner).
+      "tests/electron-smoke/**",
     ],
   },
 });

@@ -83,10 +83,14 @@ async function createWindow() {
     mainWindow = null;
   });
 
-  // Detect the RN project root BEFORE setting up IPC so wizard handlers work
+  // Detect the RN project root BEFORE setting up IPC so wizard handlers work.
+  // `RN_DEV_PROJECT_ROOT` env override skips detection — used by the
+  // Playwright smoke suite to point Electron at a tmpdir fixture without
+  // depending on detectProjectRoot's auto-discovery walk.
   const cwd = process.cwd();
   console.log(`[electron] CWD: ${cwd}`);
-  const projectRoot = await detectProjectRoot(cwd)
+  const projectRoot = process.env.RN_DEV_PROJECT_ROOT
+    ?? await detectProjectRoot(cwd)
     ?? await detectProjectRoot('/Users/martincouso/Documents/Projects/movie-nights-club')
     ?? cwd;
   console.log(`[electron] Project root: ${projectRoot}`);

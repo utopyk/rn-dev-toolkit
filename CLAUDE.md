@@ -17,6 +17,16 @@ React Native developer toolsuite. Terminal TUI (OpenTUI/Ink-style), Electron GUI
 - **Build: `bun run build`** (uses `build.ts` with Bun's native bundler). The older `esbuild.config.ts` was deleted in Phase 0 of the module-system work — use `build.ts`.
 - **Commits: Conventional Commits.** `feat(devtools): ...`, `fix(mcp): ...`, `refactor(electron): ...`, `docs: ...`.
 
+## Verification standard for renderer-touching changes
+
+Every change that touches `renderer/`, `electron/`, or any IPC handler MUST pass three layers before push. The split exists because each layer catches a different bug class — skipping any one of them ships a regression that the next layer would have caught.
+
+1. **`npx vitest run`** — fast (≈25s). Catches TDZ, render crashes, type-narrowing slips, undefined-prop crashes, dispatcher contract drift. Renderer components MUST have a colocated `__tests__/*.test.tsx` that mounts the component in jsdom with a stubbed `window.rndev` IPC bridge. See [renderer/components/__tests__/ModuleConfigForm.test.tsx](renderer/components/__tests__/ModuleConfigForm.test.tsx) for the pattern: stub bridge with `vi.fn()` invoke + a manual `emit()` for IPC events.
+2. **`npx tsc --noEmit && npx tsc --noEmit -p electron/tsconfig.json`** — catches type drift in IPC payload shapes that vitest's mocks can paper over.
+3. **`npx playwright test`** (alias: `npm run test:smoke`) — slow (≈15-50s). Catches what only surfaces in a real Electron + daemon process pair: IPC handler shape mismatches, daemon spawn failures, boot-window races, "blank screen" tree crashes. The smoke suite at [tests/electron-smoke/smoke.spec.ts](tests/electron-smoke/smoke.spec.ts) boots Electron via `_electron.launch()` against a tmpdir fixture (`tests/electron-smoke/fixtures/smoke-rn`), forces `RN_DEV_DAEMON_BOOT_MODE=fake` so no real Metro is spawned, and asserts each tab (Marketplace, Settings) renders its happy-path content.
+
+Do not push renderer/electron changes without all three green. The pattern of "vitest + tsc green, then ship and discover the renderer goes blank" is the failure mode this rule exists to prevent.
+
 ## Module system (in flight)
 
 See [docs/plans/2026-04-21-feat-module-system-and-device-control-plan.md](docs/plans/2026-04-21-feat-module-system-and-device-control-plan.md) for the full plan. Headline rules agents should follow when touching module-related code:

@@ -56,6 +56,7 @@ import {
   type PacoteLike,
   type ArboristFactory,
 } from "../modules/marketplace/installer.js";
+import { SenderBindings } from "../daemon/sender-bindings.js";
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -102,6 +103,15 @@ export interface ModulesIpcOptions {
    * Arborist factory override used by the installer.
    */
   arboristFactory?: ArboristFactory;
+  /**
+   * Phase 13.5 — per-connection sender-binding table. Always present
+   * once `registerModulesIpc` runs. Tests that exercise the
+   * dispatcher directly omit it; the host-call gate is gated on
+   * `RN_DEV_HOSTCALL_BIND_GATE` env flag (default off until PR-C
+   * lands the long-lived RPC channel that makes bind-sender usable
+   * from production callers).
+   */
+  senderBindings?: SenderBindings;
 }
 
 /**
@@ -157,6 +167,7 @@ export type ModulesIpcAction =
   | "modules/install"
   | "modules/uninstall"
   | "modules/host-call"
+  | "modules/bind-sender"
   | "modules/list-panels"
   | "modules/resolve-panel"
   | "marketplace/list"
@@ -176,6 +187,7 @@ export const MODULES_ACTIONS: ReadonlySet<string> = new Set<ModulesIpcAction>([
   "modules/install",
   "modules/uninstall",
   "modules/host-call",
+  "modules/bind-sender",
   "modules/list-panels",
   "modules/resolve-panel",
   "marketplace/list",
@@ -223,6 +235,7 @@ export interface RegisteredModuleRow {
 export async function dispatchModulesAction(
   opts: ModulesIpcOptions,
   msg: IpcMessage,
+  connectionId?: string,
 ): Promise<unknown> {
   switch (msg.action) {
     case "modules/list":
@@ -266,7 +279,9 @@ export async function dispatchModulesAction(
         msg.payload as { moduleId: string; scopeUnit?: string; keepData?: boolean },
       );
     case "modules/host-call":
-      return hostCall(opts, msg.payload as HostCallRequest);
+      return hostCall(opts, msg.payload as HostCallRequest, connectionId);
+    case "modules/bind-sender":
+      return bindSenderAction(opts, msg.payload, connectionId);
     case "modules/list-panels":
       return listElectronPanels(opts);
     case "modules/resolve-panel":
@@ -713,6 +728,7 @@ export type HostCallReply =
 export async function hostCall(
   opts: ModulesIpcOptions,
   payload: HostCallRequest | null,
+  connectionId?: string,
 ): Promise<HostCallReply> {
   const auditOutcome = (outcome: AuditOutcome): void => {
     void getDefaultAuditLog().append({
@@ -736,6 +752,34 @@ export async function hostCall(
       message:
         "modules/host-call requires { moduleId, capabilityId, method, args }",
     };
+  }
+
+  // Phase 13.5 — sender-binding gate, env-flag gated to default-off
+  // until PR-C lands the long-lived RPC channel. With every existing
+  // production caller using `IpcClient.send()` (fresh socket per
+  // call), enforcing the gate by default would break Electron's
+  // host-call bridge entirely. Operators opt in via
+  // `RN_DEV_HOSTCALL_BIND_GATE=1`; once PR-C is in, the default flips.
+  //
+  // The undefined-connectionId branch denies (rather than skipping)
+  // because `bindSenderAction` already requires connectionId; the
+  // two halves of the gate now agree on what an anonymous caller
+  // means: rejection.
+  const gateEnabled =
+    process.env.RN_DEV_HOSTCALL_BIND_GATE === "1" &&
+    opts.senderBindings !== undefined;
+  if (gateEnabled) {
+    if (
+      connectionId === undefined ||
+      !opts.senderBindings!.canCall(connectionId, payload.moduleId)
+    ) {
+      auditOutcome("denied");
+      return {
+        kind: "error",
+        code: "MODULE_UNAVAILABLE",
+        message: `Connection has no binding for module "${payload.moduleId}"; call modules/bind-sender first.`,
+      };
+    }
   }
 
   const reg = resolveRegistered(opts, payload.moduleId, undefined);
@@ -785,6 +829,73 @@ export async function hostCall(
       message: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// modules/bind-sender — Phase 13.5. Authorize the calling connection
+// to act on behalf of `moduleId` on subsequent host-call requests.
+// Idempotent on (connectionId, moduleId).
+//
+// Deliberately does NOT pre-check that the moduleId is registered.
+// `modules/list` already discloses registered names without auth,
+// so the registered-only-check provides no enumeration defense; it
+// would only convert a deferred host-call MODULE_UNAVAILABLE into
+// an early bind-time MODULE_NOT_REGISTERED, which is a UX preference,
+// not a security feature. The host-call gate already returns
+// MODULE_UNAVAILABLE for unregistered ids.
+// ---------------------------------------------------------------------------
+
+export type BindSenderReply =
+  | { kind: "ok" }
+  | { kind: "error"; code: "BIND_INVALID_PAYLOAD"; message: string };
+
+function parseBindSenderRequest(payload: unknown): { moduleId: string } | null {
+  if (!payload || typeof payload !== "object") return null;
+  const p = payload as Record<string, unknown>;
+  if (typeof p.moduleId !== "string" || p.moduleId.length === 0) return null;
+  return { moduleId: p.moduleId };
+}
+
+export function bindSenderAction(
+  opts: ModulesIpcOptions,
+  payload: unknown,
+  connectionId: string | undefined,
+): BindSenderReply {
+  const auditOutcome = (
+    outcome: "ok" | "error",
+    moduleId: string = "",
+  ): void => {
+    void getDefaultAuditLog().append({
+      kind: "host-call",
+      moduleId,
+      outcome,
+      capabilityId: "<bind-sender>",
+      method: "<bind>",
+    });
+  };
+  if (!connectionId) {
+    auditOutcome("error");
+    return {
+      kind: "error",
+      code: "BIND_INVALID_PAYLOAD",
+      message:
+        "modules/bind-sender requires a connection id (received via IPC server)",
+    };
+  }
+  const parsed = parseBindSenderRequest(payload);
+  if (!parsed) {
+    auditOutcome("error");
+    return {
+      kind: "error",
+      code: "BIND_INVALID_PAYLOAD",
+      message: "modules/bind-sender requires { moduleId: string }",
+    };
+  }
+  if (opts.senderBindings) {
+    opts.senderBindings.bind(connectionId, parsed.moduleId);
+  }
+  auditOutcome("ok", parsed.moduleId);
+  return { kind: "ok" };
 }
 
 // ---------------------------------------------------------------------------
@@ -919,7 +1030,16 @@ export function registerModulesIpc(
   // Callers may supply their own for test introspection; default one is
   // created here so the dispatcher always has a destination.
   const moduleEvents = options.moduleEvents ?? new EventEmitter();
-  const effectiveOptions: ModulesIpcOptions = { ...options, moduleEvents };
+  // Phase 13.5 — sender-bindings table for the host-call gate.
+  // Default to a fresh instance per registerModulesIpc call so each
+  // session boot starts with empty bindings; clients re-bind every
+  // session.
+  const senderBindings = options.senderBindings ?? new SenderBindings();
+  const effectiveOptions: ModulesIpcOptions = {
+    ...options,
+    moduleEvents,
+    senderBindings,
+  };
 
   // Bridge ModuleHostManager lifecycle events → moduleEvents so subscribers
   // see crashes / failed-state transitions without polling. Kept here rather
@@ -968,6 +1088,11 @@ export function registerModulesIpc(
   options.manager.on("failed", forwardFailed);
   options.manager.on("state-changed", forwardStateChanged);
 
+  // Phase 13.5 — connections that have used modules/* and need their
+  // sender bindings cleaned up on socket close. We register the close
+  // hook the FIRST time we see a message from each connectionId.
+  const trackedForCleanup = new Set<string>();
+
   const listener = (event: IpcMessageEvent): void => {
     if (!MODULES_ACTIONS.has(event.message.action)) return;
 
@@ -976,7 +1101,24 @@ export function registerModulesIpc(
       return;
     }
 
-    void dispatchModulesAction(effectiveOptions, event.message)
+    // Phase 13.5 — register the per-connection sender-bindings
+    // cleanup hook on the FIRST modules-ipc message we see from this
+    // connection. event.onClose is per-connection (closeListeners are
+    // bound at IpcServer's connection-callback scope), so registering
+    // here is sufficient even if the cleanup runs much later.
+    if (
+      effectiveOptions.senderBindings &&
+      !trackedForCleanup.has(event.connectionId)
+    ) {
+      const connId = event.connectionId;
+      trackedForCleanup.add(connId);
+      event.onClose(() => {
+        trackedForCleanup.delete(connId);
+        effectiveOptions.senderBindings?.clearConnection(connId);
+      });
+    }
+
+    void dispatchModulesAction(effectiveOptions, event.message, event.connectionId)
       .then((payload) => {
         event.reply({
           type: "response",

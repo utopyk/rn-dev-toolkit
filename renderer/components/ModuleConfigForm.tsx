@@ -69,13 +69,27 @@ export function ModuleConfigForm({
     configRef.current = config;
     draftRef.current = draft;
   }, [config, draft]);
+  useEffect(() => {
+    loadPendingRef.current = loadPending;
+  }, [loadPending]);
   const [status, setStatus] = useState<
     { kind: 'idle' } | { kind: 'saving' } | { kind: 'error'; message: string }
   >({ kind: 'idle' });
   const [justSaved, setJustSaved] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Snapshot of `loadPending` for the modules:event callback; same
+  // identity-stability trick the config/draft refs use so subscriptions
+  // don't churn when the load completes.
+  const loadPendingRef = useRef(true);
 
-  useEffect(() => {
+  // Tracked separately from `loadError` so the retry-on-services-ready
+  // path can distinguish "still booting" from a hard error the user
+  // should see (E_CONFIG_MODULE_UNKNOWN, etc.). When `loadPending` is
+  // true the render shows a benign spinner instead of the alarming
+  // "Failed to load config" banner.
+  const [loadPending, setLoadPending] = useState(true);
+
+  const fetchConfig = useCallback(() => {
     let active = true;
     setStatus({ kind: 'idle' });
     invoke<ConfigGetReply | null>('modules:config-get', { moduleId, scopeUnit }).then(
@@ -83,31 +97,45 @@ export function ModuleConfigForm({
         if (!active) return;
         if (!reply) {
           setLoadError('IPC returned no response');
+          setLoadPending(false);
           return;
         }
         if ('error' in reply) {
           setLoadError(reply.error);
+          setLoadPending(false);
           return;
         }
         if ('kind' in reply && reply.kind === 'error') {
+          // E_CONFIG_SERVICES_PENDING means the daemon-client adapter
+          // hasn't published yet — the boot-window race. Stay in pending
+          // state without surfacing an error; the `modules:event` ready
+          // ping below triggers a retry. Any other error code is
+          // surfaced loudly because the user can't resolve it by waiting.
+          if (reply.code === 'E_CONFIG_SERVICES_PENDING') {
+            return;
+          }
           setLoadError(`${reply.code}: ${reply.message}`);
+          setLoadPending(false);
           return;
         }
-        // After the two error-shape checks above, `reply` must be the
+        // After the error-shape checks above, `reply` must be the
         // success shape `{moduleId, config}`. TS doesn't narrow on the
         // `'kind' in reply` discriminator alone, so an explicit
         // `'config' in reply` guard pins it.
         if (!('config' in reply)) {
           setLoadError('Unexpected modules:config-get reply shape');
+          setLoadPending(false);
           return;
         }
         setLoadError(null);
+        setLoadPending(false);
         setConfig(reply.config);
         setDraft(reply.config);
       },
       (err: unknown) => {
         if (!active) return;
         setLoadError(err instanceof Error ? err.message : String(err));
+        setLoadPending(false);
       },
     );
     return () => {
@@ -115,14 +143,26 @@ export function ModuleConfigForm({
     };
   }, [invoke, moduleId, scopeUnit]);
 
+  useEffect(() => {
+    return fetchConfig();
+  }, [fetchConfig]);
+
   // Live-update from external config-changed events (another window / the
-  // TUI, or `modules:config-set` from a subprocess module). Reads latest
-  // config + draft via refs so the callback identity is stable across
-  // renders — otherwise `useIpcOn` would churn subscriptions per keystroke.
+  // TUI, or `modules:config-set` from a subprocess module). Also retries
+  // the initial load on the synthetic `kind: 'ready'` ping that
+  // `electron/ipc/index.ts::registerModulePanelsHandlers` fires when the
+  // daemon-client adapter first publishes — closes the boot-window race
+  // where Settings mounts before services attach. Reads latest config +
+  // draft via refs so the callback identity is stable across renders —
+  // otherwise `useIpcOn` would churn subscriptions per keystroke.
   useIpcOn(
     'modules:event',
     useCallback(
       (event: ConfigChangedEvent | { kind: string; moduleId: string }) => {
+        if (event.kind === 'ready') {
+          if (loadPendingRef.current) fetchConfig();
+          return;
+        }
         if (event.kind !== 'config-changed') return;
         if (event.moduleId !== moduleId) return;
         const fresh = (event as ConfigChangedEvent).config ?? {};
@@ -133,7 +173,7 @@ export function ModuleConfigForm({
           setDraft(fresh);
         }
       },
-      [moduleId],
+      [moduleId, fetchConfig],
     ),
   );
 
@@ -165,6 +205,14 @@ export function ModuleConfigForm({
     return (
       <div className="module-config-form module-config-form--error">
         <p>Failed to load config: {loadError}</p>
+      </div>
+    );
+  }
+
+  if (loadPending) {
+    return (
+      <div className="module-config-form module-config-form--loading">
+        <p>Loading config…</p>
       </div>
     );
   }

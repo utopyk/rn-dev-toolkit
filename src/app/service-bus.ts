@@ -43,6 +43,16 @@ export interface ServiceBusEvents {
    * leaves every handler holding a dead client ref.
    */
   modulesClient: (client: ModuleHostClient | null) => void;
+  /**
+   * Fired when main knows the daemon-client will NEVER publish (e.g.
+   * `startRealServices` returned null because no default profile is
+   * configured, or `connectElectronToDaemon` rejected with an error
+   * the user has to resolve manually). Handlers awaiting `modulesClient`
+   * use this to fail fast with a meaningful message instead of timing
+   * out 30 seconds later. Carries a human-readable reason that
+   * surfaces verbatim in renderer error toasts.
+   */
+  modulesClientAborted: (reason: string) => void;
 }
 
 class ServiceBus extends EventEmitter {
@@ -83,6 +93,17 @@ class ServiceBus extends EventEmitter {
    */
   clearModulesClient() {
     this.emit("modulesClient", null);
+  }
+
+  /**
+   * Signal that the daemon-client will never publish for the current
+   * session-attempt. Distinguishes "still booting" (renderer should
+   * keep waiting) from "permanently won't connect" (renderer should
+   * surface a fix-this message). Handlers that `awaitModulesClient`
+   * reject with `reason` instead of waiting out the 30s timeout.
+   */
+  abortModulesClient(reason: string) {
+    this.emit("modulesClientAborted", reason);
   }
 }
 

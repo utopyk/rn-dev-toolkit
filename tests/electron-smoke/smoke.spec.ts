@@ -30,15 +30,59 @@ interface ElectronHandle {
   tmpdir: string;
 }
 
-async function launchElectron(): Promise<ElectronHandle> {
+interface LaunchOptions {
+  /**
+   * Write a non-default profile (matching neither the current branch
+   * nor the worktree). Simulates Martin's reported setup: profiles
+   * exist but none match `findDefault(null, "main")`, so
+   * `startRealServices` returns null without showing the wizard. Tabs
+   * that depend on the daemon-client should surface a fast "configure
+   * a profile" error, not a 30s `awaitModulesClient` timeout.
+   */
+  profileMismatch?: boolean;
+}
+
+async function launchElectron(opts: LaunchOptions = {}): Promise<ElectronHandle> {
   // Copy the smoke fixture into a fresh tmpdir so the daemon's
   // .rn-dev/sock + audit log + module install dir don't leak between
   // runs. Pre-write a default profile so `startRealServices` finds
   // one + connects to the daemon (instead of stalling on the wizard).
   const tmpRoot = mkdtempSync(join(tmpdir(), "rn-dev-smoke-"));
   cpSync(FIXTURE_SRC, tmpRoot, { recursive: true });
+
   const profilesDir = join(tmpRoot, ".rn-dev", "profiles");
   mkdirSync(profilesDir, { recursive: true });
+
+  if (opts.profileMismatch) {
+    // Profile that wouldn't match findDefault(null, "main"): use a
+    // different branch so startRealServices returns null + the renderer
+    // does NOT auto-show the wizard (App.tsx only shows the wizard when
+    // zero profiles exist).
+    writeFileSync(
+      join(profilesDir, "feature.json"),
+      JSON.stringify(
+        {
+          name: "feature",
+          isDefault: true,
+          worktree: null,
+          branch: "feature/something-else",
+          platform: "ios",
+          mode: "quick",
+          metroPort: 8099,
+          devices: {},
+          buildVariant: "debug",
+          preflight: { checks: [], frequency: "once" },
+          onSave: [],
+          env: {},
+          projectRoot: tmpRoot,
+        },
+        null,
+        2,
+      ),
+    );
+    return launchWithoutProfile(tmpRoot);
+  }
+
   writeFileSync(
     join(profilesDir, "default.json"),
     JSON.stringify(
@@ -103,6 +147,36 @@ async function launchElectron(): Promise<ElectronHandle> {
     process.stdout.write(`[electron-stdout] ${chunk.toString()}`);
   });
 
+  const page = await app.firstWindow({ timeout: 30_000 });
+  return { app, page, tmpdir: tmpRoot };
+}
+
+async function launchWithoutProfile(tmpRoot: string): Promise<ElectronHandle> {
+  // Same harness, no .rn-dev/profiles/default.json. Reproduces Martin's
+  // "no default profile" path where startRealServices returns null and
+  // connectElectronToDaemon never fires. The renderer used to time out
+  // 30s on awaitModulesClient; now main.ts calls
+  // serviceBus.abortModulesClient with a fix-this-message that
+  // surfaces verbatim in the renderer.
+  const app = await electron.launch({
+    args: [join(REPO_ROOT, "electron", "launcher.cjs")],
+    cwd: tmpRoot,
+    stderr: "pipe",
+    stdout: "pipe",
+    env: {
+      ...process.env,
+      RN_DEV_DAEMON_BOOT_MODE: "fake",
+      RN_DEV_PROJECT_ROOT: tmpRoot,
+      RN_DEV_SMOKE: "1",
+    },
+    timeout: 30_000,
+  });
+  app.process().stderr?.on("data", (chunk: Buffer) => {
+    process.stderr.write(`[electron-stderr] ${chunk.toString()}`);
+  });
+  app.process().stdout?.on("data", (chunk: Buffer) => {
+    process.stdout.write(`[electron-stdout] ${chunk.toString()}`);
+  });
   const page = await app.firstWindow({ timeout: 30_000 });
   return { app, page, tmpdir: tmpRoot };
 }
@@ -185,6 +259,25 @@ test.describe("Electron smoke", () => {
     ).toBeVisible({ timeout: 20_000 });
     await expect(
       handle.page.getByText(/failed to load config/i),
+    ).toHaveCount(0);
+  });
+
+  test("Settings tab fails fast with a fix-this-message when no default profile matches the current branch", async () => {
+    handle = await launchElectron({ profileMismatch: true });
+    await handle.page.getByRole("button", { name: /settings/i }).click();
+
+    // Pre-fix: the renderer waited 30s for awaitModulesClient and surfaced
+    // "did not publish within 30000ms" — incomprehensible noise. Post-fix:
+    // main calls serviceBus.abortModulesClient as soon as
+    // startRealServices returns null, so the handler rejects with the
+    // fix-this string within a couple seconds.
+    await expect(
+      handle.page.getByText(/no default profile is configured/i),
+    ).toBeVisible({ timeout: 10_000 });
+    // Hard guard against the regression — the timeout-message must NEVER
+    // surface for a known-no-session state.
+    await expect(
+      handle.page.getByText(/did not publish within 30000ms/i),
     ).toHaveCount(0);
   });
 });

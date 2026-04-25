@@ -2,6 +2,7 @@ import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { setupIpcBridge, startRealServices } from './ipc/index.js';
 import { detectProjectRoot } from '../src/core/project.js';
+import { serviceBus } from '../src/app/service-bus.js';
 import type { DaemonSession } from '../src/app/client/session.js';
 
 const isDev = !app.isPackaged;
@@ -115,19 +116,26 @@ async function createWindow() {
               `[electron] Daemon client connected — worktreeKey=${session.worktreeKey}`,
             );
           } else {
-            console.log(
-              '[electron] Services started without an active daemon session (no default profile — wizard will prompt).',
-            );
+            // No default profile in this worktree+branch — the renderer
+            // will show the wizard. Tell every awaiting modules:* handler
+            // to fail fast instead of timing out at 30s; the renderer
+            // surfaces this string verbatim, so phrase it as a fix.
+            const reason =
+              'No default profile is configured for this project. Run the setup wizard to create one.';
+            console.log(`[electron] ${reason}`);
+            serviceBus.abortModulesClient(reason);
           }
         })
         .catch((err) => {
           console.error('[electron] Failed to start services:', err);
+          const message = err instanceof Error ? err.message : String(err);
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send(
               'service:log',
-              `✖ Service error: ${err.message ?? err}`,
+              `✖ Service error: ${message}`,
             );
           }
+          serviceBus.abortModulesClient(`Daemon connect failed: ${message}`);
         });
     }, 1000);
   });
@@ -155,9 +163,7 @@ function wireDaemonDisconnectListener(session: DaemonSession): void {
     }
     // Invalidate serviceBus-cached handler deps so the next session's
     // `setModulesClient(newClient)` fires registrars again.
-    void import('../src/app/service-bus.js').then(({ serviceBus }) => {
-      serviceBus.clearModulesClient();
-    });
+    serviceBus.clearModulesClient();
   };
   session.metro.on('disconnected', (err) => surfaceDisconnect('metro', err));
   session.devtools.on('disconnected', (err) => surfaceDisconnect('devtools', err));

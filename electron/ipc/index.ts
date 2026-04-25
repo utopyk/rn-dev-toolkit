@@ -56,13 +56,30 @@ const MODULES_CLIENT_TIMEOUT_MS = 30_000;
 let currentModulesClient: import('../../src/app/client/module-host-adapter.js').ModuleHostClient | null = null;
 let pendingClientPromise: Promise<import('../../src/app/client/module-host-adapter.js').ModuleHostClient> | null = null;
 
+// Latest `abortModulesClient` reason. Cached so a Settings/Marketplace
+// tab that mounts AFTER the abort fires gets the same fast rejection
+// the in-flight handlers got. Cleared whenever a real `setModulesClient`
+// arrives so a subsequent successful boot resets the failure mode.
+let currentAbortReason: string | null = null;
+serviceBus.on('modulesClientAborted', (reason: string) => {
+  currentAbortReason = reason;
+});
+
 export function awaitModulesClient(): Promise<import('../../src/app/client/module-host-adapter.js').ModuleHostClient> {
   if (currentModulesClient) return Promise.resolve(currentModulesClient);
+  if (currentAbortReason) {
+    return Promise.reject(new Error(currentAbortReason));
+  }
   if (pendingClientPromise) return pendingClientPromise;
   pendingClientPromise = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const cleanup = (): void => {
+      clearTimeout(timer);
       serviceBus.off('modulesClient', onClient);
+      serviceBus.off('modulesClientAborted', onAborted);
       pendingClientPromise = null;
+    };
+    const timer = setTimeout(() => {
+      cleanup();
       reject(
         new Error(
           `awaitModulesClient: daemon client did not publish within ${MODULES_CLIENT_TIMEOUT_MS}ms`,
@@ -71,18 +88,25 @@ export function awaitModulesClient(): Promise<import('../../src/app/client/modul
     }, MODULES_CLIENT_TIMEOUT_MS);
     const onClient = (client: import('../../src/app/client/module-host-adapter.js').ModuleHostClient | null): void => {
       if (!client) return;
-      clearTimeout(timer);
-      serviceBus.off('modulesClient', onClient);
-      pendingClientPromise = null;
+      cleanup();
       resolve(client);
     };
+    const onAborted = (reason: string): void => {
+      cleanup();
+      reject(new Error(reason));
+    };
     serviceBus.on('modulesClient', onClient);
+    serviceBus.on('modulesClientAborted', onAborted);
   });
   return pendingClientPromise;
 }
 
 serviceBus.on('modulesClient', (client) => {
   currentModulesClient = client ?? null;
+  // A successful publish clears any previous abort — the next renderer
+  // mount of a modules-bound panel re-fetches successfully without an
+  // app restart.
+  if (client) currentAbortReason = null;
 });
 
 export { startRealServices } from './services.js';

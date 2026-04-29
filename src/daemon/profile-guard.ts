@@ -182,9 +182,12 @@ function checkDevices(value: unknown): GuardCheckResult {
   }
   const d = value as Record<string, unknown>;
   for (const k of ["ios", "android"] as const) {
-    if (d[k] === undefined) continue;
+    // Profile.devices.{ios,android} is typed `string | null | undefined`
+    // ([src/core/types.ts:23-26]) — the wizard writes `null` for slots
+    // the user didn't configure. Treat null and undefined identically.
+    if (d[k] === undefined || d[k] === null) continue;
     if (typeof d[k] !== "string") {
-      return fail("E_PROFILE_DEVICE_ID", `profile.devices.${k} must be a string`);
+      return fail("E_PROFILE_DEVICE_ID", `profile.devices.${k} must be a string or null`);
     }
   }
   return { ok: true };

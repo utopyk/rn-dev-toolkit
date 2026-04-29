@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, statSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { IpcClient } from "../core/ipc.js";
+import { DAEMON_VERSION } from "./version.js";
 
 // ---------------------------------------------------------------------------
 // Client-side primitive. Later phases wire this into Electron/TUI/MCP so
@@ -44,7 +45,22 @@ export async function connectToDaemon(
   const pidPath = join(wt, ".rn-dev", "pid");
 
   if (await isDaemonAlive(sockPath)) {
-    return new IpcClient(sockPath);
+    const client = new IpcClient(sockPath);
+    // Version handshake — closes the architectural gap where a daemon
+    // spawned before an rn-dev-cli upgrade survives the upgrade and
+    // serves the old wire shape to fresh clients. Symptom (Bug 1, Phase
+    // 13.6 PR-C handoff): client times out 30s waiting for a
+    // `session/status: running` event the old daemon never emits in the
+    // shape the new client expects. Fix: ping, mismatch → restart.
+    if (await daemonVersionMatches(client)) {
+      return client;
+    }
+    process.stderr.write(
+      `rn-dev: daemon at ${sockPath} reports an incompatible version, ` +
+        `client expects ${DAEMON_VERSION} — restarting daemon.\n`,
+    );
+    await shutdownStaleDaemon(client, sockPath);
+    // Fall through to the cold-spawn path below.
   }
 
   // Stale artifacts from a crashed daemon or a pid the kernel has since
@@ -56,6 +72,75 @@ export async function connectToDaemon(
   spawnDetachedDaemon(wt, daemonEntry);
   await waitForSocket(sockPath, spawnTimeoutMs, pollMs);
   return new IpcClient(sockPath);
+}
+
+/**
+ * Send `daemon/ping` and check the daemon's reported `daemonVersion`
+ * against the client's compiled-in `DAEMON_VERSION`. Any error (timeout,
+ * malformed response, missing field) is treated as "incompatible" — the
+ * connection cannot be safely used and the only recovery is restart.
+ *
+ * Exact-match policy (not semver-range): the wire protocol changes in
+ * lockstep with the daemon source, and rn-dev-cli does not ship patch
+ * releases of the wire. If/when an external release model needs compat
+ * windows, replace this with a `semver.satisfies(daemonVersion, range)`
+ * check against `HOST_RANGE`.
+ */
+async function daemonVersionMatches(client: IpcClient): Promise<boolean> {
+  try {
+    const resp = await client.send({
+      type: "command",
+      action: "daemon/ping",
+      id: `connect-version-check-${Date.now()}`,
+    });
+    const payload = resp.payload as { daemonVersion?: unknown };
+    return (
+      typeof payload.daemonVersion === "string" &&
+      payload.daemonVersion === DAEMON_VERSION
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Graceful-shutdown of a stale daemon followed by a wait for its socket
+ * file to disappear (the real daemon's SIGTERM handler unlinks the sock
+ * inside `shutdown()`; a fake/old daemon may not, in which case the
+ * caller's downstream `unlinkStale` cleans up).
+ *
+ * `daemon/shutdown` is best-effort: a daemon old enough to lack the
+ * handler will reject with `E_UNKNOWN_ACTION`, and a daemon that has
+ * already crashed will reject with a connect error. In both cases we
+ * still proceed — the socket is either gone or about to be unlinked by
+ * the cold-spawn path.
+ */
+async function shutdownStaleDaemon(
+  client: IpcClient,
+  sockPath: string,
+): Promise<void> {
+  try {
+    await client.send({
+      type: "command",
+      action: "daemon/shutdown",
+      id: `connect-version-shutdown-${Date.now()}`,
+    });
+  } catch {
+    // Daemon may not implement daemon/shutdown, may already be dead, or
+    // may have closed the socket mid-ack — either way the recovery path
+    // is the same: wait briefly for the sock to disappear, then let the
+    // cold-spawn fallback unlink stale artifacts.
+  }
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    if (!existsSync(sockPath)) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // Don't throw — the caller's `unlinkStale(sockPath)` + cold-spawn path
+  // can still recover. A daemon hung past the 5s grace will get its
+  // sock file unlinked from underneath, which is enough for `bind()` to
+  // succeed on the new daemon. The hung process eventually dies on its
+  // own (orphan-sweep, system reboot, etc.).
 }
 
 export async function isDaemonAlive(sockPath: string): Promise<boolean> {

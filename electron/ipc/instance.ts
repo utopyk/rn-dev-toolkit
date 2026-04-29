@@ -3,7 +3,7 @@ import path from 'path';
 import { ProfileStore } from '../../src/core/profile.js';
 import { getCurrentBranch } from '../../src/core/project.js';
 import { listDevices } from '../../src/core/device.js';
-import { attachDaemonSession } from './services.js';
+import { attachDaemonSession, wireInstanceEvents } from './services.js';
 import type { Profile } from '../../src/core/types.js';
 import {
   instances,
@@ -125,7 +125,12 @@ export function registerInstanceHandlers() {
           ...profileData,
           projectRoot: state.projectRoot,
         };
-        await attachDaemonSession(sessionProfile, state.projectRoot);
+        const session = await attachDaemonSession(sessionProfile, state.projectRoot);
+        // Mirror startRealServices's wiring step (services.ts:373-375).
+        // Without this, Metro starts but its log lines never reach the
+        // renderer's `instance:metro` channel — the user sees "Daemon
+        // session attached" and then silence.
+        wireInstanceEvents(instance, session);
         const msg = `Daemon session attached for profile "${profileData.name ?? id}".`;
         appendLog(instance, 'service', msg);
         send('instance:log', { instanceId: id, text: msg });

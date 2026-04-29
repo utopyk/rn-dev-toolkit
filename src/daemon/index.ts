@@ -21,6 +21,7 @@ import {
   parseKinds,
   matchesKindFilter,
 } from "./subscribe-registry.js";
+import { DAEMON_VERSION, HOST_RANGE } from "./version.js";
 
 // ---------------------------------------------------------------------------
 // Daemon entry for `rn-dev daemon <worktree>`.
@@ -45,11 +46,6 @@ import {
 // Relax any of these and daemon/shutdown becomes a trivial local DoS —
 // there is no SO_PEERCRED check in v1. Keep them tight.
 // ---------------------------------------------------------------------------
-
-// Kept in sync with `src/cli/commands.ts::program.version(...)`. When we
-// grow a shared version constant that both can import, retire the literal.
-const DAEMON_VERSION = "0.1.0";
-const HOST_RANGE = ">=0.1.0";
 
 // Phase 13.6 PR-C — actions always permitted on a subscribe socket,
 // even without `supportsBidirectionalRpc`. Pre-dispatch check in

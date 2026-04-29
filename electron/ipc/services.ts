@@ -262,8 +262,15 @@ export async function attachDaemonSession(
  * Wire daemon-adapter events to the renderer's `instance:*` channels.
  * Renderer keeps its per-instance rendering model without having to
  * learn about the daemon at all — the translation happens here.
+ *
+ * Exported so the wizard-path attach (`instance.ts::instances:create`)
+ * can call it too. Pre-fix that handler called `attachDaemonSession`
+ * but forgot the `wireInstanceEvents` follow-up, so Metro started but
+ * its log lines never reached the renderer. Both attach sites must
+ * call this; if a third one shows up, fold attach + wire into a single
+ * helper rather than adding a third call site.
  */
-function wireInstanceEvents(instance: InstanceState, session: DaemonSession): void {
+export function wireInstanceEvents(instance: InstanceState, session: DaemonSession): void {
   session.metro.on('log', (evt: { line: string }) => {
     appendLog(instance, 'metro', evt.line);
     send('instance:metro', { instanceId: instance.id, text: evt.line });

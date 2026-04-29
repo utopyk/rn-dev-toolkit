@@ -62,6 +62,7 @@ interface FakeDevtoolsSurface {
   status(worktreeKey: string): Record<string, unknown>;
   clear(worktreeKey: string): void;
   selectTarget(worktreeKey: string, targetId: string): Promise<void>;
+  restart(worktreeKey: string): Promise<{ proxyPort: number; sessionNonce: string }>;
   dispose(): Promise<void>;
 }
 
@@ -215,6 +216,16 @@ function makeFakeDevtools(): EventEmitter & FakeDevtoolsSurface {
   ): Promise<void> => {
     /* no-op in fake */
   };
+  // Fake returns identical {proxyPort, sessionNonce} on every restart —
+  // the test only asserts type/presence, not change-on-restart. Worth
+  // noting for any future test that wants to verify the proxy was
+  // actually torn down + rebound (Kieran TS P2-3 on PR #26).
+  emitter.restart = async (
+    _worktreeKey: string,
+  ): Promise<{ proxyPort: number; sessionNonce: string }> => ({
+    proxyPort: 9999,
+    sessionNonce: "fake-nonce",
+  });
   emitter.dispose = async (): Promise<void> => {
     /* no-op in fake */
   };

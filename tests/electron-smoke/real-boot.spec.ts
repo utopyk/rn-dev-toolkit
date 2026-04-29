@@ -256,4 +256,83 @@ test.describe("Electron real-boot smoke", () => {
     // of the gate-default-on RPCs. A separate metro:status assertion would
     // be redundant AND outside the renderer's preload allowlist.
   });
+
+  test("DevTools panel renders against the daemon's DevToolsClient (not in-process)", async () => {
+    // Bug 5 surface — `electron/ipc/devtools.ts` was still constructing an
+    // in-process `DevToolsManager` against `inst.metro` (which is null after
+    // Phase 13.4.1) instead of consuming the daemon-published DevToolsClient
+    // adapter on `serviceBus.devtools`. With Bug 5 fixed: opening the DevTools
+    // tab succeeds in resolving `devtools-network:proxy-port` (it round-trips
+    // through `client.status()`) and the panel resolves out of `connecting`
+    // into either `no-target` (no RN app attached — expected during the
+    // smoke) or `connected` (an emulator happens to be live).
+    //
+    // The exact regression: before the fix, `proxy-port` returned null
+    // because `inst.metro` was null, and the renderer surfaced
+    // "Cannot start DevTools proxy for Metro on port 8099" — that string in
+    // the DOM is the precise Bug-5 fingerprint.
+    handle = await launchElectronRealBoot();
+    const errors: string[] = [];
+    handle.page.on("pageerror", (err) => {
+      errors.push(err.message);
+    });
+    handle.page.on("console", (msg) => {
+      if (msg.type() === "error") errors.push(msg.text());
+    });
+
+    await handle.page.getByRole("button", { name: /settings/i }).click();
+    await expect(
+      handle.page.getByRole("combobox", { name: /theme/i }),
+      "wait for the daemon session to reach running before exercising DevTools",
+    ).toBeVisible({ timeout: 90_000 });
+
+    await handle.page.getByRole("button", { name: /^devtools$/i }).click();
+
+    // Resolve out of the `connecting` placeholder. Either of the two
+    // success states (`no-target` placeholder when no RN app is attached,
+    // or the rendered toolbar+webview when one happens to be live) proves
+    // proxy-port + status both round-tripped through the adapter.
+    const noTargetPlaceholder = handle.page.getByText(
+      /waiting for app to connect/i,
+    );
+    const connectedToolbar = handle.page.getByText(/react native devtools/i);
+    await expect(
+      noTargetPlaceholder.or(connectedToolbar),
+      "DevTools panel should resolve to no-target or connected once the adapter answers proxy-port",
+    ).toBeVisible({ timeout: 30_000 });
+
+    // Bug 5's exact fingerprint — the in-process error path returned null
+    // for `proxy-port` because `inst.metro` was null, and the renderer
+    // rendered this string verbatim.
+    await expect(
+      handle.page.getByText(/cannot start devtools proxy for metro/i),
+      "Bug 5 regression: DevTools handler fell back to the in-process null check",
+    ).toHaveCount(0);
+
+    // Exercise the restart RPC explicitly — clicking "Retry target
+    // discovery" routes through `devtools-network:restart` →
+    // `DevToolsClient.restart()` → daemon's `devtools/restart` action.
+    // The first iteration of Bug 5 verification missed this surface
+    // because the smoke only proved initial connect; the running daemon
+    // didn't know the new RPC (forgotten DAEMON_VERSION bump) and the
+    // renderer surfaced "Cannot restart DevTools proxy for Metro on
+    // port N". This assertion is now the load-bearing check that the
+    // restart wire-path actually round-trips against a live daemon.
+    if (await noTargetPlaceholder.isVisible()) {
+      await handle.page.getByRole("button", { name: /retry target discovery/i }).click();
+      // Resolution: same two terminal states as initial connect — failure
+      // is the "Cannot restart" string the renderer rendered when the RPC
+      // returned null.
+      await expect(
+        noTargetPlaceholder.or(connectedToolbar),
+        "DevTools panel should resolve out of restart-connecting back to no-target or connected",
+      ).toBeVisible({ timeout: 30_000 });
+      await expect(
+        handle.page.getByText(/cannot restart devtools proxy/i),
+        "Bug 5 follow-up regression: devtools/restart RPC missing on running daemon — bump DAEMON_VERSION",
+      ).toHaveCount(0);
+    }
+
+    expect(errors, `renderer console errors:\n${errors.join("\n")}`).toEqual([]);
+  });
 });

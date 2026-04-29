@@ -170,6 +170,20 @@ describe("daemon client RPCs (integration)", () => {
         payload: { targetId: "t1" },
       });
       expect((selectOk.payload as { ok: boolean }).ok).toBe(true);
+
+      const restart = await daemon.client.send({
+        type: "command",
+        action: "devtools/restart",
+        id: "dt-restart",
+      });
+      const restartPayload = restart.payload as {
+        proxyPort?: number;
+        sessionNonce?: string;
+        code?: string;
+      };
+      expect(restartPayload.code).toBeUndefined();
+      expect(typeof restartPayload.proxyPort).toBe("number");
+      expect(typeof restartPayload.sessionNonce).toBe("string");
     } finally {
       subClose();
     }

@@ -94,10 +94,6 @@ export function registerInstanceHandlers() {
       deviceIcon,
       platform: profileData.platform ?? 'ios',
       mode: profileData.mode ?? 'dirty',
-      metro: null,
-      devtools: null,
-      devtoolsStarted: false,
-      builder: null,
       serviceLog: [],
       metroLog: [],
       metroStatus: 'starting',
@@ -192,14 +188,12 @@ export function registerInstanceHandlers() {
     const instance = instances.get(instanceId);
     if (!instance) return { ok: false, error: 'Instance not found' };
 
-    // Phase 13.4.1 — `instance.metro` / `.devtools` / `.builder` are
-    // always null (no in-process services are ever attached); the
-    // daemon owns every runtime service. The pre-flip teardown branches
-    // that called `.dispose()` / `.stop()` here were dead code. If the
-    // instance being removed was the active one that `startRealServices`
-    // opened a daemon session for, the session stays alive — teardown
-    // is the user's choice via app quit (Phase 13.5 grows ref-counted
-    // `DaemonSession.release()` for the multi-instance story).
+    // The daemon owns every runtime service; this map only carries
+    // Electron's per-instance bookkeeping. If the instance being
+    // removed was the active one that opened a daemon session, the
+    // session stays alive — teardown is the user's choice via app
+    // quit (Phase 13.5 grows ref-counted `DaemonSession.release()`
+    // for the multi-instance story).
     instances.delete(instanceId);
 
     if (state.activeInstanceId === instanceId) {

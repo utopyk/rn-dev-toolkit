@@ -1,8 +1,5 @@
 import { BrowserWindow } from 'electron';
-import type { MetroManager } from '../../src/core/metro.js';
-import type { DevToolsManager } from '../../src/core/devtools.js';
 import type { ArtifactStore } from '../../src/core/artifact.js';
-import type { Builder } from '../../src/core/builder.js';
 import type { FileWatcher } from '../../src/core/watcher.js';
 import type { RunMode } from '../../src/core/types.js';
 import type { DaemonSession } from '../../src/app/client/session.js';
@@ -18,10 +15,6 @@ export interface InstanceState {
   deviceIcon: string;
   platform: 'ios' | 'android' | 'both';
   mode: RunMode;
-  metro: MetroManager | null;
-  devtools: DevToolsManager | null;
-  devtoolsStarted: boolean;
-  builder: Builder | null;
   serviceLog: string[];
   metroLog: string[];
   metroStatus: string;

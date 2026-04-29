@@ -86,6 +86,42 @@ export class DevToolsClient
     }
   }
 
+  /**
+   * Stop + re-start the daemon's DevTools proxy for this session — used
+   * by the Electron "Reconnect" button when the manager landed in
+   * `no-target` and the user wants to rediscover targets after the app
+   * launches. Returns the new `{proxyPort, sessionNonce}` so the
+   * renderer can re-splice Fusebox's `ws=` URL.
+   */
+  async restart(): Promise<{ proxyPort: number; sessionNonce: string }> {
+    const resp = await this.client.send({
+      type: "command",
+      action: "devtools/restart",
+      id: this.nextId(),
+    });
+    // Mirror selectTarget's `p?.code` pattern + add a malformed-response
+    // guard so a daemon that ever returns null/undefined doesn't trip
+    // `'code' in p` with a TypeError, and so the renderer can't splice
+    // `undefined` into Fusebox's `ws=` URL on a malformed reply.
+    // Kieran TS P1-1 on PR #26.
+    const p = resp.payload as
+      | {
+          proxyPort?: number;
+          sessionNonce?: string;
+          code?: string;
+          message?: string;
+        }
+      | null
+      | undefined;
+    if (p?.code) {
+      throw new Error(`devtools/restart: ${p.code}: ${p.message ?? ""}`);
+    }
+    if (typeof p?.proxyPort !== "number" || typeof p?.sessionNonce !== "string") {
+      throw new Error("devtools/restart: malformed daemon response");
+    }
+    return { proxyPort: p.proxyPort, sessionNonce: p.sessionNonce };
+  }
+
   dispatch(kind: DevToolsEventKind, data: unknown): void {
     if (kind === "devtools/status") {
       this.emit("status", data);

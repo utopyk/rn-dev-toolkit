@@ -291,6 +291,25 @@ export class DevToolsManager extends EventEmitter {
     this.instances.delete(worktreeKey);
   }
 
+  /**
+   * Stop the worktree's proxy + start a fresh one. Used by the Electron
+   * "Reconnect" / "Retry target discovery" button when the manager has
+   * landed in `no-target` and the user wants to rediscover after the
+   * app launches.
+   *
+   * The composition lives at the manager layer (not in the daemon's
+   * RPC dispatcher) because per-worktree state-machine ownership is
+   * the manager's job — exposing `stop`+`start` as two separate RPCs
+   * would let a concurrent caller observe the empty-meta gap between
+   * them. Architecture P1-2 on PR #26.
+   */
+  async restart(
+    worktreeKey: string,
+  ): Promise<{ proxyPort: number; sessionNonce: string }> {
+    await this.stop(worktreeKey);
+    return this.start(worktreeKey);
+  }
+
   async stopAll(): Promise<void> {
     const keys = Array.from(this.instances.keys());
     await Promise.all(keys.map((k) => this.stop(k)));

@@ -25,6 +25,7 @@ const CLIENT_RPC_ACTIONS = new Set<string>([
   "devtools/status",
   "devtools/clear",
   "devtools/selectTarget",
+  "devtools/restart",
   "builder/build",
   "watcher/start",
   "watcher/stop",
@@ -118,6 +119,13 @@ async function dispatch(
       }
       await services.devtools.selectTarget(services.worktreeKey, targetId);
       return { ok: true };
+    }
+    case "devtools/restart": {
+      // Composition lives in DevToolsManager.restart() — the manager
+      // owns the per-worktree state machine, so exposing the boundary
+      // as a single atomic verb here keeps concurrent observers from
+      // seeing the stop/start gap. Architecture P1-2 on PR #26.
+      return services.devtools.restart(services.worktreeKey);
     }
     case "builder/build": {
       const parsed = parseBuildOptions(message.payload, supervisor.getWorktree());

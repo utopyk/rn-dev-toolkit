@@ -17,7 +17,12 @@
 //   0.1.1 — profile-guard accepts `null` for `devices.{ios,android}`
 //           ([profile-guard.ts:184]). Old daemons rejected null with
 //           E_PROFILE_DEVICE_ID even though Profile.devices typed it.
-export const DAEMON_VERSION = "0.1.1";
+//   0.1.2 — `devtools/restart` client RPC added ([client-rpcs.ts]).
+//           Old daemons reject the action with E_RPC_FAILED, and the
+//           Electron "Reconnect" button surfaces the failure as
+//           "Cannot restart DevTools proxy for Metro on port N" — Bug
+//           5 fix only lands once the running daemon picks this up.
+export const DAEMON_VERSION = "0.1.2";
 
 // Range of host versions this daemon will accept clients from. Returned
 // in `daemon/ping` responses but not currently enforced — kept for

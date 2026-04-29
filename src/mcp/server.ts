@@ -119,7 +119,13 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
   if (profile) {
     try {
       session = await connectToDaemonSession(projectRoot, profile, {
-        kinds: ["modules/*"], // MCP doesn't need metro/builder/devtools firehose
+        // Bug 6 — explicit allowlist (not `session/*` glob) so a
+        // future `session/error` event with a sensitive payload
+        // doesn't auto-leak into MCP's process address space.
+        // Security P1-3 on PR #27. Add new entries here when the
+        // daemon emits new session-level kinds and the MCP tool
+        // surface needs them.
+        kinds: ["modules/*", "session/log", "session/status"],
       });
     } catch {
       // Daemon unreachable at startup — degrade to built-ins-only mode

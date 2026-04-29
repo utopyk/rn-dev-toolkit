@@ -64,3 +64,11 @@ export type ModuleHostEventKind =
   | "modules/state-changed"
   | "modules/crashed"
   | "modules/failed";
+
+/**
+ * Narrow string-literal kinds the Session adapter receives. Bug 6 — the
+ * daemon emits these for every step of `bootSessionServices` and on
+ * every state-machine transition; pre-fix they fell into
+ * `routeEventToAdapters`'s default arm and disappeared.
+ */
+export type SessionEventKind = "session/log" | "session/status";

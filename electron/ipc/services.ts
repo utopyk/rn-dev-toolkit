@@ -271,6 +271,22 @@ export async function attachDaemonSession(
  * helper rather than adding a third call site.
  */
 export function wireInstanceEvents(instance: InstanceState, session: DaemonSession): void {
+  // Bug 6 — surface the daemon's `bootSessionServices` progress
+  // (preflight, install, watchman setup, port-kill, simulator boot —
+  // every line `supervisor.ts` emits as `session/log`) on the
+  // renderer's `instance:log` channel. Pre-fix the renderer only saw
+  // Electron-local sources (the package-manager and code-signing
+  // prompts above); the daemon-driven boot was invisible. See
+  // `SessionClient` for why the snapshot+subscribe pattern is needed
+  // (events fire during the connectToDaemonSession await).
+  const forward = (evt: { message: string }): void => {
+    const text = `[daemon] ${evt.message}`;
+    appendLog(instance, 'service', text);
+    send('instance:log', { instanceId: instance.id, text });
+  };
+  for (const evt of session.lifecycle.recentLogs()) forward(evt);
+  session.lifecycle.on('log', forward);
+
   session.metro.on('log', (evt: { line: string }) => {
     appendLog(instance, 'metro', evt.line);
     send('instance:metro', { instanceId: instance.id, text: evt.line });

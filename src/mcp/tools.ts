@@ -55,6 +55,12 @@ export interface McpContext {
    * subscribe socket, preserving connectionId for bind-sender +
    * host-call. `null` when MCP starts before a daemon exists or after
    * the daemon connection drops.
+   *
+   * Bug 6 — `session.lifecycle` (the `SessionClient` adapter) is now
+   * the canonical source of recent `session/log` lines for the
+   * `rn-dev/session-logs` tool. No MCP-side ring needed; the adapter
+   * already maintains one (200 entries by default) so a poll-style
+   * tool just reads it on demand.
    */
   session: DaemonSession | null;
   /** Optional — older call sites pre-date the flag system; default OFF. */
@@ -279,6 +285,30 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
           }));
         }
         return { error: "No running session" };
+      },
+    },
+    {
+      name: "rn-dev/session-logs",
+      description:
+        "Return recent daemon-emitted session log lines. Surfaces boot progress (preflight, install, watchman setup, port-kill, simulator boot) and other session-level state changes that the daemon emits while a session is running. Useful immediately after `rn-dev/start-session` to observe what the daemon is doing.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "number",
+            description:
+              "Maximum number of most-recent lines to return. Default: 50. Max: 200 (the SessionClient ring size).",
+          },
+        },
+      },
+      handler: async (args) => {
+        const limit =
+          typeof args.limit === "number" && args.limit > 0
+            ? Math.min(args.limit, 200)
+            : 50;
+        const all = ctx.session?.lifecycle.recentLogs() ?? [];
+        const lines = all.slice(-limit);
+        return { structuredContent: { lines } };
       },
     },
     // Metro control

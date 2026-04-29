@@ -42,6 +42,7 @@ function makeSession(options: {
     builder: {} as DaemonSession["builder"],
     watcher: {} as DaemonSession["watcher"],
     modules: {} as DaemonSession["modules"],
+    lifecycle: {} as DaemonSession["lifecycle"],
     worktreeKey: "root",
     disconnect: vi.fn(),
     release: vi.fn(async () => {}),

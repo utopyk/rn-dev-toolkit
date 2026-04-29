@@ -34,6 +34,7 @@ import { DevToolsClient } from "./devtools-adapter.js";
 import { BuilderClient } from "./builder-adapter.js";
 import { WatcherClient } from "./watcher-adapter.js";
 import { ModuleHostClient } from "./module-host-adapter.js";
+import { SessionClient } from "./session-adapter.js";
 
 /**
  * Minimal send-only interface used by adapter constructors. All adapter
@@ -66,6 +67,25 @@ export interface DaemonSession {
    * across clients.
    */
   modules: ModuleHostClient;
+  /**
+   * Surfaces `session/log` (every line of `bootSessionServices`
+   * progress — preflight, install, watchman setup, port-kill, simulator
+   * boot) and `session/status` (state-machine transitions) from the
+   * daemon. Bug 6 — pre-fix these events fell into
+   * `routeEventToAdapters`'s default arm and were silently dropped, so
+   * the user/agent had zero visibility into daemon-side boot progress
+   * across all three clients (Electron renderer, MCP, TUI). Now every
+   * client subscribes to this adapter and surfaces `log` events at its
+   * own UI/agent surface (renderer's `instance:log`, MCP's
+   * `rn-dev/session-logs` tool, TUI's log pane).
+   *
+   * Named `lifecycle` (not `session`) because `DaemonSession` itself
+   * IS the session — `session.session.recentLogs()` would be tautology.
+   * The events surfaced here are session-lifecycle: state transitions
+   * (`session/status`) and the boot-progress narration that drives
+   * them (`session/log`).
+   */
+  lifecycle: SessionClient;
   worktreeKey: string;
   /**
    * Phase 13.5 trichotomy of session-end methods:
@@ -145,6 +165,7 @@ export async function connectToDaemonSession(
   const builder = new BuilderClient(channelClient, idGen);
   const watcher = new WatcherClient(channelClient, idGen);
   const modules = new ModuleHostClient(channelClient, client, idGen);
+  const lifecycle = new SessionClient();
 
   let worktreeKey: string | null = null;
   let resolveRunning!: () => void;
@@ -185,6 +206,7 @@ export async function connectToDaemonSession(
     builder.notifyDisconnected(err);
     watcher.notifyDisconnected(err);
     modules.notifyDisconnected(err);
+    lifecycle.notifyDisconnected(err);
   };
 
   const onIncomingEvent = (msg: IpcMessage): void => {
@@ -215,6 +237,7 @@ export async function connectToDaemonSession(
       builder,
       watcher,
       modules,
+      lifecycle,
     });
   };
 
@@ -342,6 +365,7 @@ export async function connectToDaemonSession(
     builder,
     watcher,
     modules,
+    lifecycle,
     worktreeKey,
     disconnect,
     release,
@@ -436,6 +460,7 @@ function routeEventToAdapters(
     builder: BuilderClient;
     watcher: WatcherClient;
     modules: ModuleHostClient;
+    lifecycle: SessionClient;
   },
 ): void {
   switch (kind) {
@@ -460,13 +485,22 @@ function routeEventToAdapters(
     case "modules/failed":
       adapters.modules.dispatch(kind, data);
       return;
+    case "session/log":
+    case "session/status":
+      // Bug 6 — used to fall through to the default-arm drop. Now
+      // routed through SessionClient so every client (Electron, MCP,
+      // TUI) sees daemon-side `bootSessionServices` progress at its
+      // own UI/agent surface.
+      adapters.lifecycle.dispatch(kind, data);
+      return;
     default:
-      // session/status + session/log stay in the subscribe stream's
-      // raw form — callers that need them (Electron for status-bar
-      // updates, MCP for log fan-out) subscribe via
-      // `client.subscribe(...)` directly. Adding them here would
-      // pull in a session-level adapter that no client consumes
-      // uniformly today.
+      // Drift detection — if the daemon adds a sixth event family
+      // later (e.g. `audit/*`) and a developer forgets to add a case
+      // here, this surfaces it cheaply instead of silently dropping.
+      // Architecture P2 on PR #27.
+      if (kind !== undefined) {
+        console.warn(`routeEventToAdapters: unknown kind ${kind}`);
+      }
       return;
   }
 }

@@ -61,6 +61,7 @@ function makeMockSession(
     builder: {} as DaemonSession["builder"],
     watcher: {} as DaemonSession["watcher"],
     modules: {} as DaemonSession["modules"],
+    lifecycle: {} as DaemonSession["lifecycle"],
     worktreeKey: "root",
     disconnect: vi.fn(),
     release: vi.fn(async () => {}),
@@ -73,9 +74,9 @@ function makeMockSession(
 // ---------------------------------------------------------------------------
 
 describe("createToolDefinitions()", () => {
-  it("returns 30 tool definitions (22 legacy + 5 modules/* lifecycle + 2 modules/config/* + modules-available; Phase 11 retired legacy `rn-dev/metro-logs`)", () => {
+  it("returns 31 tool definitions (22 legacy + 5 modules/* lifecycle + 2 modules/config/* + modules-available + session-logs; Phase 11 retired legacy `rn-dev/metro-logs`)", () => {
     const tools = createToolDefinitions(makeMockContext());
-    expect(tools).toHaveLength(30);
+    expect(tools).toHaveLength(31);
   });
 
   it("each tool has name, description, inputSchema, and handler", () => {

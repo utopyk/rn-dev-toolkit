@@ -4,6 +4,7 @@ import { ProfileStore } from '../../src/core/profile.js';
 import { getCurrentBranch } from '../../src/core/project.js';
 import { listDevices } from '../../src/core/device.js';
 import { attachDaemonSession, wireInstanceEvents } from './services.js';
+import { triggerBuildsIfNeeded } from '../../src/app/auto-build.js';
 import type { Profile } from '../../src/core/types.js';
 import {
   instances,
@@ -127,6 +128,12 @@ export function registerInstanceHandlers() {
         // renderer's `instance:metro` channel — the user sees "Daemon
         // session attached" and then silence.
         wireInstanceEvents(instance, session);
+        // Auto-build for non-quick modes — same parity with the TUI
+        // start-flow as `startRealServices` enforces. The wizard-path
+        // attach (this branch) hits this when the user creates the
+        // first instance from the wizard; without it, dirty/clean/
+        // ultra-clean profiles silently skip the build.
+        triggerBuildsIfNeeded(session, sessionProfile, state.projectRoot);
         const msg = `Daemon session attached for profile "${profileData.name ?? id}".`;
         appendLog(instance, 'service', msg);
         send('instance:log', { instanceId: id, text: msg });
@@ -188,12 +195,50 @@ export function registerInstanceHandlers() {
     const instance = instances.get(instanceId);
     if (!instance) return { ok: false, error: 'Instance not found' };
 
-    // The daemon owns every runtime service; this map only carries
-    // Electron's per-instance bookkeeping. If the instance being
-    // removed was the active one that opened a daemon session, the
-    // session stays alive — teardown is the user's choice via app
-    // quit (Phase 13.5 grows ref-counted `DaemonSession.release()`
-    // for the multi-instance story).
+    // User-reported (2026-05-06): closing a tab left Metro running.
+    // First fix sent session/stop synchronously, but the daemon's
+    // supervisor.stop() AWAITS any in-flight boot before tearing down
+    // (src/daemon/supervisor.ts:378-385). Under ultra-clean mode the
+    // boot's clean step can take 5-10 minutes, so the synchronous wait
+    // froze the kill — second user report: "killing the tab still does
+    // nothing in the ultra clean profile".
+    //
+    // Two-phase teardown now:
+    //   1. UI-side: remove the tab immediately so the user sees their
+    //      action take effect, no matter how long the daemon takes.
+    //   2. Daemon-side: fire session/stop without awaiting the response.
+    //      `supervisor.stop()` will run as soon as the current boot
+    //      finishes its in-flight phase (or immediately if it's already
+    //      `running`). Resources tear down in the background.
+    //
+    // Trade-off: if the daemon is mid-clean, Metro doesn't stop until
+    // that clean phase ends. That's better than freezing the UI for
+    // ten minutes — and far better than the pre-fix behavior of leaking
+    // Metro entirely. A future refactor can make clean cancelable
+    // (AbortSignal through CleanManager) so stop is truly immediate.
+    if (state.daemonSession && state.activeInstanceId === instanceId) {
+      const session = state.daemonSession;
+      // Clear the references first so a follow-up `instances:create`
+      // doesn't try to share a session that's tearing down.
+      state.daemonSession = null;
+      state.daemonSessionProfileName = null;
+      // Fire-and-forget. Errors land in the audit / daemon log but
+      // don't block the UI.
+      void session.client
+        .send({
+          type: 'command',
+          action: 'session/stop',
+          id: `electron-close-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        })
+        .catch((err: unknown) => {
+          const message = err instanceof Error ? err.message : String(err);
+          // Best-effort log via send() — the instance might already be
+          // deleted from the renderer at this point, which is fine; the
+          // log line is for the daemon stderr trail.
+          send('instance:log', { instanceId, text: `⚠ Background session/stop failed: ${message}` });
+        });
+    }
+
     instances.delete(instanceId);
 
     if (state.activeInstanceId === instanceId) {

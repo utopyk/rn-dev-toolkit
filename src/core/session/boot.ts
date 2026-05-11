@@ -41,6 +41,10 @@ import {
 } from "../../modules/create-module-system.js";
 import type { Builder } from "../builder.js";
 import type { Profile } from "../types.js";
+import { HookManager } from "../hooks/manager.js";
+import { getDefaultAuditLog } from "../audit-log.js";
+import { loadProjectHooks } from "../hooks/load-project-hooks.js";
+import { validateProfile } from "../../daemon/profile-guard.js";
 
 export interface BootSessionServicesOptions {
   profile: Profile;
@@ -92,6 +96,31 @@ export interface SessionServices {
    * daemon-side event subscribers can attach without re-wiring IPC.
    */
   moduleEvents: ReturnType<typeof import("../../app/modules-ipc.js").registerModulesIpc>["moduleEvents"];
+  /**
+   * Phase H1 — hook system facade. Built-ins call `declareProvider`
+   * during boot; the project's `rn-dev.config.ts` registrations land
+   * via `addRegistration`; the daemon fires `session/init` at the end
+   * of boot and `session/profile-changed` from the
+   * `session/profile-update` RPC.
+   */
+  hookManager: HookManager;
+  /**
+   * Phase H2g — current ValidatedProfile. Re-minted at boot from the
+   * caller's plain `Profile` and refreshed by the
+   * `session/profile-update` RPC handler so subsequent build/pre and
+   * build/post hook fires receive a brand-bearing instance reflecting
+   * the latest configuration. Mutable on purpose; consumers should not
+   * cache references across `session/profile-update`.
+   */
+  validatedProfile: import("../../daemon/profile-guard.js").ValidatedProfile;
+  /**
+   * Boot-trace markers in firing order. Populated as the three-phase
+   * boot progresses; `[1, 2, 3]` after a healthy boot. Exposed for
+   * vitest assertions that pin the ordering invariant: every built-in
+   * provider is declared (Phase 2) before `session/init` fires
+   * (Phase 3). Production callers should ignore.
+   */
+  bootTrace: ReadonlyArray<{ phase: 1 | 2 | 3; ts: number }>;
   /** Release resources. Daemon calls this on session/stop. */
   dispose: () => Promise<void>;
 }
@@ -194,35 +223,100 @@ export async function bootSessionServices(
   emit("\u23f3 Clearing watchman...");
   await spawnWatchmanWatchDel(effectiveRoot, emit);
 
-  // 5. Port check + kill stale.
+  // 5. Port check + ownership-aware kill or fall-back.
+  //
+  // The decision tree when `profile.metroPort` is busy:
+  //   - non-Metro process       \u2192 refuse to kill (could be Jenkins, etc.);
+  //                                 throw with a clear remediation message.
+  //   - Metro on same worktree  \u2192 our own stale Metro from a prior session;
+  //                                 kill it (SIGTERM \u2192 poll \u2192 SIGKILL) and
+  //                                 reuse the port.
+  //   - Metro on different cwd  \u2192 another worktree's Metro; leave it alone
+  //                                 and pick a free port via
+  //                                 `findFreePortInRange`. Persisted to the
+  //                                 worktree's artifact so subsequent boots
+  //                                 land on the same port without re-probing.
+  //
+  // SIGTERM is racy because RN CLI installs a graceful-shutdown handler
+  // that takes 2\u20135s to release the socket. The fixed 1s sleep that used
+  // to live here lost that race and surfaced as EADDRINUSE in Metro's
+  // earlyPortCheck. We now poll-until-free with a 5s grace, then escalate
+  // to SIGKILL with a 3s grace, then throw.
   const metro = new MetroManager(artifactStore);
   const worktreeKey = artifactStore.worktreeHash(profile.worktree);
-  const port = profile.metroPort;
+  let port = profile.metroPort;
   emit(`\u23f3 Checking port ${port}...`);
   const portFree = await metro.isPortFree(port);
+
   if (!portFree) {
-    emit(`\u26a0 Port ${port} is in use. Killing stale process...`);
-    const killed = await metro.killProcessOnPort(port);
-    if (killed) {
-      emit(`  \u2714 Killed process on port ${port}`);
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+    emit(`\u2139 Port ${port} is busy. Probing for Metro...`);
+    const isMetro = await metro.isMetroOnPort(port);
+
+    if (!isMetro) {
+      emit(
+        `\u2716 Port ${port} is held by a non-Metro process. Change \`metroPort\` in your profile or stop the conflicting service.`,
+      );
+      throw new Error(
+        `Port ${port} is held by a non-Metro process. Change metroPort or stop the conflicting service.`,
+      );
+    }
+
+    // Compare cwd of the holder against our worktree. Same cwd \u2192 ours,
+    // kill it. Different cwd \u2192 another worktree, leave it alone.
+    const holderPid = await metro.findProcessOnPort(port);
+    const holderCwd = holderPid != null ? await metro.getProcessCwd(holderPid) : null;
+    const sameWorktree =
+      holderCwd != null &&
+      // Normalise both paths \u2014 a trailing slash mismatch shouldn't decide
+      // whether we kill the user's neighbour-branch Metro.
+      holderCwd.replace(/\/+$/, "") === effectiveRoot.replace(/\/+$/, "");
+    emit(`  \u2139 holder pid=${holderPid} cwd=${holderCwd ?? "?"} sameWorktree=${sameWorktree}`);
+
+    if (sameWorktree) {
+      emit(`\u26a0 Killing existing Metro on port ${port} (same worktree)...`);
+      await metro.killProcessOnPort(port, "SIGTERM");
+      let freed = await metro.waitForPortFree(port, 5000);
+
+      if (!freed) {
+        emit(`\u26a0 SIGTERM didn't free port within 5s \u2014 escalating to SIGKILL...`);
+        await metro.killProcessOnPort(port, "SIGKILL");
+        freed = await metro.waitForPortFree(port, 3000);
+      }
+
+      if (!freed) {
+        throw new Error(
+          `Port ${port} still busy after SIGTERM + 5s + SIGKILL + 3s. ` +
+            `The previous Metro is wedged \u2014 kill it manually with ` +
+            `\`kill -9 $(lsof -i :${port} -t)\` and retry.`,
+        );
+      }
+      emit(`  \u2714 Port ${port} is free`);
     } else {
-      emit(`  \u2716 Could not kill process on port ${port}. Trying anyway...`);
+      const range = metro.portRangeReadable;
+      const fallback = await metro.findFreePortInRange(range[0], range[1]);
+      emit(
+        `\u2139 Port ${port} belongs to a different worktree (${holderCwd ?? "unknown"}). ` +
+          `Falling back to free port ${fallback}.`,
+      );
+      artifactStore.save(worktreeKey, { metroPort: fallback });
+      port = fallback;
     }
   } else {
     emit(`\u2714 Port ${port} is free`);
   }
 
-  // 6. Simulator boot (iOS only).
+  // 6. iOS device check (simulator boot if needed; physical devices are USB-attached).
   if (profile.platform === "ios" || profile.platform === "both") {
     const deviceId = profile.devices?.ios;
     if (deviceId) {
-      emit("\u23f3 Checking simulator status...");
+      emit("\u23f3 Checking iOS device status...");
       try {
         const { listDevices: listDev, bootDevice } = await import("../device.js");
         const devices = await listDev("ios");
         const device = devices.find((d) => d.id === deviceId);
-        if (device && device.status === "shutdown") {
+        if (device?.isPhysical) {
+          emit(`  \u2714 Physical device ${device.name} (connects via USB)`);
+        } else if (device && device.status === "shutdown") {
           emit(`\u23f3 Booting simulator ${device.name}...`);
           const booted = await bootDevice(device);
           emit(
@@ -233,11 +327,11 @@ export async function bootSessionServices(
         } else if (device && device.status === "booted") {
           emit(`  \u2714 Simulator ${device.name} already booted`);
         } else {
-          emit(`  \u26a0 Device ${deviceId} not found in simulator list`);
+          emit(`  \u26a0 Device ${deviceId} not found in iOS device list`);
         }
       } catch (err) {
         emit(
-          `  \u26a0 Simulator check failed: ${
+          `  \u26a0 iOS device check failed: ${
             err instanceof Error ? err.message.slice(0, 80) : String(err).slice(0, 80)
           }`,
         );
@@ -257,7 +351,7 @@ export async function bootSessionServices(
   metro.start({
     worktreeKey,
     projectRoot: effectiveRoot,
-    port: profile.metroPort,
+    port,
     resetCache: profile.mode !== "dirty" && profile.mode !== "quick",
     verbose: true,
     env: profile.env,
@@ -305,6 +399,17 @@ export async function bootSessionServices(
     logger: createScopedLogger(emit),
   });
 
+  // Phase H2f — register the build built-in module with the live
+  // Builder instance attached. SessionServices.builder is a getter
+  // (see return below) that resolves through
+  // moduleRegistry.getBuiltIn('build'), so the built-in module is the
+  // single source of truth — no second instance lives on
+  // SessionServices. Registered here (NOT in createModuleSystem)
+  // because the Builder construction is environment-specific
+  // (production: real Builder; fake-boot: FakeBuilderSurface).
+  const { buildManifest } = await import("../../modules/built-in/manifests.js");
+  moduleRegistry.registerBuiltIn(buildManifest, { instance: builder });
+
   const loadResult = moduleRegistry.loadUserGlobalModules({
     hostVersion,
     scopeUnit: worktreeKey,
@@ -338,6 +443,61 @@ export async function bootSessionServices(
     subscribeRegistry: opts.subscribeRegistry,
   });
 
+  // 13. Hook system three-phase boot.
+  //
+  //     Phase 1 (capabilities + built-ins registered) — completed by the
+  //     `createModuleSystem` + `loadUserGlobalModules` calls above. NO
+  //     hook fires here; NO HookManager constructed. The contract for
+  //     Phase 1 is just "the module graph is in place."
+  //
+  //     Phase 2 (HookManager + provider declarations + project config
+  //     walk) — construct the manager, declare every built-in's
+  //     `provides.hooks`, then load the project's `rn-dev.config.*` if
+  //     present and add its registrations. Orphans (registrations
+  //     against a slot whose provider hasn't declared the hook yet)
+  //     are flagged and surfaced via the `hooks/orphaned` event.
+  //
+  //     Phase 3 (session/init fire) — first hook fire of the session.
+  //     Consumers registered against `session/init` run here; a hard
+  //     failure aborts boot.
+  const hookManager = new HookManager({
+    auditLog: getDefaultAuditLog(),
+    daemonPid: process.pid,
+  });
+  const bootTrace: Array<{ phase: 1 | 2 | 3; ts: number }> = [];
+  hookManager.on("boot/phase", (m: { phase: 1 | 2 | 3; ts: number }) => {
+    bootTrace.push(m);
+  });
+  hookManager.emit("boot/phase", { phase: 1, ts: Date.now() });
+
+  for (const m of moduleRegistry.getAllManifests()) {
+    const provides = m.manifest.provides?.hooks;
+    if (provides && provides.length > 0) {
+      hookManager.declareProvider(m.manifest.id, provides);
+    }
+  }
+  await loadProjectHooks({ hookManager, projectRoot, emit });
+  hookManager.emit("boot/phase", { phase: 2, ts: Date.now() });
+
+  // Re-validate the profile at the boot boundary. The daemon's
+  // session/start handler already validated upstream, but the
+  // ValidatedProfile brand is non-transferable through the plain
+  // `Profile` shape that flows into this factory. Re-mint here so the
+  // first hook fire receives a brand-bearing instance.
+  const validatedResult = validateProfile(profile);
+  if (!validatedResult.ok) {
+    throw new Error(
+      `bootSessionServices: profile re-validation failed (${validatedResult.code}): ${validatedResult.message}`,
+    );
+  }
+  const validatedProfile = validatedResult.profile;
+  await hookManager.fire(
+    "session/init",
+    { profile: validatedProfile, worktreeKey, projectRoot },
+    validatedProfile,
+  );
+  hookManager.emit("boot/phase", { phase: 3, ts: Date.now() });
+
   emit("\u2714 All services started");
   emit("");
 
@@ -368,13 +528,25 @@ export async function bootSessionServices(
     metro,
     devtools,
     watcher,
-    builder,
+    // Phase H2f — getter resolves through ModuleRegistry.getBuiltIn so
+    // the build built-in module is the single source of truth.
+    // Compatible with the typed `builder: Builder` interface (TS treats
+    // a getter the same as a property at the type level).
+    get builder(): Builder {
+      return moduleRegistry.getBuiltIn<Builder>("build");
+    },
     moduleHost,
     moduleRegistry,
     worktreeKey,
     metroLogsStore,
     capabilities,
     moduleEvents: modulesIpc.moduleEvents,
+    hookManager,
+    // Phase H2g — initial validated profile. session/profile-update
+    // mutates this field in place so subsequent build/pre + build/post
+    // hook fires see the latest config.
+    validatedProfile,
+    bootTrace,
     dispose,
   };
 }

@@ -81,7 +81,8 @@ export type AuditEntryInput =
   | AuditUninstallInput
   | AuditHostCallInput
   | AuditConfigSetInput
-  | AuditPanelBridgeInput;
+  | AuditPanelBridgeInput
+  | AuditHookInput;
 
 export interface AuditInstallInput {
   kind: "install";
@@ -127,6 +128,36 @@ export interface AuditPanelBridgeInput {
   /** `"register"` / `"unregister"` / `"show"` / `"hide"`. */
   action: string;
   panelId: string;
+}
+
+/**
+ * Hook system audit entry (Phase H1).
+ *
+ * Successful additive hook fires are NOT written — volume would dwarf
+ * every other audit class and the build/clean log already captures
+ * stdout/stderr. Failures (hard or escalated-warn), override-slot
+ * registrations, and queue-full overflow ALWAYS land here.
+ */
+export interface AuditHookInput {
+  kind: "hook";
+  /** "<moduleId>/<hookName>" — the slot that was fired or registered against. */
+  phase: string;
+  /** "project" or "module:<id>" — origin of the registration. */
+  source: "project" | `module:${string}`;
+  /** Resolved script absolute path, or `"fn:<symbol>"` for in-process hooks. */
+  scriptOrSymbol: string;
+  /** Wall-clock duration in ms. `0` for registration-only entries. */
+  durationMs: number;
+  /** Process exit code on subprocess failures. `-1` for unspawned/registration entries. */
+  exitCode: number;
+  outcome: AuditOutcome;
+  /**
+   * Optional sub-discriminator naming why the entry was written:
+   *   - `"failure"` — hook fired and failed (matches `outcome: "error"`)
+   *   - `"override-registered"` — `<id>/custom` registration recorded (matches `outcome: "ok"` or `"denied"`)
+   *   - `"queue-full"` — fire was rejected because the queue cap was hit (matches `outcome: "denied"`)
+   */
+  reason?: "failure" | "override-registered" | "queue-full";
 }
 
 export type AuditEntry = AuditEntryInput & {

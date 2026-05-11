@@ -32,6 +32,21 @@ interface ToolingOption {
   command: string;
 }
 
+interface BundleConfigurationOption {
+  name: string;
+  label?: string;
+  isDefault?: boolean;
+}
+
+interface BundleDescriptor {
+  scheme: string;
+  label?: string;
+  configurations?: BundleConfigurationOption[];
+  variant?: 'debug' | 'release' | 'any';
+  signingStyle?: 'manual' | 'automatic' | 'either';
+  description?: string;
+}
+
 type Platform = 'ios' | 'android' | 'both';
 type Mode = 'quick' | 'dirty' | 'clean' | 'ultra-clean';
 type PreflightFrequency = 'once' | 'always';
@@ -40,6 +55,8 @@ interface WizardState {
   worktree: WorktreeOption | null;
   branch: string | null;
   platform: Platform;
+  scheme: string | null;
+  configuration: string | null;
   mode: Mode;
   device: DeviceOption | null;
   preflightChecks: string[];
@@ -111,6 +128,8 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
     worktree: null,
     branch: null,
     platform: 'ios',
+    scheme: null,
+    configuration: null,
     mode: 'dirty',
     device: null,
     preflightChecks: [],
@@ -118,6 +137,8 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
     onSaveTools: [],
     customCommand: '',
   });
+
+  const [bundles, setBundles] = useState<BundleDescriptor[]>([]);
 
   // Load data per step
   useEffect(() => {
@@ -148,6 +169,38 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
         setLoadingKey(null);
       });
     }
+  }, [step, state.platform]);
+
+  // Discover bundles (iOS schemes / Android flavors) when the platform
+  // step opens or when the platform changes. iOS-only for now —
+  // Android picker UX lands when a multi-flavor app surfaces here.
+  useEffect(() => {
+    if (step !== 3) return;
+    if (state.platform === 'android') {
+      setBundles([]);
+      return;
+    }
+    setLoadingKey('bundles');
+    invoke<{ bundles: BundleDescriptor[] }>('wizard:getBundles', 'ios')
+      .then((data) => {
+        const found = data?.bundles ?? [];
+        setBundles(found);
+        // Auto-pick when there's exactly one bundle so the user
+        // doesn't have to click through a degenerate dropdown.
+        if (found.length === 1 && state.scheme === null) {
+          const only = found[0];
+          const defaultCfg =
+            only.configurations?.find((c) => c.isDefault)?.name ??
+            only.configurations?.[0]?.name ??
+            null;
+          setState((s) => ({ ...s, scheme: only.scheme, configuration: defaultCfg }));
+        }
+        setLoadingKey(null);
+      })
+      .catch(() => {
+        setBundles([]);
+        setLoadingKey(null);
+      });
   }, [step, state.platform]);
 
   useEffect(() => {
@@ -221,6 +274,8 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
         android: state.platform !== 'ios' && state.device ? state.device.id : null,
       },
       buildVariant: 'debug',
+      ...(state.scheme ? { scheme: state.scheme } : {}),
+      ...(state.configuration ? { configuration: state.configuration } : {}),
       preflight: {
         checks: state.preflightChecks,
         frequency: state.preflightFrequency,
@@ -363,7 +418,10 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
         );
       }
 
-      case 3:
+      case 3: {
+        const showBundlePicker =
+          state.platform !== 'android' && bundles.length > 0;
+        const selectedBundle = bundles.find((b) => b.scheme === state.scheme) ?? null;
         return (
           <StepContainer
             title="Platform"
@@ -376,10 +434,76 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
                 { value: 'both', label: 'Both' },
               ]}
               value={state.platform}
-              onChange={(v) => setState((s) => ({ ...s, platform: v as Platform, device: null }))}
+              onChange={(v) =>
+                setState((s) => ({
+                  ...s,
+                  platform: v as Platform,
+                  device: null,
+                  // Clear scheme/config — they'll be re-detected for the
+                  // new platform on the next render of this step.
+                  scheme: null,
+                  configuration: null,
+                }))
+              }
             />
+            {loadingKey === 'bundles' && (
+              <div className="wz-empty-msg">Discovering schemes…</div>
+            )}
+            {showBundlePicker && (
+              <div className="wz-bundle-picker">
+                <label className="wz-label">iOS scheme</label>
+                <select
+                  className="wz-select"
+                  value={state.scheme ?? ''}
+                  onChange={(e) => {
+                    const next = bundles.find((b) => b.scheme === e.target.value) ?? null;
+                    const cfg =
+                      next?.configurations?.find((c) => c.isDefault)?.name ??
+                      next?.configurations?.[0]?.name ??
+                      null;
+                    setState((s) => ({
+                      ...s,
+                      scheme: next?.scheme ?? null,
+                      configuration: cfg,
+                    }));
+                  }}
+                >
+                  <option value="">— Pick a scheme —</option>
+                  {bundles.map((b) => (
+                    <option key={b.scheme} value={b.scheme}>
+                      {b.label ?? b.scheme}
+                    </option>
+                  ))}
+                </select>
+                {selectedBundle?.configurations && selectedBundle.configurations.length > 1 && (
+                  <>
+                    <label className="wz-label">Configuration</label>
+                    <select
+                      className="wz-select"
+                      value={state.configuration ?? ''}
+                      onChange={(e) =>
+                        setState((s) => ({ ...s, configuration: e.target.value || null }))
+                      }
+                    >
+                      {selectedBundle.configurations.map((c) => (
+                        <option key={c.name} value={c.name}>
+                          {c.label ?? c.name}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
+                {selectedBundle?.signingStyle === 'manual' && (
+                  <div className="wz-empty-msg">
+                    ℹ Manual code signing — the daemon will keep your existing
+                    cert/profile config as-is.
+                  </div>
+                )}
+              </div>
+            )}
           </StepContainer>
         );
+      }
 
       case 4:
         return (

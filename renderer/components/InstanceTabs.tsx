@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import './InstanceTabs.css';
 
 export interface InstanceInfo {
@@ -22,7 +22,7 @@ interface InstanceTabsProps {
 
 function shortenName(name: string, max: number): string {
   if (name.length <= max) return name;
-  return name.slice(0, max - 1) + '\u2026';
+  return name.slice(0, max - 1) + '…';
 }
 
 function statusDotClass(status: string): string {
@@ -35,19 +35,18 @@ function statusDotClass(status: string): string {
 }
 
 export function InstanceTabs({ instances, activeId, onSelect, onClose, onAdd }: InstanceTabsProps) {
-  const [confirmClose, setConfirmClose] = useState<string | null>(null);
-
-  const handleClose = (e: React.MouseEvent, id: string, port: number) => {
+  // Single click fires onClose immediately. The "are you sure" gate
+  // lives at the parent (App.tsx) as a real modal — pre-2026-05-07 a
+  // two-click confirm with a pulsing red glyph lived inline in this
+  // component, but a series of user reports surfaced the affordance
+  // as confusing ("all it does is change an icon to red") and
+  // unusual ("if we want to make sure the user wants to kill the
+  // tab, we should pop up a modal not a second click"). The modal is
+  // the standard pattern; this component is back to a stateless tab
+  // strip.
+  const handleClose = (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
-    if (confirmClose === id) {
-      // Second click = confirmed
-      onClose(id);
-      setConfirmClose(null);
-    } else {
-      setConfirmClose(id);
-      // Auto-dismiss confirmation after 3 seconds
-      setTimeout(() => setConfirmClose((prev) => (prev === id ? null : prev)), 3000);
-    }
+    onClose(id);
   };
 
   return (
@@ -55,7 +54,6 @@ export function InstanceTabs({ instances, activeId, onSelect, onClose, onAdd }: 
       <div className="instance-tabs-scroll">
         {instances.map((inst) => {
           const isActive = inst.id === activeId;
-          const isConfirming = confirmClose === inst.id;
           return (
             <div
               key={inst.id}
@@ -71,17 +69,13 @@ export function InstanceTabs({ instances, activeId, onSelect, onClose, onAdd }: 
               </span>
               <span className={statusDotClass(inst.metroStatus)} />
               <button
-                className={`instance-tab-close${isConfirming ? ' confirming' : ''}`}
-                onClick={(e) => handleClose(e, inst.id, inst.port)}
-                title={isConfirming ? `Stop Metro on :${inst.port}?` : 'Close instance'}
+                className="instance-tab-close"
+                onClick={(e) => handleClose(e, inst.id)}
+                aria-label={`Close instance on port ${inst.port}`}
+                title="Close instance"
               >
-                {isConfirming ? '?' : '\u00d7'}
+                {'×'}
               </button>
-              {isConfirming && (
-                <div className="instance-tab-confirm">
-                  Stop Metro on :{inst.port}?
-                </div>
-              )}
             </div>
           );
         })}

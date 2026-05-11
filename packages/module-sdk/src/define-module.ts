@@ -2,9 +2,21 @@ import AjvDefault, {
   type ErrorObject,
   type ValidateFunction,
 } from "ajv/dist/2020.js";
+import semver from "semver";
 import schema from "../manifest.schema.json" with { type: "json" };
 import { ModuleError, ModuleErrorCode } from "./errors.js";
 import type { ModuleManifest } from "./types.js";
+
+/**
+ * Host minor version that introduced hook fields. Manifests declaring
+ * `provides.hooks` or `consumes.hooks` MUST require at least this minor
+ * via their `hostRange`, or older daemons would silently ignore the
+ * declarations and produce confusing runtime behavior.
+ *
+ * Bump in lockstep with daemon major/minor releases that add or change
+ * hook semantics.
+ */
+export const HOOK_FIELDS_HOST_MINIMUM = "0.1.0";
 
 export interface ManifestError {
   /** JSON Pointer into the candidate (e.g. `/contributes/mcp/tools/0/name`). */
@@ -33,13 +45,24 @@ const validator: ValidateFunction<ModuleManifest> =
   ajv.compile<ModuleManifest>(schema);
 
 export function validateManifest(candidate: unknown): ValidationResult {
-  if (validator(candidate)) {
+  const schemaOk = validator(candidate);
+  const schemaErrors: ManifestError[] = schemaOk
+    ? []
+    : (validator.errors ?? []).map(formatError);
+
+  // Post-schema cross-field checks. We run these whenever the candidate
+  // is shape-plausible enough to read the relevant fields, even if the
+  // schema rejected something else — that surfaces all problems at once
+  // rather than forcing the author through a fix-rerun-fix loop.
+  const hostRangeErrors =
+    typeof candidate === "object" && candidate !== null
+      ? checkHookHostRange(candidate as Partial<ModuleManifest>)
+      : [];
+
+  if (schemaOk && hostRangeErrors.length === 0) {
     return { valid: true, manifest: candidate as ModuleManifest };
   }
-  return {
-    valid: false,
-    errors: (validator.errors ?? []).map(formatError),
-  };
+  return { valid: false, errors: [...schemaErrors, ...hostRangeErrors] };
 }
 
 /**
@@ -101,4 +124,43 @@ function formatErrorSummary(errors: ManifestError[]): string {
     (e) => `  ${e.path}: ${e.message} (${e.keyword})`,
   );
   return `Invalid rn-dev module manifest:\n${lines.join("\n")}`;
+}
+
+function checkHookHostRange(
+  manifest: Partial<ModuleManifest>,
+): ManifestError[] {
+  const provides = manifest.provides;
+  const consumes = manifest.consumes;
+  const declaresHooks =
+    (provides !== undefined && provides.hooks !== undefined) ||
+    (consumes !== undefined && consumes.hooks !== undefined);
+  if (!declaresHooks) return [];
+
+  const hostRange = manifest.hostRange;
+  if (typeof hostRange !== "string" || hostRange.length === 0) {
+    // No hostRange present — schema validation will already flag it; nothing
+    // useful to add here.
+    return [];
+  }
+
+  const minVer = semver.minVersion(hostRange);
+  if (minVer === null) {
+    return [
+      {
+        path: "/hostRange",
+        message: `Manifest declares hook fields but hostRange "${hostRange}" is not a parseable semver range.`,
+        keyword: "E_HOST_RANGE_REQUIRED",
+      },
+    ];
+  }
+  if (semver.lt(minVer, HOOK_FIELDS_HOST_MINIMUM)) {
+    return [
+      {
+        path: "/hostRange",
+        message: `Manifest declares hook fields but hostRange "${hostRange}" allows daemon versions older than ${HOOK_FIELDS_HOST_MINIMUM}, which would silently drop the hook declarations.`,
+        keyword: "E_HOST_RANGE_REQUIRED",
+      },
+    ];
+  }
+  return [];
 }

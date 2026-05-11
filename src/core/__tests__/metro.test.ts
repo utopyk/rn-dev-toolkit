@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ArtifactStore } from "../artifact.js";
-import { MetroManager } from "../metro.js";
+import { MetroManager, METRO_STARTUP_BANNERS, isMetroStartupBanner } from "../metro.js";
 import type { MetroInstance } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -68,6 +68,33 @@ vi.mock("net", () => {
 // ---------------------------------------------------------------------------
 // MetroManager
 // ---------------------------------------------------------------------------
+
+describe("isMetroStartupBanner — Metro 0.83 quick-mode regression", () => {
+  it("recognises the RN 0.83 banner ('Starting dev server on …')", () => {
+    expect(isMetroStartupBanner("  Starting dev server on http://localhost:8099")).toBe(true);
+  });
+
+  it("recognises every legacy RN banner", () => {
+    for (const m of [
+      "Metro waiting on tcp://localhost:8081",
+      "Metro is running",
+      "Welcome to Metro",
+      "Dev server ready",
+    ]) {
+      expect(isMetroStartupBanner(m)).toBe(true);
+    }
+  });
+
+  it("rejects unrelated stdout lines", () => {
+    expect(isMetroStartupBanner("BUNDLE  ./index.js")).toBe(false);
+    expect(isMetroStartupBanner("info Welcome to React Native v0.83")).toBe(false);
+    expect(isMetroStartupBanner("")).toBe(false);
+  });
+
+  it("STARTUP_BANNERS includes the RN 0.83 marker so future regressions surface", () => {
+    expect([...METRO_STARTUP_BANNERS]).toContain("Starting dev server on");
+  });
+});
 
 describe("MetroManager", () => {
   let tmpDir: string;

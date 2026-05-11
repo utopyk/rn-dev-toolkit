@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   makeTestWorktree,
   spawnTestDaemon,
@@ -285,6 +287,71 @@ describe("daemon client RPCs (integration)", () => {
     }
   }, 10_000);
 
+  it("builder/build accepts optional scheme + configuration; rejects empty strings", async () => {
+    // The user-reported bug: acme has both `Acme` and `Acme-beta`
+    // schemes. Without an explicit scheme, RN CLI's default heuristic
+    // picks the workspace name (Acme) — works for acme today, but
+    // breaks for any project where the workspace name doesn't match
+    // the right scheme. Profile.scheme + Profile.configuration close
+    // that gap and round-trip through the daemon's builder/build RPC.
+    const { daemon, subClose, worktree } = await bootRunningSession();
+    try {
+      // Happy path: scheme + configuration accepted.
+      const okResp = await daemon.client.send({
+        type: "command",
+        action: "builder/build",
+        id: "build-scheme-ok",
+        payload: {
+          projectRoot: worktree,
+          platform: "ios",
+          port: 8081,
+          variant: "debug",
+          scheme: "Acme",
+          configuration: "Debug",
+        },
+      });
+      expect((okResp.payload as { ok: boolean }).ok).toBe(true);
+
+      // Empty scheme rejected — silent fall-through to RN CLI's
+      // default-scheme heuristic is exactly the ambiguity we're
+      // closing.
+      const emptyScheme = await daemon.client.send({
+        type: "command",
+        action: "builder/build",
+        id: "build-scheme-empty",
+        payload: {
+          projectRoot: worktree,
+          platform: "ios",
+          port: 8081,
+          variant: "debug",
+          scheme: "",
+        },
+      });
+      expect((emptyScheme.payload as { code?: string }).code).toBe(
+        "E_RPC_INVALID_PAYLOAD",
+      );
+
+      // Empty configuration rejected for the same reason.
+      const emptyConfig = await daemon.client.send({
+        type: "command",
+        action: "builder/build",
+        id: "build-config-empty",
+        payload: {
+          projectRoot: worktree,
+          platform: "ios",
+          port: 8081,
+          variant: "debug",
+          configuration: "",
+        },
+      });
+      expect((emptyConfig.payload as { code?: string }).code).toBe(
+        "E_RPC_INVALID_PAYLOAD",
+      );
+    } finally {
+      subClose();
+    }
+  }, 10_000);
+
   it("watcher/* RPCs report E_NO_WATCHER_CONFIGURED when profile.onSave is empty", async () => {
     const { daemon, subClose } = await bootRunningSession();
     try {
@@ -310,6 +377,97 @@ describe("daemon client RPCs (integration)", () => {
         id: "w-running",
       });
       expect((running.payload as { running: boolean }).running).toBe(false);
+    } finally {
+      subClose();
+    }
+  }, 10_000);
+
+  it("session/profile-update validates, persists to disk, and returns ok", async () => {
+    const { daemon, subClose, worktree } = await bootRunningSession();
+    try {
+      const updated = {
+        name: "test",
+        isDefault: true,
+        worktree: null,
+        branch: "main",
+        platform: "ios",
+        mode: "quick",
+        metroPort: 8082,
+        devices: {},
+        buildVariant: "debug",
+        preflight: { checks: [], frequency: "once" },
+        onSave: [],
+        env: { CUSTOM_VAR: "1" },
+        projectRoot: worktree,
+      };
+      const resp = await daemon.client.send({
+        type: "command",
+        action: "session/profile-update",
+        id: "pu-1",
+        payload: { profile: updated },
+      });
+      expect((resp.payload as { ok: boolean }).ok).toBe(true);
+
+      const profilePath = join(worktree, ".rn-dev", "profiles", "test.json");
+      expect(existsSync(profilePath)).toBe(true);
+      const written = JSON.parse(readFileSync(profilePath, "utf-8")) as {
+        metroPort: number;
+        env: Record<string, string>;
+      };
+      expect(written.metroPort).toBe(8082);
+      expect(written.env.CUSTOM_VAR).toBe("1");
+    } finally {
+      subClose();
+    }
+  }, 10_000);
+
+  it("session/profile-update rejects a missing profile field", async () => {
+    const { daemon, subClose } = await bootRunningSession();
+    try {
+      const resp = await daemon.client.send({
+        type: "command",
+        action: "session/profile-update",
+        id: "pu-2",
+        payload: {},
+      });
+      const p = resp.payload as { ok: boolean; code?: string };
+      expect(p.ok).toBe(false);
+      expect(p.code).toBe("E_RPC_INVALID_PAYLOAD");
+    } finally {
+      subClose();
+    }
+  }, 10_000);
+
+  it("session/profile-update rejects a denylisted env key", async () => {
+    const { daemon, subClose, worktree } = await bootRunningSession();
+    try {
+      const tainted = {
+        name: "test",
+        isDefault: true,
+        worktree: null,
+        branch: "main",
+        platform: "ios",
+        mode: "quick",
+        metroPort: 8081,
+        devices: {},
+        buildVariant: "debug",
+        preflight: { checks: [], frequency: "once" },
+        onSave: [],
+        env: { LD_PRELOAD: "/tmp/evil.so" },
+        projectRoot: worktree,
+      };
+      const resp = await daemon.client.send({
+        type: "command",
+        action: "session/profile-update",
+        id: "pu-3",
+        payload: { profile: tainted },
+      });
+      const p = resp.payload as { ok: boolean; code?: string };
+      expect(p.ok).toBe(false);
+      // validateProfile surfaces a denylist code from checkEnv; the
+      // exact code is policy on profile-guard, but it MUST start with
+      // E_PROFILE_ENV (not a generic catch-all) so callers can branch.
+      expect(p.code).toMatch(/^E_PROFILE_ENV/);
     } finally {
       subClose();
     }

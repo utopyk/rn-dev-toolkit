@@ -89,7 +89,7 @@ async function createWindow() {
   console.log(`[electron] CWD: ${cwd}`);
   const projectRoot = process.env.RN_DEV_PROJECT_ROOT
     ?? await detectProjectRoot(cwd)
-    ?? await detectProjectRoot('/Users/martincouso/Documents/Projects/movie-nights-club')
+    ?? await detectProjectRoot('/Users/martincouso/Documents/GitHub/acme-mobile-app')
     ?? cwd;
   console.log(`[electron] Project root: ${projectRoot}`);
 

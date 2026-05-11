@@ -6,6 +6,7 @@ import { createDefaultPreflightEngine } from "../core/preflight.js";
 import { listDevices } from "../core/device.js";
 import { IpcClient } from "../core/ipc.js";
 import { registerModuleCommands } from "./module-commands.js";
+import { registerConfigCommands } from "./config-commands.js";
 import path from "path";
 import gradientString from "gradient-string";
 import type { Platform, RunMode } from "../core/types.js";
@@ -107,7 +108,7 @@ export function createProgram(): Command {
       const store = new ProfileStore(
         path.join(projectRoot, ".rn-dev", "profiles")
       );
-      const branch = getCurrentBranch(projectRoot) ?? "main";
+      const branch = (await getCurrentBranch(projectRoot)) ?? "main";
       store.setDefault(name, null, branch);
       console.log(`Profile "${name}" set as default for branch "${branch}"`);
     });
@@ -119,7 +120,7 @@ export function createProgram(): Command {
     .option("--platform <platform>", "ios, android, or both", "both")
     .action(async (options) => {
       const platform = (options.platform ?? "both") as Platform;
-      const devices = listDevices(platform);
+      const devices = await listDevices(platform);
 
       if (devices.length === 0) {
         console.log("No devices found.");
@@ -142,7 +143,7 @@ export function createProgram(): Command {
     .description("List git worktrees and their session status")
     .action(async () => {
       const projectRoot = requireProjectRoot();
-      const worktrees = getWorktrees(projectRoot);
+      const worktrees = await getWorktrees(projectRoot);
 
       if (worktrees.length === 0) {
         console.log("No worktrees found (or not a git repository).");
@@ -303,10 +304,28 @@ export function createProgram(): Command {
   // Module system (install / uninstall / list / enable / disable / restart)
   registerModuleCommands(program);
 
+  // Project config (init / validate) — Phase H0
+  registerConfigCommands(program);
+
   // MCP server
+  //
+  // `--allow-destructive-tools` is declared so commander accepts it
+  // instead of erroring "too many arguments for mcp" and exiting
+  // before stdio is wired up — that exit was masking a real bug (any
+  // spawn with the flag would die with "Connection closed" before
+  // handling a single MCP call). The actual flag value is re-read by
+  // startMcpServer via parseFlags(process.argv) — commander's parse
+  // result is ignored.
+  //
+  // `--enable-module:<id>` and `--disable-module:<id>` use a
+  // colon-separator form that commander can't model as a normal
+  // option, so we set `allowUnknownOption()` to let them pass
+  // through to parseFlags untouched.
   program
     .command("mcp")
     .description("Start MCP server (stdio transport)")
+    .option("--allow-destructive-tools", "Bypass per-call consent for tools marked destructiveHint:true.")
+    .allowUnknownOption()
     .action(async () => {
       const { startMcpServer } = await import("../mcp/index.js");
       await startMcpServer();

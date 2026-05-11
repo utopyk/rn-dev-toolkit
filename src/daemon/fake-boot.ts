@@ -24,8 +24,10 @@ import { CapabilityRegistry } from "../core/module-host/capabilities.js";
 import { registerModulesIpc } from "../app/modules-ipc.js";
 import { ModuleConfigStore } from "../modules/config-store.js";
 import {
+  buildManifest,
   devSpaceManifest,
   lintTestManifest,
+  sessionManifest,
   settingsManifest,
 } from "../modules/built-in/manifests.js";
 import { registerMarketplaceBuiltIn } from "../modules/built-in/marketplace.js";
@@ -33,6 +35,10 @@ import type {
   BootSessionServicesOptions,
   SessionServices,
 } from "../core/session/boot.js";
+import { HookManager } from "../core/hooks/manager.js";
+import { loadProjectHooks } from "../core/hooks/load-project-hooks.js";
+import { getDefaultAuditLog } from "../core/audit-log.js";
+import { validateProfile, type ValidatedProfile } from "./profile-guard.js";
 import type { MetroManager } from "../core/metro.js";
 import type { DevToolsManager } from "../core/devtools.js";
 import type { Builder, BuildOptions } from "../core/builder.js";
@@ -120,7 +126,38 @@ export async function fakeBootSessionServices(
   moduleRegistry.registerBuiltIn(devSpaceManifest);
   moduleRegistry.registerBuiltIn(lintTestManifest);
   moduleRegistry.registerBuiltIn(settingsManifest);
+  moduleRegistry.registerBuiltIn(sessionManifest);
+  // Phase H2f — register `build` with the FakeBuilderSurface as the
+  // in-process instance so SessionServices.builder's lazy getter
+  // (production: ModuleRegistry.getBuiltIn<Builder>('build')) resolves
+  // to the same fake under fake-boot. Production bootSessionServices
+  // does the equivalent registration with the real Builder.
+  moduleRegistry.registerBuiltIn(buildManifest, {
+    instance: builder as FakeBuilderSurface as unknown as Builder,
+  });
   registerMarketplaceBuiltIn({ moduleRegistry, capabilities });
+
+  // M2b — test-only hook: a fake-boot daemon spawned with
+  // `RN_DEV_DAEMON_TEST_EXTRA_MANIFEST` parses the env var as JSON and
+  // registers it as an additional built-in. Used by MCP module-proxy
+  // e2e tests to inject a manifest that contributes
+  // `contributes.mcp.tools` (none of the production built-ins do) so
+  // the MCP→daemon→module-proxy round-trip can be exercised without
+  // setting up a real 3p module. Production never reads this env var.
+  const extraManifestJson = process.env.RN_DEV_DAEMON_TEST_EXTRA_MANIFEST;
+  if (extraManifestJson) {
+    try {
+      const manifest = JSON.parse(extraManifestJson) as Parameters<
+        typeof moduleRegistry.registerBuiltIn
+      >[0];
+      moduleRegistry.registerBuiltIn(manifest);
+    } catch (err) {
+      opts.emit(
+        `[fake-boot] failed to register test manifest from ` +
+          `RN_DEV_DAEMON_TEST_EXTRA_MANIFEST: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   // Phase 13.4.1 — register the modules IPC dispatcher on the daemon's
   // shared socket so integration tests that exercise `modules/*` RPCs
@@ -159,6 +196,59 @@ export async function fakeBootSessionServices(
     metro.emit("status", { worktreeKey, status: "running" });
   }, 25);
 
+  // Hook system parity with production three-phase boot. Build the
+  // manager, declare every registered built-in's `provides.hooks`,
+  // skip the project-config walk (fake boots don't load
+  // rn-dev.config.*), then fire `session/init`. Phase markers emitted
+  // on the manager match the production `bootSessionServices` path.
+  const hookManager = new HookManager({
+    auditLog: getDefaultAuditLog(),
+    daemonPid: process.pid,
+  });
+  const bootTrace: Array<{ phase: 1 | 2 | 3; ts: number }> = [];
+  hookManager.on("boot/phase", (m: { phase: 1 | 2 | 3; ts: number }) => {
+    bootTrace.push(m);
+  });
+  hookManager.emit("boot/phase", { phase: 1, ts: Date.now() });
+  for (const m of moduleRegistry.getAllManifests()) {
+    const provides = m.manifest.provides?.hooks;
+    if (provides && provides.length > 0) {
+      hookManager.declareProvider(m.manifest.id, provides);
+    }
+  }
+  // Phase H2h — load project hooks under fake-boot too. Pre-H2 the fake
+  // path skipped this on purpose ("fake boots don't run real services
+  // anyway"), but H2 makes builder/build fire real hook subprocesses
+  // through the HookManager even when the fake Builder doesn't actually
+  // spawn xcodebuild — the smoke-rn-with-hooks fixture's build/pre +
+  // build/post need the project config walked here for the integration
+  // test to be meaningful. loadProjectHooks gracefully no-ops when no
+  // rn-dev.config.* exists, so existing fake-boot tests aren't affected.
+  await loadProjectHooks({
+    hookManager,
+    projectRoot: opts.projectRoot,
+    emit: opts.emit,
+  });
+  hookManager.emit("boot/phase", { phase: 2, ts: Date.now() });
+
+  // Re-validate so the session/init fire receives a ValidatedProfile.
+  // Fake-boot's profile already came through the same daemon-boundary
+  // validateProfile as production, but the brand isn't transferable
+  // through the plain `Profile` shape.
+  const fakeValidated = validateProfile(opts.profile);
+  if (fakeValidated.ok) {
+    await hookManager.fire(
+      "session/init",
+      {
+        profile: fakeValidated.profile,
+        worktreeKey,
+        projectRoot: opts.projectRoot,
+      },
+      fakeValidated.profile,
+    );
+  }
+  hookManager.emit("boot/phase", { phase: 3, ts: Date.now() });
+
   const dispose = async (): Promise<void> => {
     modulesIpc.unregister();
     metro.emit("status", { worktreeKey, status: "stopped" });
@@ -168,13 +258,27 @@ export async function fakeBootSessionServices(
     metro: metro as FakeMetroSurface as unknown as MetroManager,
     devtools: devtools as FakeDevtoolsSurface as unknown as DevToolsManager,
     watcher: null as FileWatcher | null,
-    builder: builder as FakeBuilderSurface as unknown as Builder,
+    // Phase H2f — same getter pattern as production bootSessionServices.
+    // Resolves through ModuleRegistry.getBuiltIn so the build built-in
+    // module is the single source of truth even under fake boot.
+    get builder(): Builder {
+      return moduleRegistry.getBuiltIn<Builder>("build");
+    },
     moduleHost: moduleHost as FakeModuleHostSurface as unknown as ModuleHostManager,
     moduleRegistry,
     worktreeKey,
     metroLogsStore,
     capabilities,
     moduleEvents,
+    hookManager,
+    // Phase H2g — fakeBoot's re-validated profile. Falls back to a
+    // re-cast of the input profile if validateProfile rejected (the
+    // session/init fire above is similarly conditional). Producing the
+    // brand here keeps fake builder/build hook firings type-correct.
+    validatedProfile: fakeValidated.ok
+      ? fakeValidated.profile
+      : (opts.profile as unknown as ValidatedProfile),
+    bootTrace,
     dispose,
   };
 }

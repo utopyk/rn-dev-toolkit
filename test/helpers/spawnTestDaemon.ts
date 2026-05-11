@@ -4,6 +4,9 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { IpcClient } from "../../src/core/ipc.js";
+import { resolveBunBinary } from "./bun-binary.js";
+
+const BUN_BINARY = resolveBunBinary();
 
 // ---------------------------------------------------------------------------
 // Shared across all Phase 13 integration tests. The helper owns:
@@ -45,7 +48,7 @@ export async function spawnTestDaemon(
   const { readyTimeoutMs = 5_000, waitForReady = true, extraArgs = [], env } = opts;
 
   const proc = spawn(
-    "bun",
+    BUN_BINARY,
     ["run", CLI_ENTRY, "daemon", worktree, "--foreground", ...extraArgs],
     {
       stdio: ["ignore", "pipe", "pipe"],

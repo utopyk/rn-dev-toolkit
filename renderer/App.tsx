@@ -31,6 +31,11 @@ interface ModulePanelListEntry {
   icon?: string;
 }
 
+// Cap on every in-memory log buffer the renderer keeps. The CSS layout
+// fix (eaa3fc6) bounds the visual height; this bound stops the underlying
+// arrays + DOM from growing without limit during long sessions.
+const MAX_LOG_LINES = 1000;
+
 function makeEmptyLogs(): InstanceLogs {
   return { serviceLines: [], metroLines: [], sections: [] };
 }
@@ -172,13 +177,18 @@ export function App() {
     const logs = instanceLogsRef.current.get(instanceId) ?? makeEmptyLogs();
     const arr = type === 'service' ? logs.serviceLines : logs.metroLines;
     arr.push(text);
-    if (arr.length > 1000) arr.splice(0, arr.length - 1000);
+    if (arr.length > MAX_LOG_LINES) arr.splice(0, arr.length - MAX_LOG_LINES);
 
-    // Also route service lines into the currently-running section
+    // Also route service lines into the currently-running section.
+    // Section buffers need the same cap; long Gradle/Metro/Watchman runs can
+    // emit tens of thousands of lines and CollapsibleLog renders all of them.
     if (type === 'service' && logs.sections.length > 0) {
       const activeSection = logs.sections.find(s => s.status === 'running');
       if (activeSection) {
         activeSection.lines.push(text);
+        if (activeSection.lines.length > MAX_LOG_LINES) {
+          activeSection.lines.splice(0, activeSection.lines.length - MAX_LOG_LINES);
+        }
       }
     }
 
@@ -461,18 +471,68 @@ export function App() {
     invoke('instances:setActive', id);
   }, [invoke]);
 
+  // Confirmation state for the close-tab modal. Replaces the inline
+  // two-click confirm in InstanceTabs (2026-05-07 user UX feedback:
+  // "if we want to make sure the user wants to kill the tab, we
+  // should pop up a modal not a second click"). Null = no modal open.
+  const [closeConfirm, setCloseConfirm] = useState<{
+    instanceId: string;
+    label: string;
+  } | null>(null);
+
   const handleCloseInstance = useCallback((id: string) => {
-    invoke('instances:remove', id);
-  }, [invoke]);
+    const inst = instances.find((i) => i.id === id);
+    const label = inst ? `${inst.worktreeName}:${inst.port}` : id;
+    setCloseConfirm({ instanceId: id, label });
+  }, [instances]);
+
+  const confirmCloseInstance = useCallback(() => {
+    if (!closeConfirm) return;
+    invoke('instances:remove', closeConfirm.instanceId);
+    setCloseConfirm(null);
+  }, [invoke, closeConfirm]);
+
+  const cancelCloseInstance = useCallback(() => {
+    setCloseConfirm(null);
+  }, []);
+
+  // Keyboard shortcuts on the close-confirm modal: Esc cancels,
+  // Enter confirms. Standard "are you sure" affordance.
+  useEffect(() => {
+    if (!closeConfirm) return;
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'Escape') {
+        cancelCloseInstance();
+      } else if (ev.key === 'Enter') {
+        confirmCloseInstance();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [closeConfirm, cancelCloseInstance, confirmCloseInstance]);
 
   const handleAddInstance = useCallback(() => {
     setShowNewInstanceDialog(true);
   }, []);
 
-  const handleDialogSelectProfile = useCallback((profileName: string) => {
+  const handleDialogSelectProfile = useCallback(async (profileName: string) => {
     setShowNewInstanceDialog(false);
-    invoke('instances:create', profileName);
-    // instance:created event will add the new tab
+    const result = await invoke<{ ok: boolean; code?: string; error?: string }>(
+      'instances:create',
+      profileName,
+    );
+    // The handler returns { ok: false, code: 'PROFILE_MISMATCH', ... } when
+    // the daemon already has a session for a different profile and the
+    // single-Electron-process multi-profile story isn't wired (Phase 13.6+).
+    // Pre-fix this surfaced only as a buried line in the service log;
+    // surface it as a visible alert so the user knows why the new tab
+    // didn't bring up its session.
+    if (!result?.ok && result?.code === 'PROFILE_MISMATCH') {
+      window.alert(
+        result.error ??
+          'Cross-profile multi-attach in one Electron app is not yet supported. Restart the app to switch profiles.',
+      );
+    }
   }, [invoke]);
 
   const handleDialogCreateNew = useCallback(() => {
@@ -484,10 +544,20 @@ export function App() {
     setShowNewInstanceDialog(false);
   }, []);
 
-  const handleWizardComplete = useCallback((profileName: string) => {
+  const handleWizardComplete = useCallback(async (profileName: string) => {
     setShowWizard(false);
-    // Create an instance from the newly saved profile
-    invoke('instances:create', profileName);
+    // Same handling as handleDialogSelectProfile — surface
+    // PROFILE_MISMATCH as a visible alert.
+    const result = await invoke<{ ok: boolean; code?: string; error?: string }>(
+      'instances:create',
+      profileName,
+    );
+    if (!result?.ok && result?.code === 'PROFILE_MISMATCH') {
+      window.alert(
+        result.error ??
+          'Cross-profile multi-attach in one Electron app is not yet supported. Restart the app to switch profiles.',
+      );
+    }
   }, [invoke]);
 
   const handleWizardCancel = useCallback(() => {
@@ -615,7 +685,37 @@ export function App() {
         />
         <ProfileBanner profile={activeProfile} />
         <div className="app-content">
-          {promptModal ? (
+          {closeConfirm ? (
+            <div
+              className="prompt-overlay"
+              onClick={(e) => {
+                // Click on the backdrop (not the modal itself) cancels.
+                if (e.target === e.currentTarget) cancelCloseInstance();
+              }}
+            >
+              <div className="prompt-modal" role="dialog" aria-modal="true" aria-label="Close instance confirmation">
+                <h3 className="prompt-title">Close {closeConfirm.label}?</h3>
+                <p className="prompt-message">
+                  This stops Metro and the daemon&rsquo;s session services for this tab.
+                </p>
+                <div className="prompt-options">
+                  <button
+                    className="prompt-option"
+                    onClick={cancelCloseInstance}
+                    autoFocus
+                  >
+                    <span className="prompt-option-label">Cancel</span>
+                  </button>
+                  <button
+                    className="prompt-option"
+                    onClick={confirmCloseInstance}
+                  >
+                    <span className="prompt-option-label">Close tab</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : promptModal ? (
             <div className="prompt-overlay">
               <div className="prompt-modal">
                 <h3 className="prompt-title">{promptModal.title}</h3>

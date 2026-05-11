@@ -1,5 +1,10 @@
 .app-root {
-  min-height: 100vh;
+  /* `height` (not `min-height`) so the grid is bounded to the viewport.
+   * With `min-height`, the root grew with content; the inner flex columns
+   * (`.app-main` → `.app-content` → `.dev-space`) couldn't honour their
+   * `min-height: 0` constraint and the LogPanel would expand forever,
+   * pushing other panels off-screen. */
+  height: 100vh;
   display: grid;
   grid-template-columns: var(--sidebar-w, 260px) 1fr var(--notif-w, 72px);
   gap: 28px;
@@ -14,7 +19,13 @@
 .app-main {
   display: flex;
   flex-direction: column;
+  /* `min-height: 0` is required for the inner `.app-content` / `.dev-space`
+   * flex chain to bound itself to the viewport. Without it, grid items
+   * default to `min-height: auto` (= shrink-floor at content size), which
+   * cancels every `min-height: 0` further down the tree and lets the log
+   * panel grow without limit. */
   min-width: 0;
+  min-height: 0;
   gap: 20px;
   padding: 0;       /* was padding-top: 8px — the grid gap handles spacing */
 }

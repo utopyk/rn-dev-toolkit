@@ -318,3 +318,173 @@ describe("enforceToolPrefix", () => {
     ).toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Hook contribution points (Phase H0)
+// ---------------------------------------------------------------------------
+
+describe("manifest hook fields", () => {
+  it("accepts a manifest declaring provides.hooks with valid kebab-case names", () => {
+    const manifest = minimalManifest({
+      provides: { hooks: ["pre", "post", "custom"] },
+    });
+    const result = validateManifest(manifest);
+    expect(result.valid).toBe(true);
+  });
+
+  it("accepts an empty provides.hooks array (declares zero contribution points)", () => {
+    const manifest = minimalManifest({
+      provides: { hooks: [] },
+    });
+    const result = validateManifest(manifest);
+    expect(result.valid).toBe(true);
+  });
+
+  it("accepts consumes.hooks with shorthand string sugar entries", () => {
+    const manifest = minimalManifest({
+      consumes: {
+        hooks: {
+          "build/pre": "./bin/swap-firebase.sh",
+        },
+      },
+    });
+    const result = validateManifest(manifest);
+    expect(result.valid).toBe(true);
+  });
+
+  it("accepts consumes.hooks with object-form script entries", () => {
+    const manifest = minimalManifest({
+      consumes: {
+        hooks: {
+          "clean/post": {
+            script: "./bin/wipe.sh",
+            onFail: "warn",
+            timeoutMs: 60_000,
+            priority: 5,
+          },
+        },
+      },
+    });
+    const result = validateManifest(manifest);
+    expect(result.valid).toBe(true);
+  });
+
+  it("rejects provides.hooks names with uppercase", () => {
+    const result = validateManifest(
+      minimalManifest({
+        provides: { hooks: ["Pre"] },
+      }),
+    );
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(
+        result.errors.some((e) => e.path.startsWith("/provides/hooks")),
+      ).toBe(true);
+    }
+  });
+
+  it("rejects provides.hooks names with leading dash", () => {
+    const result = validateManifest(
+      minimalManifest({
+        provides: { hooks: ["-pre"] },
+      }),
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects provides.hooks names with trailing dash", () => {
+    const result = validateManifest(
+      minimalManifest({
+        provides: { hooks: ["pre-"] },
+      }),
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects provides.hooks names exceeding 64 characters", () => {
+    const longName = "a".repeat(65);
+    const result = validateManifest(
+      minimalManifest({
+        provides: { hooks: [longName] },
+      }),
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects duplicate provides.hooks names (uniqueItems)", () => {
+    const result = validateManifest(
+      minimalManifest({
+        provides: { hooks: ["pre", "pre"] },
+      }),
+    );
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects consumes.hooks keys not matching '<id>/<name>' shape", () => {
+    const result = validateManifest({
+      ...minimalManifest(),
+      consumes: {
+        hooks: {
+          "no-slash-here": "./script.sh",
+        },
+      },
+    });
+    expect(result.valid).toBe(false);
+  });
+
+  it("rejects unknown nested keys under provides (additionalProperties: false preserved)", () => {
+    const result = validateManifest({
+      ...minimalManifest(),
+      provides: {
+        hooks: ["pre"],
+        rogueField: "nope",
+      },
+    });
+    expect(result.valid).toBe(false);
+  });
+
+  it("emits E_HOST_RANGE_REQUIRED when provides.hooks is set with hostRange older than the hook host minimum", () => {
+    const result = validateManifest({
+      ...minimalManifest(),
+      hostRange: ">=0.0.5",
+      provides: { hooks: ["pre"] },
+    });
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(
+        result.errors.some((e) => e.keyword === "E_HOST_RANGE_REQUIRED"),
+      ).toBe(true);
+    }
+  });
+
+  it("emits E_HOST_RANGE_REQUIRED when consumes.hooks is set with hostRange older than the hook host minimum", () => {
+    const result = validateManifest({
+      ...minimalManifest(),
+      hostRange: "<0.1.0",
+      consumes: { hooks: { "build/pre": "./x.sh" } },
+    });
+    expect(result.valid).toBe(false);
+    if (!result.valid) {
+      expect(
+        result.errors.some((e) => e.keyword === "E_HOST_RANGE_REQUIRED"),
+      ).toBe(true);
+    }
+  });
+
+  it("does NOT emit E_HOST_RANGE_REQUIRED when no hook fields are declared", () => {
+    const result = validateManifest({
+      ...minimalManifest(),
+      hostRange: ">=0.0.5",
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it("accepts hook fields when hostRange's minimum meets the hook host minimum", () => {
+    const result = validateManifest({
+      ...minimalManifest(),
+      hostRange: "^0.1.0",
+      provides: { hooks: ["pre"] },
+    });
+    expect(result.valid).toBe(true);
+  });
+});

@@ -7,10 +7,11 @@ import type { MetroManager } from "../core/metro.js";
 import type { PreflightEngine } from "../core/preflight.js";
 import type { IpcMessage } from "../core/ipc.js";
 import type { DaemonSession } from "../app/client/session.js";
-import type { Platform } from "../core/types.js";
+import type { Platform, Profile } from "../core/types.js";
 import { listDevices, bootDevice } from "../core/device.js";
 import { getWorktrees } from "../core/project.js";
 import { CleanManager } from "../core/clean.js";
+import { buildHooksTools } from "./tools-hooks.js";
 
 // ---------------------------------------------------------------------------
 // McpContext
@@ -65,6 +66,13 @@ export interface McpContext {
   session: DaemonSession | null;
   /** Optional — older call sites pre-date the flag system; default OFF. */
   flags?: McpFlags;
+  /**
+   * Profile MCP booted the session with — surfaced to lifecycle tools
+   * (rn-dev/start-session) so they can re-issue session/start with the
+   * same profile rather than re-reading it from disk on every call.
+   * Null when MCP started without a profile (no session running).
+   */
+  profile?: Profile | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -185,106 +193,85 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
 
   return [
     ...buildModulesLifecycleTools(ctx),
+    ...buildHooksTools(),
     // Session management
+    //
+    // Wire contract note: the daemon-side handlers use slash-cased
+    // action names (`session/start`, `session/stop`, `session/status`).
+    // These tools used to send hyphen-cased names (`start-session` etc.)
+    // which the daemon never registered, so every call fell through to
+    // the now-deleted `ctx.metro` branch — which in MCP is always null
+    // (server.ts) — and returned `{ error: "No running session" }`
+    // regardless of actual state. Agents could not start, stop, or
+    // observe a session through MCP.
+    //
+    // The session is auto-started by `connectToDaemonSession` at MCP
+    // boot, so `start-session` is normally idempotent: it returns the
+    // current session/status, or boots if the session is stopped (e.g.
+    // after a previous `stop-session`).
     {
       name: "rn-dev/start-session",
-      description: "Start a development session with optional profile",
+      description:
+        "Ensure a development session is running. The session is automatically started when MCP boots; this tool is idempotent — it returns the current session/status when running, or re-issues session/start with MCP's loaded profile when stopped (e.g. after a prior stop-session).",
       inputSchema: {
         type: "object",
-        properties: {
-          profile: { type: "string", description: "Profile name to load" },
-          worktree: { type: "string", description: "Worktree path" },
-          platform: { type: "string", enum: ["ios", "android", "both"] },
-          mode: { type: "string", enum: ["dirty", "clean", "ultra-clean"] },
-        },
+        properties: {},
       },
-      handler: async (args) => {
-        if (ctx.session) {
-          try {
-            const resp = await ctx.session.client.send(
-              makeIpcMessage("start-session", args)
-            );
-            return resp.payload ?? { status: "started" };
-          } catch {
-            // fall through
-          }
+      handler: async () => {
+        if (!ctx.session) return { error: "No daemon connection. MCP must be started inside a project with a default profile." };
+
+        const statusResp = await ctx.session.client.send(
+          makeIpcMessage("session/status"),
+        );
+        const status = (statusResp.payload as { status?: string } | undefined)?.status;
+        if (status && status !== "stopped") {
+          return statusResp.payload ?? { status };
         }
-        if (ctx.metro) {
-          const worktreeKey =
-            (args.worktree as string) ?? ctx.artifactStore.worktreeHash(null);
-          const instance = ctx.metro.start({
-            worktreeKey,
-            projectRoot: ctx.projectRoot,
-            port: undefined,
-            resetCache: args.mode !== "dirty",
-            env: {},
-          });
+
+        // Stopped — try to boot via session/start with the profile MCP
+        // was launched with. If MCP has no profile we can't restart,
+        // so surface the actual cause rather than masking it.
+        if (!ctx.profile) {
           return {
-            status: "started",
-            port: instance.port,
-            pid: instance.pid,
+            error:
+              "Session is stopped and MCP has no profile to restart with. Recreate the MCP server inside a project that has a default profile.",
           };
         }
-        return { error: "No running session" };
+        const startResp = await ctx.session.client.send(
+          makeIpcMessage("session/start", { profile: ctx.profile }),
+        );
+        return startResp.payload ?? { status: "started" };
       },
     },
     {
       name: "rn-dev/stop-session",
-      description: "Stop a running development session",
-      inputSchema: {
-        type: "object",
-        properties: {
-          worktree: {
-            type: "string",
-            description: "Worktree to stop (default: current)",
-          },
-        },
-      },
-      handler: async (args) => {
-        if (ctx.session) {
-          try {
-            const resp = await ctx.session.client.send(
-              makeIpcMessage("stop-session", args)
-            );
-            return resp.payload ?? { status: "stopped" };
-          } catch {
-            // fall through
-          }
-        }
-        if (ctx.metro) {
-          const worktreeKey =
-            (args.worktree as string) ?? ctx.artifactStore.worktreeHash(null);
-          const stopped = ctx.metro.stop(worktreeKey);
-          return { status: stopped ? "stopped" : "not-found" };
-        }
-        return { error: "No running session" };
+      description: "Stop the running development session via session/stop. Tears down Metro, the module host, and any active services.",
+      inputSchema: { type: "object", properties: {} },
+      handler: async () => {
+        if (!ctx.session) return { error: "No daemon connection." };
+        const resp = await ctx.session.client.send(
+          makeIpcMessage("session/stop"),
+        );
+        return resp.payload ?? { status: "stopped" };
       },
     },
     {
       name: "rn-dev/list-sessions",
-      description: "List all active development sessions",
+      description:
+        "Return the active session as a single-element array, or an empty array if no session is running. Wraps session/status for parity with multi-session-aware clients.",
       inputSchema: { type: "object", properties: {} },
       handler: async () => {
-        if (ctx.session) {
-          try {
-            const resp = await ctx.session.client.send(
-              makeIpcMessage("list-sessions")
-            );
-            return resp.payload ?? [];
-          } catch {
-            // fall through
-          }
+        if (!ctx.session) return { sessions: [] };
+        const resp = await ctx.session.client.send(
+          makeIpcMessage("session/status"),
+        );
+        const payload = resp.payload as
+          | { status?: string }
+          | undefined;
+        if (!payload || payload.status === "stopped" || !payload.status) {
+          return { sessions: [] };
         }
-        if (ctx.metro) {
-          return ctx.metro.getAll().map((inst) => ({
-            worktree: inst.worktree,
-            port: inst.port,
-            pid: inst.pid,
-            status: inst.status,
-            startedAt: inst.startedAt.toISOString(),
-          }));
-        }
-        return { error: "No running session" };
+        return { sessions: [payload] };
       },
     },
     {
@@ -432,35 +419,79 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       },
     },
     {
+      name: "rn-dev/build-status",
+      description:
+        "Return recent builder events (line/progress/done) buffered since the daemon last booted. Pair with rn-dev/build to observe progress: kick off the build, then poll this tool every 1-2s and look for a `done` event whose `success` field tells you whether the build passed. Build progress also surfaces here as line events whose `stream` is 'stdout' (xcodebuild/gradle output) or 'stderr' (build warnings/errors).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "number",
+            description:
+              "Maximum number of most-recent events to return. Default: 100. Max: 500 (matches the BuilderClient ring size).",
+          },
+        },
+      },
+      handler: async (args) => {
+        const limit =
+          typeof args.limit === "number" && args.limit > 0
+            ? Math.min(args.limit, 500)
+            : 100;
+        const all = ctx.session?.builder.recentEvents() ?? [];
+        const events = all.slice(-limit);
+        return { structuredContent: { events } };
+      },
+    },
+    {
       name: "rn-dev/build",
-      description: "Build the app",
+      description:
+        "Trigger a build via the daemon's builder/build RPC. Returns immediately; observe progress + completion via rn-dev/session-logs (the daemon emits builder/line, builder/progress, and builder/done events as session/log lines). Defaults pull from MCP's loaded profile when `platform`, `variant`, etc. are omitted.",
       inputSchema: {
         type: "object",
         properties: {
           platform: { type: "string", enum: ["ios", "android"] },
           variant: { type: "string", enum: ["debug", "release"] },
+          deviceId: { type: "string", description: "iOS UDID or Android device id; defaults to the profile's selected device." },
+          scheme: { type: "string", description: "iOS scheme; falls back to the profile's value." },
+          configuration: { type: "string", description: "iOS configuration (e.g. Debug/Release); falls back to variant default." },
         },
-        required: ["platform"],
       },
       handler: async (args) => {
-        const platform = args.platform as string;
-        const variant = (args.variant as string) ?? "debug";
-        const cmd =
-          platform === "ios"
-            ? `npx react-native run-ios${variant === "release" ? " --configuration Release" : ""}`
-            : `npx react-native run-android${variant === "release" ? " --variant=release" : ""}`;
-        try {
-          const output = execSync(cmd, {
-            cwd: ctx.projectRoot,
-            encoding: "utf-8",
-            stdio: ["pipe", "pipe", "pipe"],
-            timeout: 600_000,
-          });
-          return { status: "success", output: output.slice(-2000) };
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          return { status: "failed", error: msg.slice(-2000) };
+        if (!ctx.session) {
+          return { error: "No daemon connection." };
         }
+        if (!ctx.profile) {
+          return {
+            error:
+              "No profile available — rn-dev/build needs a default profile in .rn-dev/profiles to fall back on for projectRoot, port, etc.",
+          };
+        }
+        // Platform fallback: caller args win; otherwise pick from the
+        // profile (which can be "both" — default to ios since the
+        // daemon's builder/build only accepts ios|android, not both).
+        const platform: "ios" | "android" =
+          (args.platform as "ios" | "android" | undefined) ??
+          (ctx.profile.platform === "android" ? "android" : "ios");
+        const variant = (args.variant as "debug" | "release" | undefined) ?? ctx.profile.buildVariant ?? "debug";
+        const deviceId = (args.deviceId as string | undefined) ?? ctx.profile.devices?.[platform] ?? undefined;
+        const scheme = (args.scheme as string | undefined) ?? ctx.profile.scheme ?? undefined;
+        const configuration = (args.configuration as string | undefined) ?? ctx.profile.configuration ?? undefined;
+        const port = ctx.profile.metroPort;
+
+        const payload: Record<string, unknown> = {
+          projectRoot: ctx.projectRoot,
+          platform,
+          variant,
+          port,
+        };
+        if (deviceId) payload.deviceId = deviceId;
+        if (scheme) payload.scheme = scheme;
+        if (configuration) payload.configuration = configuration;
+
+        const resp = await ctx.session.client.send(
+          makeIpcMessage("builder/build", payload),
+        );
+        return resp.payload ?? { ok: true };
       },
     },
     {
@@ -520,7 +551,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       },
       handler: async (args) => {
         const platform = (args.platform as "ios" | "android" | "both") ?? "both";
-        const devices = listDevices(platform);
+        const devices = await listDevices(platform);
         return { devices };
       },
     },
@@ -537,7 +568,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       handler: async (args) => {
         const deviceId = args.deviceId as string;
         // Find the device in all available devices
-        const devices = listDevices("both");
+        const devices = await listDevices("both");
         const device = devices.find((d) => d.id === deviceId);
         if (!device) {
           return { error: `Device not found: ${deviceId}` };
@@ -557,12 +588,12 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       },
       handler: async (args) => {
         const deviceId = args.deviceId as string;
-        const devices = listDevices("both");
+        const devices = await listDevices("both");
         const device = devices.find((d) => d.id === deviceId);
         if (!device) {
           return { error: `Device not found: ${deviceId}` };
         }
-        const success = bootDevice(device);
+        const success = await bootDevice(device);
         return { status: success ? "booted" : "failed", device };
       },
     },
@@ -610,7 +641,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       description: "List git worktrees with session status",
       inputSchema: { type: "object", properties: {} },
       handler: async () => {
-        const worktrees = getWorktrees(ctx.projectRoot);
+        const worktrees = await getWorktrees(ctx.projectRoot);
         return { worktrees };
       },
     },
@@ -655,7 +686,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       },
       handler: async (args) => {
         const worktree = args.worktree as string;
-        const worktrees = getWorktrees(ctx.projectRoot);
+        const worktrees = await getWorktrees(ctx.projectRoot);
         const target = worktrees.find(
           (w) => w.path === worktree || w.branch === worktree
         );
@@ -819,6 +850,13 @@ function okResult(structuredContent: Record<string, unknown>): ToolResult {
 // ---------------------------------------------------------------------------
 
 function buildModulesLifecycleTools(ctx: McpContext): ToolDefinition[] {
+  // Match createToolDefinitions' default — a context without flags is
+  // treated as the safe (non-destructive) posture.
+  const flags: McpFlags = ctx.flags ?? {
+    enabledModules: new Set<string>(),
+    disabledModules: new Set<string>(),
+    allowDestructiveTools: false,
+  };
   return [
     {
       name: "rn-dev/modules-list",

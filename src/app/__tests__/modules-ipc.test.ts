@@ -7,6 +7,10 @@ import { dispatchModulesAction } from "../modules-ipc.js";
 import { ModuleRegistry } from "../../modules/registry.js";
 import { ModuleHostManager } from "../../core/module-host/manager.js";
 import { ModuleConfigStore } from "../../modules/config-store.js";
+import {
+  __addBuiltInAllowedForTests,
+  __resetBuiltInAllowlistForTests,
+} from "../../modules/built-in-allowlist.js";
 import type { ModuleManifest } from "@rn-dev/module-sdk";
 import type { IpcMessage } from "../../core/ipc.js";
 import type { SpawnHandle, ModuleSpawner } from "../../core/module-host/manager.js";
@@ -119,9 +123,15 @@ async function setup(
 
 let active: Harness | null = null;
 
+beforeEach(() => {
+  __addBuiltInAllowedForTests("builtin-cap-only");
+  __addBuiltInAllowedForTests("builtin-unspawnable");
+});
+
 afterEach(async () => {
   await active?.teardown();
   active = null;
+  __resetBuiltInAllowlistForTests();
 });
 
 function makeMsg(

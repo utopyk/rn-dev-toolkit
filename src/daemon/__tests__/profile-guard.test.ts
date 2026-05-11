@@ -65,3 +65,64 @@ describe("validateProfile — devices", () => {
     }
   });
 });
+
+describe("validateProfile — name newline rejection (H1)", () => {
+  it("rejects profile.name containing \\n", () => {
+    const result = validateProfile({ ...baseProfile, name: "good\nbad" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("E_PROFILE_NAME_NEWLINE");
+    }
+  });
+
+  it("rejects profile.name containing \\r", () => {
+    const result = validateProfile({ ...baseProfile, name: "good\rbad" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("E_PROFILE_NAME_NEWLINE");
+    }
+  });
+
+  it("rejects \\r\\n CRLF sequences too", () => {
+    const result = validateProfile({ ...baseProfile, name: "a\r\nb" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("E_PROFILE_NAME_NEWLINE");
+    }
+  });
+
+  it("accepts spaces, tabs, and other non-newline whitespace", () => {
+    const result = validateProfile({
+      ...baseProfile,
+      name: "fine name\twith tab",
+    });
+    expect(result.ok).toBe(true);
+  });
+});
+
+// User-reported (2026-05-06): "ultra clean throws E_PROFILE_MODE:
+// profile.mode must be one of clean | dirty | quick". The wizard
+// (src/ui/wizard/ModeStep.tsx) and the type definition
+// (src/core/types.ts:115) both list "ultra-clean" as a valid mode,
+// but VALID_MODES in profile-guard.ts didn't include it. Every
+// ultra-clean profile created by the wizard was getting silently
+// rejected at events/subscribe time.
+describe("validateProfile — mode", () => {
+  it("accepts every documented RunMode", () => {
+    for (const mode of ["clean", "dirty", "quick", "ultra-clean"] as const) {
+      const result = validateProfile({ ...baseProfile, mode });
+      expect(
+        result.ok,
+        `validateProfile should accept mode="${mode}", got ${JSON.stringify(result)}`,
+      ).toBe(true);
+    }
+  });
+
+  it("rejects an unknown mode with E_PROFILE_MODE", () => {
+    const result = validateProfile({ ...baseProfile, mode: "kapow" as never });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("E_PROFILE_MODE");
+    }
+  });
+});

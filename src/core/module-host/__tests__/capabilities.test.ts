@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CapabilityRegistry,
   KNOWN_PERMISSIONS,
+  resetUnknownCapabilityWarningsForTests,
   resetUnknownPermissionWarningsForTests,
   warnIfUnknownPermission,
 } from "../capabilities.js";
@@ -162,12 +163,24 @@ describe("CapabilityRegistry — permission allowlist (Phase 10 P2-11)", () => {
 
   beforeEach(() => {
     resetUnknownPermissionWarningsForTests();
+    resetUnknownCapabilityWarningsForTests();
     warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
   afterEach(() => {
     warn.mockRestore();
   });
+
+  // Helper: filter spy calls down to the permission-typo warnings these
+  // tests are about. Phase H2d's `warnIfUnknownCapability` (also wired
+  // into register()) can fire for placeholder capability ids used here,
+  // but it's not what these tests assert on.
+  const permWarns = (
+    spy: ReturnType<typeof vi.spyOn>,
+  ): Array<Array<unknown>> =>
+    (spy.mock.calls as Array<Array<unknown>>).filter(
+      (c) => typeof c[0] === "string" && /unknown permission/.test(c[0] as string),
+    );
 
   it("KNOWN_PERMISSIONS covers the v1 canonical set", () => {
     expect(KNOWN_PERMISSIONS).toEqual(
@@ -187,33 +200,36 @@ describe("CapabilityRegistry — permission allowlist (Phase 10 P2-11)", () => {
   it("does NOT warn for a known requiredPermission", () => {
     const registry = new CapabilityRegistry();
     registry.register("artifacts", {}, { requiredPermission: "fs:artifacts" });
-    expect(warn).not.toHaveBeenCalled();
+    expect(permWarns(warn)).toEqual([]);
   });
 
   it("warns once on register() with a misspelled requiredPermission", () => {
     const registry = new CapabilityRegistry();
-    registry.register("typo", {}, { requiredPermission: "exec:addb" });
+    // Use known capability ids so only the permission-typo warning fires
+    // through `permWarns()` — the H2d capability-id typo detector would
+    // otherwise add noise unrelated to what this test asserts.
+    registry.register("artifacts", {}, { requiredPermission: "exec:addb" });
     // Register a second time with the same typo in a different capability —
     // dedup key is context:permission, so this logs separately.
-    registry.register("typo2", {}, { requiredPermission: "exec:addb" });
-    expect(warn).toHaveBeenCalledTimes(2);
-    expect((warn.mock.calls[0] ?? [])[0]).toMatch(/unknown permission "exec:addb"/);
+    registry.register("metro", {}, { requiredPermission: "exec:addb" });
+    const perm = permWarns(warn);
+    expect(perm).toHaveLength(2);
+    expect((perm[0] ?? [])[0]).toMatch(/unknown permission "exec:addb"/);
   });
 
   it("warns for misspellings in methodPermissions", () => {
     const registry = new CapabilityRegistry();
     registry.register(
-      "caps",
+      "artifacts",
       { run: () => {} },
       {
         requiredPermission: "fs:artifacts",
         methodPermissions: { run: "fs:artifactz" },
       },
     );
-    expect(warn).toHaveBeenCalled();
-    const calls = (warn.mock.calls as Array<Array<unknown>>).map(
-      (c) => c[0] as string,
-    );
+    const perm = permWarns(warn);
+    expect(perm.length).toBeGreaterThan(0);
+    const calls = perm.map((c) => c[0] as string);
     expect(calls.some((s) => s.includes("fs:artifactz"))).toBe(true);
   });
 

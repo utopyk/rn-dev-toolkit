@@ -110,8 +110,31 @@ export interface DaemonSession {
 }
 
 export interface ConnectToDaemonSessionOptions extends ConnectToDaemonOptions {
-  /** Upper bound for waiting on the session to transition to "running". */
+  /**
+   * @deprecated kept for back-compat only. Behaves as the *initial* idle
+   * watchdog seed when set: if the daemon emits NO events at all within
+   * this window, the boot rejects. Once any event arrives, the
+   * idle-watchdog (`sessionReadyIdleTimeoutMs`) takes over.
+   *
+   * The wall-clock interpretation it used to have was wrong for slow
+   * machines and heavy builds: a `clean`-mode boot against acme
+   * routinely runs `pnpm install` + `pod install` + watchman wipe for
+   * 1-3+ minutes during which the daemon is making clear progress, but
+   * a fixed 30s/2min/10min timeout would kill the boot anyway. The fix
+   * is progress-based — see `sessionReadyIdleTimeoutMs`.
+   */
   sessionReadyTimeoutMs?: number;
+  /**
+   * Idle watchdog: max time the daemon may go silent (no incoming
+   * lifecycle/status/log events) before the boot is considered stuck.
+   * EVERY incoming session event resets this watchdog, so a 30-minute
+   * clean install that emits a log line every few seconds will NEVER
+   * trip it; only a truly stuck daemon (no events at all for the idle
+   * window) will. Default: 90s — chosen as 3× the noisiest gap a
+   * healthy boot exhibits (the Watchman wipe step + the `pod install`
+   * lock-file resolve are the longest single stretches of silence).
+   */
+  sessionReadyIdleTimeoutMs?: number;
   /**
    * Per-subscriber event-kind filter. Default = all kinds (every
    * session event delivered). Pass `["modules/*"]` for MCP to skip
@@ -130,7 +153,11 @@ export async function connectToDaemonSession(
   profile: Profile,
   opts: ConnectToDaemonSessionOptions = {},
 ): Promise<DaemonSession> {
-  const { sessionReadyTimeoutMs = 30_000, ...connectOpts } = opts;
+  const {
+    sessionReadyTimeoutMs = 30_000,
+    sessionReadyIdleTimeoutMs = 90_000,
+    ...connectOpts
+  } = opts;
 
   const client = await connectToDaemon(projectRoot, connectOpts);
   const idGen = makeIdGenerator();
@@ -191,10 +218,53 @@ export async function connectToDaemonSession(
   let voluntaryClose = false;
   let closed = false;
 
+  // Watchdog — single timer with two modes:
+  //   1. SEED (set by the subscribe-success path): if the daemon
+  //      emits NO events within `sessionReadyTimeoutMs` of subscribe
+  //      ack, fail with "appears wedged before any progress." This
+  //      keeps the legacy fast-fail UX for genuinely-stuck daemons.
+  //   2. IDLE (re-armed by every incoming event): if events stop
+  //      flowing for `sessionReadyIdleTimeoutMs`, fail with "boot
+  //      stalled — went silent." This means slow machines and heavy
+  //      builds NEVER hit a wall-clock kill — only true silence does.
+  // Hoisted above notifyDisconnected so the disarm closure can clear
+  // the active timer on disconnect (otherwise a daemon crash mid-boot
+  // would leak the timer until it fires uselessly).
+  let watchdog: ReturnType<typeof setTimeout> | null = null;
+  const disarmIdleWatchdog = (): void => {
+    if (watchdog) {
+      clearTimeout(watchdog);
+      watchdog = null;
+    }
+  };
+  const armIdleWatchdog = (): void => {
+    disarmIdleWatchdog();
+    watchdog = setTimeout(() => {
+      rejectRunning(
+        new Error(
+          `connectToDaemonSession: session boot stalled — no events from daemon ` +
+            `for ${sessionReadyIdleTimeoutMs}ms (boot was making progress, then went silent).`,
+        ),
+      );
+    }, sessionReadyIdleTimeoutMs);
+  };
+  const armSeedWatchdog = (): void => {
+    disarmIdleWatchdog();
+    watchdog = setTimeout(() => {
+      rejectRunning(
+        new Error(
+          `connectToDaemonSession: daemon emitted no events within ${sessionReadyTimeoutMs}ms ` +
+            `of subscribe — boot appears wedged before any progress.`,
+        ),
+      );
+    }, sessionReadyTimeoutMs);
+  };
+
   const notifyDisconnected = (err?: Error): void => {
     if (closed) return;
     closed = true;
     if (voluntaryClose) return;
+    disarmIdleWatchdog();
     // Unblock any caller still awaiting the running transition —
     // otherwise a daemon death mid-boot hangs `connectToDaemonSession`
     // for the full sessionReadyTimeoutMs.
@@ -213,6 +283,12 @@ export async function connectToDaemonSession(
     const evt = parseSessionEventEnvelope(msg.payload);
     if (!evt) return;
     if (!worktreeKey) worktreeKey = evt.worktreeKey;
+    // Any event = the daemon is alive and making progress. Reset the
+    // idle watchdog. Slow machines and heavy builds (pnpm install, pod
+    // install, gradle, xcodebuild) can run for 30+ minutes; as long as
+    // the daemon emits a lifecycle/log line every < idle window, the
+    // watchdog never fires.
+    armIdleWatchdog();
     // Pre-running session/status edges drive the runningPromise:
     //   starting → running   → resolve
     //   starting → stopped   → reject  (bootSessionServices failed)
@@ -222,8 +298,10 @@ export async function connectToDaemonSession(
     if (evt.kind === "session/status") {
       const status = readStatus(evt.data);
       if (status === "running") {
+        disarmIdleWatchdog();
         resolveRunning();
       } else if (status === "stopped" || status === "stopping") {
+        disarmIdleWatchdog();
         rejectRunning(
           new Error(
             `connectToDaemonSession: session transitioned to "${status}" before reaching "running"`,
@@ -286,13 +364,13 @@ export async function connectToDaemonSession(
   // call will use sub.send, keeping the same long-lived connectionId.
   resolvedSend = (msg: IpcMessage) => sub.send(msg);
 
-  const readyTimer = setTimeout(() => {
-    rejectRunning(
-      new Error(
-        `connectToDaemonSession: session did not reach "running" within ${sessionReadyTimeoutMs}ms`,
-      ),
-    );
-  }, sessionReadyTimeoutMs);
+  // Seed the watchdog: legacy `sessionReadyTimeoutMs` is now the
+  // initial-silence budget. Once any event arrives, `armIdleWatchdog()`
+  // (called from `onIncomingEvent`) replaces the seed with the regular
+  // idle window. So a daemon that's actively emitting progress NEVER
+  // hits a wall-clock kill; only initial silence (wedged daemon) or
+  // post-progress silence (stalled daemon) fail the boot.
+  armSeedWatchdog();
 
   // Joiner: session was already running before we attached → no
   // "running" edge will recur, so resolve the gate now and backfill
@@ -317,11 +395,11 @@ export async function connectToDaemonSession(
   try {
     await runningPromise;
   } catch (err) {
-    clearTimeout(readyTimer);
+    disarmIdleWatchdog();
     sub.close();
     throw err;
   }
-  clearTimeout(readyTimer);
+  disarmIdleWatchdog();
 
   if (!worktreeKey) {
     sub.close();
@@ -492,6 +570,14 @@ function routeEventToAdapters(
       // TUI) sees daemon-side `bootSessionServices` progress at its
       // own UI/agent surface.
       adapters.lifecycle.dispatch(kind, data);
+      return;
+    case "hooks/fired":
+      // Phase H2g — hook completion summary { target, ok, fired,
+      // skipped, failureCount }. No client adapter consumes them yet
+      // (the renderer has no hooks panel; the MCP hooks-diagnose tool
+      // reads the audit log directly). Explicit case here so the
+      // drift-detection warn doesn't fire; promote to a real adapter
+      // when the first consumer lands (H7 docs / hooks UI work).
       return;
     default:
       // Drift detection — if the daemon adds a sixth event family

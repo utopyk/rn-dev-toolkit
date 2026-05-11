@@ -125,7 +125,14 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
         // Security P1-3 on PR #27. Add new entries here when the
         // daemon emits new session-level kinds and the MCP tool
         // surface needs them.
-        kinds: ["modules/*", "session/log", "session/status"],
+        //
+        // M2a — `builder/*` added so rn-dev/build-status can surface
+        // build progress (line/progress/done) to agents that polled
+        // after kicking the build off via rn-dev/build. builder events
+        // carry only build-process telemetry (xcodebuild stdout, gradle
+        // phases, error diagnostics) — no sensitive payloads, so the
+        // allowlist expansion is bounded.
+        kinds: ["modules/*", "session/log", "session/status", "builder/*"],
       });
     } catch {
       // Daemon unreachable at startup — degrade to built-ins-only mode
@@ -142,6 +149,7 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
     preflightEngine: createDefaultPreflightEngine(projectRoot),
     session,
     flags,
+    profile,
   };
 
   const builtInTools = createToolDefinitions(ctx);

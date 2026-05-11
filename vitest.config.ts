@@ -10,6 +10,7 @@ export default defineConfig({
     globals: true,
     environment: "node",
     globalSetup: ["./vitest.global-setup.ts"],
+    setupFiles: ["./vitest.setup.ts"],
     exclude: [
       "**/node_modules/**",
       "**/dist/**",
@@ -17,11 +18,16 @@ export default defineConfig({
       "**/.git/**",
       "**/.cache/**",
       "**/.claude/**",
-      // Playwright smoke specs live under tests/electron-smoke; their
-      // runner is `npx playwright test`. Exclude here so vitest doesn't
-      // try to load them under its test environment (they import
-      // @playwright/test which assumes its own runner).
+      // Playwright specs (smoke + real-e2e) have their own runner via
+      // `npx playwright test`. Exclude here so vitest doesn't try to
+      // load them under its test environment — they import
+      // @playwright/test which assumes its own runner.
       "tests/electron-smoke/**",
+      "tests/electron-real-e2e/**",
+      // TUI tests use OpenTUI which requires `bun:ffi` native bindings.
+      // They run under `npm run test:tui` (bun test) — vitest can't load
+      // them.
+      "tests/tui/**",
     ],
   },
 });

@@ -277,35 +277,8 @@ async function connectAndWire(
   return ready;
 }
 
-function triggerBuildsIfNeeded(
-  session: DaemonSession,
-  profile: Profile,
-  projectRoot: string,
-): void {
-  // Quick mode skips builds — the existing installed app connects to
-  // Metro directly.
-  if (profile.mode === "quick") return;
-
-  const platformsToBuild: Array<"ios" | "android"> =
-    profile.platform === "both"
-      ? ["ios", "android"]
-      : [profile.platform as "ios" | "android"];
-
-  // Small delay so React's useEffect subscribes to builder events
-  // before the daemon starts emitting them. Same rationale as the
-  // pre-13.3 TUI path.
-  setTimeout(() => {
-    for (const plat of platformsToBuild) {
-      const devId =
-        plat === "ios" ? profile.devices?.ios : profile.devices?.android;
-      void session.builder.build({
-        projectRoot: profile.worktree ?? projectRoot,
-        platform: plat,
-        deviceId: devId ?? undefined,
-        port: profile.metroPort,
-        variant: profile.buildVariant,
-        env: profile.env,
-      });
-    }
-  }, 200);
-}
+// Re-export from the leaf module (no TUI imports) so the Electron entry
+// can pull in the helper without dragging Ink/OpenTUI into its tsconfig
+// graph. Existing TUI callers keep importing it from this file.
+import { triggerBuildsIfNeeded } from "./auto-build.js";
+export { triggerBuildsIfNeeded };

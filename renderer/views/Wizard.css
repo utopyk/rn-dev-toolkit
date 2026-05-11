@@ -2,8 +2,18 @@
 .wizard-root {
   flex: 1;
   display: flex;
+  flex-direction: column;
+  /* `align-items: center` cross-axis-centers the container horizontally;
+   * `justify-content: flex-start` (the default for column flex) pins it
+   * to the top so `overflow-y: auto` can scroll the wizard when a step's
+   * content is taller than the viewport. The previous combo
+   * (`align-items: center; justify-content: center` on a row flex) was a
+   * classic flexbox-centering-overflow trap: when the child grew past
+   * the container, it overflowed *above* the visible area and the user
+   * couldn't scroll up to reach it. The branch-selection step exposed
+   * this — repositories with many branches looked "endless" because
+   * the top of the list was inaccessible. */
   align-items: center;
-  justify-content: center;
   padding: 24px;
   overflow-y: auto;
   background: var(--surface);

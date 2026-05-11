@@ -300,9 +300,18 @@ export class CdpProxy extends EventEmitter {
     });
 
     // Ensure upstream is open. Fire-and-forget — frames arrive only after
-    // upstream ready.
+    // upstream ready. The rejection MUST be caught here: openUpstream's
+    // promise rejects when the upstream URL is unreachable (e.g. the
+    // `/inspector/no-target` placeholder used by `DevToolsManager` while
+    // no Hermes target is selected). Pre-fix this surfaced as an
+    // unhandled rejection that crashed the daemon process under Bun's
+    // default (--unhandled-rejections=throw equivalent), taking the IPC
+    // socket with it. Errors are still reported through `onError`; the
+    // downstream WS sees the upstream `close` event and can reconnect.
     if (!this.upstream) {
-      void this.openUpstream();
+      this.openUpstream().catch(() => {
+        // intentionally swallowed — see comment above
+      });
     }
   }
 

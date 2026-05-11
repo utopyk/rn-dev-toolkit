@@ -7,6 +7,10 @@
   "required": ["id", "version", "hostRange", "scope"],
   "additionalProperties": false,
   "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema URI — declared for editor autocomplete (VSCode, etc.). Ignored by the validator at runtime; permitted here only so a schema-pointed manifest doesn't fail additionalProperties:false."
+    },
     "id": {
       "type": "string",
       "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
@@ -105,6 +109,38 @@
       "type": "array",
       "description": "When the module should activate. Known forms: onStartup, onMcpTool:<pattern>, onElectronPanel:<id>, onWorktreeOpen.",
       "items": { "type": "string", "minLength": 1 }
+    },
+    "provides": {
+      "type": "object",
+      "description": "Hook contribution-point declarations (Phase H0+). The validator emits E_HOST_RANGE_REQUIRED if any field is set without a hostRange satisfying the host minor that introduced hook support.",
+      "additionalProperties": false,
+      "properties": {
+        "hooks": {
+          "type": "array",
+          "description": "Contribution-point names this module exposes (e.g. 'pre', 'post', 'custom'). Other modules — and the project's rn-dev.config.ts — register against <thisId>/<name>. Empty array declares zero contribution points (semantically distinct from omitting the field).",
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$",
+            "maxLength": 64
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "consumes": {
+      "type": "object",
+      "description": "Registrations against other modules' contribution points (Phase H0+). Same hostRange constraint as `provides`.",
+      "additionalProperties": false,
+      "properties": {
+        "hooks": {
+          "type": "object",
+          "description": "Map keyed on '<id>/<name>'. Unknown targets raise E_HOOK_TARGET_UNKNOWN; declared-but-not-provided names raise E_HOOK_NAME_UNDECLARED.",
+          "propertyNames": {
+            "pattern": "^[a-z0-9-]+\\/[a-z0-9-]+$"
+          },
+          "additionalProperties": { "$ref": "#/$defs/manifestHookEntry" }
+        }
+      }
     },
     "uses": {
       "type": "array",
@@ -206,6 +242,34 @@
         "inputSchema": { "type": "object" },
         "outputSchema": { "type": "object" }
       }
+    },
+    "manifestHookEntry": {
+      "description": "Sugar form: a string is shorthand for { script: <string> }.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "required": ["script"],
+          "additionalProperties": false,
+          "properties": {
+            "script": { "type": "string", "minLength": 1 },
+            "onFail": { "type": "string", "enum": ["hard", "warn", "retry"] },
+            "timeoutMs": { "type": "integer", "minimum": 0 },
+            "priority": { "type": "integer" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["fn"],
+          "additionalProperties": false,
+          "properties": {
+            "fn": { "type": "string", "minLength": 1 },
+            "onFail": { "type": "string", "enum": ["hard", "warn", "retry"] },
+            "timeoutMs": { "type": "integer", "minimum": 0 },
+            "priority": { "type": "integer" }
+          }
+        }
+      ]
     }
   }
 }

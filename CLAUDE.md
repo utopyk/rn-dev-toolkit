@@ -2,6 +2,16 @@
 
 React Native developer toolsuite. Terminal TUI (OpenTUI/Ink-style), Electron GUI, and an MCP server share one core. This file documents conventions so agents match the project's style on first try.
 
+## Branching + worktree rule (hard)
+
+**One branch (`main`). One worktree (the repo root).** Land work directly on `main`. Do NOT:
+
+- Create new branches (`claude/*`, `fix/*`, `feature/*`, `verify/*`, etc.). Edit `main` and commit.
+- Use `git worktree add` or the agent harness `isolation: "worktree"` option. Work in the repo root.
+- Cherry-pick from sibling branches as a workflow. If sibling branches show up, consolidate or delete them — don't leave parallel tracks alive.
+
+`main` runs **local-only ahead of `origin/main`** (per `memory/workflow_local_only_personal_account.md`). The lead is expected; never push from this account. `origin/*` are read-only remote-tracking refs and don't count as local branches. See `memory/single_branch_single_worktree.md` for the full rationale + the prior failure modes that motivated this rule.
+
 ## Repo shape
 
 - **Monorepo via bun workspaces.** Workspaces: `packages/*` (SDKs and libraries) and `modules/*` (third-party-packaged modules).

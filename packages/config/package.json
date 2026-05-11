@@ -1,0 +1,32 @@
+{
+  "name": "@rn-dev/config",
+  "version": "0.1.0",
+  "description": "Project-config SDK for rn-dev — defineConfig helper, hook types, and JSON Schema",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./config.schema.json": "./config.schema.json"
+  },
+  "files": [
+    "src/",
+    "dist/",
+    "config.schema.json"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@rn-dev/module-sdk": "workspace:*",
+    "ajv": "^8.18.0"
+  }
+}

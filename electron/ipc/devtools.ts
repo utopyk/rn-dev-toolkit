@@ -37,11 +37,25 @@ serviceBus.on('devtools', (client: DevToolsClient) => {
 
   const onDelta = (payload: unknown) => fanChange('delta', payload);
   const onStatus = (payload: unknown) => fanChange('status', payload);
+  // Bug B — when the daemon dies, every subsequent
+  // `await devtoolsClient.<anything>()` rejects with
+  // `subscribe.send: connection already closed`. Pre-fix the cached
+  // ref kept pointing at the dead client, so the renderer's Retry
+  // round-tripped through `devtools/restart` and surfaced
+  // "Cannot restart DevTools proxy for Metro on port N" forever.
+  // Null out on disconnect so the next call short-circuits to null
+  // (renderer still shows error UI, but at least the IPC handler
+  // doesn't drag a corpse through every retry).
+  const onDisconnected = (): void => {
+    if (devtoolsClient === client) devtoolsClient = null;
+  };
   client.on('delta', onDelta);
   client.on('status', onStatus);
+  client.on('disconnected', onDisconnected);
   detachClient = () => {
     client.off('delta', onDelta);
     client.off('status', onStatus);
+    client.off('disconnected', onDisconnected);
   };
 });
 

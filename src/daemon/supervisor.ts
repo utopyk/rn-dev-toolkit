@@ -531,21 +531,32 @@ export class DaemonSupervisor extends EventEmitter {
       "failed",
       (p) => ({ kind: "modules/failed", worktreeKey, data: p }),
     );
-    bind<{ text: string; stream: "stdout" | "stderr"; replace?: boolean }>(
+    // Builder events carry a `source: "builtin" | "override"` discriminator
+    // (Phase H2b). Today the source is always "builtin" because the Builder
+    // emits the events; H4's BuildHostCapability wrapper will start
+    // synthesizing "override" events for hook-script-driven builds. Forwarded
+    // verbatim so subscribers can already discriminate at the wire boundary.
+    bind<{
+      source: "builtin" | "override";
+      text: string;
+      stream: "stdout" | "stderr";
+      replace?: boolean;
+    }>(services.builder, "line", (p) => ({
+      kind: "builder/line",
+      worktreeKey,
+      data: { source: p.source, text: p.text, stream: p.stream, replace: p.replace },
+    }));
+    bind<{ source: "builtin" | "override"; phase: string }>(
       services.builder,
-      "line",
+      "progress",
       (p) => ({
-        kind: "builder/line",
+        kind: "builder/progress",
         worktreeKey,
-        data: { text: p.text, stream: p.stream, replace: p.replace },
+        data: { source: p.source, phase: p.phase },
       }),
     );
-    bind<{ phase: string }>(services.builder, "progress", (p) => ({
-      kind: "builder/progress",
-      worktreeKey,
-      data: { phase: p.phase },
-    }));
     bind<{
+      source: "builtin" | "override";
       success: boolean;
       errors: Array<{
         source: "xcodebuild" | "gradle";
@@ -560,6 +571,7 @@ export class DaemonSupervisor extends EventEmitter {
       kind: "builder/done",
       worktreeKey,
       data: {
+        source: p.source,
         success: p.success,
         errors: p.errors.map((e) => ({
           source: e.source,
@@ -587,6 +599,27 @@ export class DaemonSupervisor extends EventEmitter {
         data: { name: p.name, result: p.result },
       }));
     }
+
+    // Phase H2g — fan out HookManager `hooks/fired` over the existing
+    // events/subscribe channel. Lets MCP agents and the renderer answer
+    // "did my hook just run?" without grepping the daemon log. Mirrors
+    // the HookManager's internal emit shape ({ target, outcome }) into
+    // the SessionEvent { ok, fired, skipped, failureCount } summary so
+    // the wire payload is bounded (full failure objects can be large).
+    bind<{
+      target: string;
+      outcome: { ok: boolean; fired: number; skipped: number; failures: unknown[] };
+    }>(services.hookManager, "hooks/fired", (p) => ({
+      kind: "hooks/fired",
+      worktreeKey,
+      data: {
+        target: p.target,
+        ok: p.outcome.ok,
+        fired: p.outcome.fired,
+        skipped: p.outcome.skipped,
+        failureCount: p.outcome.failures.length,
+      },
+    }));
 
     return () => {
       for (const fn of detachers) fn();

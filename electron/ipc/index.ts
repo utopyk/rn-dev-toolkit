@@ -396,22 +396,29 @@ function registerModulesInstallHandlers(): void {
  * branch so `verify()`-style tooling doesn't choke.
  */
 function formatAuditEntry(entry: AuditEntry): string {
-  const id = entry.moduleId || '(host)';
   const tag = `[${entry.kind}]`;
   const codeSuffix = 'code' in entry && entry.code ? ` (${entry.code})` : '';
   switch (entry.kind) {
     case 'install':
     case 'uninstall': {
+      const id = entry.moduleId || '(host)';
       const v = 'version' in entry && entry.version ? ` v${entry.version}` : '';
       return `${tag} ${id}${v} ${entry.outcome}${codeSuffix}`;
     }
-    case 'host-call':
+    case 'host-call': {
+      const id = entry.moduleId || '(host)';
       return `${tag} ${id}/${entry.capabilityId}.${entry.method} ${entry.outcome}`;
+    }
     case 'config-set': {
+      const id = entry.moduleId || '(host)';
       const scope = entry.scopeUnit ? `:${entry.scopeUnit}` : '';
       return `${tag} ${id}${scope} keys=[${entry.patchKeys.join(',')}] ${entry.outcome}${codeSuffix}`;
     }
-    case 'panel-bridge':
+    case 'panel-bridge': {
+      const id = entry.moduleId || '(host)';
       return `${tag} ${entry.action} ${id}:${entry.panelId} ${entry.outcome}`;
+    }
+    case 'hook':
+      return `${tag} ${entry.phase} ${entry.outcome}${codeSuffix}${entry.reason ? ` reason=${entry.reason}` : ''}`;
   }
 }

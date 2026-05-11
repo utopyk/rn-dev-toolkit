@@ -105,3 +105,4 @@ describe("connectElectronToDaemon", () => {
     }
   }, 15_000);
 });
+

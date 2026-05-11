@@ -11,6 +11,7 @@ import { bootSessionServices } from "../core/session/boot.js";
 import { fakeBootSessionServices } from "./fake-boot.js";
 import { spawnDetachedDaemon } from "./spawn.js";
 import { sweepOrphanModules } from "./orphan-sweep.js";
+import { sweepOrphanHooks } from "./hook-orphan-sweep.js";
 import { registerDaemon, unregisterDaemon } from "./registry.js";
 import { validateProfile } from "./profile-guard.js";
 import type { SessionEvent } from "./session.js";
@@ -149,6 +150,25 @@ export async function runDaemon(opts: RunDaemonOptions): Promise<void> {
   } catch (err) {
     process.stderr.write(
       `rn-dev daemon: orphan-sweep failed (${err instanceof Error ? err.message : String(err)}) — continuing\n`,
+    );
+  }
+
+  // Hook orphan sweep — kill hook subprocess groups whose owning daemon
+  // crashed mid-fire. Mirrors module orphan-sweep position; runs before
+  // any hook fire could land so a stale lockfile from this very pgid
+  // can't shadow a live one.
+  try {
+    const hookSweep = sweepOrphanHooks({
+      log: (line) => process.stdout.write(`${line}\n`),
+    });
+    if (hookSweep.killed > 0) {
+      process.stdout.write(
+        `rn-dev daemon: hook-orphan-sweep cleared ${hookSweep.killed} hook${hookSweep.killed === 1 ? "" : "s"} (pgids: ${hookSweep.cleared.join(", ")})\n`,
+      );
+    }
+  } catch (err) {
+    process.stderr.write(
+      `rn-dev daemon: hook-orphan-sweep failed (${err instanceof Error ? err.message : String(err)}) — continuing\n`,
     );
   }
 

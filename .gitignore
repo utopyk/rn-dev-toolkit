@@ -6,3 +6,8 @@ dist-renderer/
 .claude/
 renderer/node_modules/
 test-results/
+renderer/bun.lock
+
+# Module-host runtime lockfiles (acquired-by-pid markers)
+modules/*/.lock
+

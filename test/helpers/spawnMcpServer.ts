@@ -2,6 +2,9 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveBunBinary } from "./bun-binary.js";
+
+const BUN_BINARY = resolveBunBinary();
 
 // MCP-side e2e harness — Bug 6's missing test layer.
 //
@@ -85,7 +88,7 @@ export async function spawnMcpServer(
   opts: SpawnMcpServerOptions,
 ): Promise<McpHarnessHandle> {
   const transport = new StdioClientTransport({
-    command: "bun",
+    command: BUN_BINARY,
     args: ["run", CLI_ENTRY, "mcp", ...(opts.flags ?? [])],
     cwd: opts.cwd,
     env: { ...inheritedEnv(), ...(opts.env ?? {}) },

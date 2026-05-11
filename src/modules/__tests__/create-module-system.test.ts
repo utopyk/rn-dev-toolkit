@@ -58,6 +58,7 @@ describe("createModuleSystem", () => {
       "dev-space",
       "lint-test",
       "marketplace",
+      "session",
       "settings",
     ]);
   });

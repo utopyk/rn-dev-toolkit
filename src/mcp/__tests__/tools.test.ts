@@ -74,9 +74,9 @@ function makeMockSession(
 // ---------------------------------------------------------------------------
 
 describe("createToolDefinitions()", () => {
-  it("returns 31 tool definitions (22 legacy + 5 modules/* lifecycle + 2 modules/config/* + modules-available + session-logs; Phase 11 retired legacy `rn-dev/metro-logs`)", () => {
+  it("returns 34 tool definitions (22 legacy + 5 modules/* lifecycle + 2 modules/config/* + modules-available + session-logs + build-status + 2 hooks/* added in Phase H2j+H2k; Phase M2a added build-status; Phase 11 retired legacy `rn-dev/metro-logs`)", () => {
     const tools = createToolDefinitions(makeMockContext());
-    expect(tools).toHaveLength(31);
+    expect(tools).toHaveLength(34);
   });
 
   it("each tool has name, description, inputSchema, and handler", () => {
@@ -114,12 +114,27 @@ describe("createToolDefinitions()", () => {
     expect(required).toContain("mode");
   });
 
-  it("rn-dev/build requires 'platform' in inputSchema", () => {
+  it("rn-dev/build inputSchema declares platform/variant/scheme/configuration as optional", () => {
+    // Pre-M2a refactor `platform` was required because the handler had
+    // no fallback. Now the handler falls back to ctx.profile.platform
+    // (and other fields), so all four args are optional. Profile-less
+    // MCP boots return the daemon-error path at handler invocation
+    // rather than rejecting at SDK arg validation — which is the right
+    // surface (agents see a useful diagnostic, not a schema error).
     const tools = createToolDefinitions(makeMockContext());
     const build = tools.find((t) => t.name === "rn-dev/build");
     expect(build).toBeDefined();
-    const required = (build!.inputSchema as { required?: string[] }).required;
-    expect(required).toContain("platform");
+    const schema = build!.inputSchema as {
+      required?: string[];
+      properties?: Record<string, unknown>;
+    };
+    expect(schema.required ?? []).toEqual([]);
+    expect(schema.properties).toMatchObject({
+      platform: expect.any(Object),
+      variant: expect.any(Object),
+      scheme: expect.any(Object),
+      configuration: expect.any(Object),
+    });
   });
 
   it("rn-dev/select-device requires 'deviceId' in inputSchema", () => {

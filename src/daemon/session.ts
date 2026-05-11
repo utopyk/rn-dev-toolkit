@@ -62,7 +62,8 @@ export type SessionEvent =
   | BuilderProgressEvent
   | BuilderDoneEvent
   | WatcherActionCompleteEvent
-  | SessionLogEvent;
+  | SessionLogEvent
+  | HooksFiredEvent;
 
 export interface SessionStatusEvent {
   kind: "session/status";
@@ -129,25 +130,55 @@ export interface DevtoolsDeltaEvent {
   };
 }
 
+// Phase H2b — `source` discriminator on every Builder wire event:
+// "builtin" today, "override" once H4's BuildHostCapability wrapper
+// starts synthesizing events from override hook scripts. Lets MCP
+// subscribers + the renderer distinguish "build failed" from "override
+// hook crashed" without re-checking the daemon's underlying state.
 export interface BuilderLineEvent {
   kind: "builder/line";
   worktreeKey: string;
-  data: { text: string; stream: "stdout" | "stderr"; replace?: boolean };
+  data: {
+    source: "builtin" | "override";
+    text: string;
+    stream: "stdout" | "stderr";
+    replace?: boolean;
+  };
 }
 
 export interface BuilderProgressEvent {
   kind: "builder/progress";
   worktreeKey: string;
-  data: { phase: string };
+  data: { source: "builtin" | "override"; phase: string };
 }
 
 export interface BuilderDoneEvent {
   kind: "builder/done";
   worktreeKey: string;
   data: {
+    source: "builtin" | "override";
     success: boolean;
     errors: BuilderErrorSnapshot[];
     platform?: "ios" | "android";
+  };
+}
+
+/**
+ * Phase H2g — fired on every HookManager hook completion (success and
+ * fail). Rides the existing events/subscribe channel so MCP agents and
+ * the renderer can answer "did my hook just run?" without grepping the
+ * daemon log. The shape mirrors the HookManager's internal `hooks/fired`
+ * emit but with `worktreeKey` for fan-out routing.
+ */
+export interface HooksFiredEvent {
+  kind: "hooks/fired";
+  worktreeKey: string;
+  data: {
+    target: string;
+    ok: boolean;
+    fired: number;
+    skipped: number;
+    failureCount: number;
   };
 }
 

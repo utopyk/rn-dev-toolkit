@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rn-dev.dev/schemas/rn-dev-config-1.0.0.json",
+  "title": "rn-dev project config",
+  "description": "Shape exported by a project's `rn-dev.config.ts`. Validated at session boot by the daemon.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "hooks": {
+      "type": "object",
+      "description": "Map keyed on '<moduleId>/<hookName>'. Values are HookEntry registrations.",
+      "propertyNames": {
+        "pattern": "^[a-z0-9-]+\\/[a-z0-9-]+$"
+      },
+      "additionalProperties": { "$ref": "#/$defs/hookEntry" }
+    },
+    "allowModuleOverrides": {
+      "type": "array",
+      "description": "Module IDs whose registrations against '<id>/custom' the project opts in to (security gate, H5).",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "allowModuleHardFails": {
+      "type": "array",
+      "description": "Module IDs whose `onFail: 'hard'` registrations against non-override slots the project opts in to (security gate, H5).",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "hookEntry": {
+      "description": "Sugar form: a string is shorthand for { script: <string> }. Object forms are discriminated by the presence of `script` or `fn`.",
+      "oneOf": [
+        { "type": "string", "minLength": 1 },
+        {
+          "type": "object",
+          "required": ["script"],
+          "additionalProperties": false,
+          "properties": {
+            "script": { "type": "string", "minLength": 1 },
+            "onFail": { "type": "string", "enum": ["hard", "warn", "retry"] },
+            "timeoutMs": { "type": "integer", "minimum": 0 },
+            "priority": { "type": "integer" }
+          }
+        },
+        {
+          "type": "object",
+          "required": ["fn"],
+          "additionalProperties": false,
+          "properties": {
+            "fn": {
+              "description": "In-process function. JSON Schema cannot type-check this; the daemon validates that it is callable at config-load."
+            },
+            "onFail": { "type": "string", "enum": ["hard", "warn", "retry"] },
+            "timeoutMs": { "type": "integer", "minimum": 0 },
+            "priority": { "type": "integer" }
+          }
+        }
+      ]
+    }
+  }
+}

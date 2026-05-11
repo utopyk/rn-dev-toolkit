@@ -14,8 +14,24 @@
 
 import type { Profile, Platform, RunMode } from "../core/types.js";
 
+/**
+ * Branded `Profile` minted only by `validateProfile`. The brand is a
+ * phantom (zero runtime cost) but the type system refuses to let an
+ * unvalidated `Profile` flow into APIs that accept `ValidatedProfile`.
+ *
+ * Required by the H1 hook system: every entry point that fires a hook
+ * (RPC handler, MCP tool, in-process call) re-runs `validateProfile`
+ * to mint a `ValidatedProfile`, so the hook spawn boundary cannot be
+ * reached with attacker-controlled fields like `LD_PRELOAD` smuggled in
+ * via a fresh `Profile` object literal.
+ */
+declare const ValidatedProfileBrand: unique symbol;
+export type ValidatedProfile = Profile & {
+  readonly [ValidatedProfileBrand]: true;
+};
+
 export type ValidateProfileResult =
-  | { ok: true; profile: Profile }
+  | { ok: true; profile: ValidatedProfile }
   | { ok: false; code: string; message: string };
 
 /**
@@ -40,6 +56,7 @@ const VALID_MODES: ReadonlySet<RunMode> = new Set<RunMode>([
   "clean",
   "dirty",
   "quick",
+  "ultra-clean",
 ]);
 
 /**
@@ -73,6 +90,16 @@ export function validateProfile(input: unknown): ValidateProfileResult {
   if (typeof name !== "string" || name.length === 0 || name.length > 256) {
     return fail("E_PROFILE_NAME", "profile.name must be a non-empty string ≤256 chars");
   }
+  // Reject \n and \r in name — parity with `checkAbsolutePath`. Required
+  // because name flows into `RN_DEV_PROFILE_JSON` env var; embedded
+  // newlines desync the JSON-line parser on the receiving end (H1 hook
+  // subprocess runner).
+  if (name.includes("\n") || name.includes("\r")) {
+    return fail(
+      "E_PROFILE_NAME_NEWLINE",
+      "profile.name must not contain newline characters",
+    );
+  }
 
   if (typeof p.isDefault !== "boolean") {
     return fail("E_PROFILE_IS_DEFAULT", "profile.isDefault must be boolean");
@@ -95,7 +122,7 @@ export function validateProfile(input: unknown): ValidateProfileResult {
   if (!VALID_MODES.has(p.mode as RunMode)) {
     return fail(
       "E_PROFILE_MODE",
-      "profile.mode must be one of clean | dirty | quick",
+      "profile.mode must be one of clean | dirty | quick | ultra-clean",
     );
   }
 
@@ -132,8 +159,30 @@ export function validateProfile(input: unknown): ValidateProfileResult {
   const projectRootCheck = checkAbsolutePath(p.projectRoot, "profile.projectRoot");
   if (!projectRootCheck.ok) return projectRootCheck;
 
-  // Input is now shape-safe; narrow to Profile for the caller.
-  return { ok: true, profile: input as Profile };
+  // scheme + configuration are optional; if present, reject empty
+  // strings so the build doesn't silently swallow a malformed profile
+  // (an empty scheme would build whatever RN CLI's default heuristic
+  // picks, which is the bug we're trying to escape).
+  if (p.scheme !== undefined) {
+    if (typeof p.scheme !== "string" || p.scheme.length === 0) {
+      return fail(
+        "E_PROFILE_SCHEME",
+        "profile.scheme must be a non-empty string when present",
+      );
+    }
+  }
+  if (p.configuration !== undefined) {
+    if (typeof p.configuration !== "string" || p.configuration.length === 0) {
+      return fail(
+        "E_PROFILE_CONFIGURATION",
+        "profile.configuration must be a non-empty string when present",
+      );
+    }
+  }
+
+  // Input is now shape-safe; mint the branded type so downstream APIs
+  // that require a validated profile (e.g. HookManager.fire) accept it.
+  return { ok: true, profile: input as ValidatedProfile };
 }
 
 function checkOptionalPath(

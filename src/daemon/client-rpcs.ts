@@ -11,11 +11,13 @@
 // services if we ever relax the 1:1 rule.
 
 import path from "node:path";
+import { realpathSync } from "node:fs";
 import type { IpcMessage, IpcMessageEvent } from "../core/ipc.js";
 import type { DaemonSupervisor } from "./supervisor.js";
 import type { SessionServices } from "../core/session/boot.js";
 import type { BuildOptions } from "../core/builder.js";
-import { checkAbsolutePath, checkEnv } from "./profile-guard.js";
+import { checkAbsolutePath, checkEnv, validateProfile } from "./profile-guard.js";
+import { ProfileStore } from "../core/profile.js";
 
 const CLIENT_RPC_ACTIONS = new Set<string>([
   "metro/reload",
@@ -30,6 +32,7 @@ const CLIENT_RPC_ACTIONS = new Set<string>([
   "watcher/start",
   "watcher/stop",
   "watcher/isRunning",
+  "session/profile-update",
 ]);
 
 export function isClientRpcAction(action: string): boolean {
@@ -128,12 +131,7 @@ async function dispatch(
       return services.devtools.restart(services.worktreeKey);
     }
     case "builder/build": {
-      const parsed = parseBuildOptions(message.payload, supervisor.getWorktree());
-      if (!parsed.ok) {
-        return { code: parsed.code, message: parsed.message };
-      }
-      services.builder.build(parsed.opts);
-      return { ok: true };
+      return await handleBuilderBuild(message, services, supervisor);
     }
     case "watcher/start": {
       if (!services.watcher) {
@@ -152,9 +150,125 @@ async function dispatch(
     case "watcher/isRunning": {
       return { running: services.watcher?.isRunning() ?? false };
     }
+    case "session/profile-update": {
+      return await handleProfileUpdate(message, services, supervisor);
+    }
     default:
       throw new Error(`client-rpcs.dispatch: unknown action ${message.action}`);
   }
+}
+
+/**
+ * Phase H2g — `builder/build` handler. Fires `build/pre` BEFORE the
+ * Builder spawns its subprocess (a hard failure aborts the RPC with
+ * E_HOOK_FAILED so the caller knows the build never started), then
+ * arranges to fire `build/post` once the Builder emits `done`. The
+ * post-fire is detached (no `await`) — clients have already received
+ * `{ ok: true }` and observe the build via `builder/done` events.
+ */
+export async function handleBuilderBuild(
+  message: IpcMessage,
+  services: SessionServices,
+  supervisor: DaemonSupervisor,
+): Promise<unknown> {
+  const parsed = parseBuildOptions(message.payload, supervisor.getWorktree());
+  if (!parsed.ok) {
+    return { code: parsed.code, message: parsed.message };
+  }
+
+  // build/pre: any consumer's onFail:'hard' propagates as a thrown
+  // HookError → the surrounding dispatch surfaces { ok: false,
+  // code: E_HOOK_FAILED, phase: 'build/pre' } to the caller.
+  try {
+    await services.hookManager.fire(
+      "build/pre",
+      { profile: services.validatedProfile, opts: parsed.opts },
+      services.validatedProfile,
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      code: "E_HOOK_FAILED",
+      phase: "build/pre",
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  // Arrange the post-fire BEFORE kicking off the Builder so we can't
+  // miss a fast 'done' (e.g. concurrency-guard rejection emits 'done'
+  // synchronously). once() so a long-lived Builder instance doesn't
+  // leak listeners across builds.
+  services.builder.once("done", () => {
+    void services.hookManager
+      .fire(
+        "build/post",
+        { profile: services.validatedProfile },
+        services.validatedProfile,
+      )
+      .catch(() => {
+        // build/post failures (incl. onFail:'hard') are intentionally
+        // swallowed: the build is already done, the RPC has long since
+        // returned, and the failure surfaces via the audit log + the
+        // hooks/fired session event the dispatcher emits regardless.
+      });
+  });
+
+  services.builder.build(parsed.opts);
+  return { ok: true };
+}
+
+/**
+ * `session/profile-update` — re-validate the supplied profile, fire
+ * `session/profile-changed` so consumers (`consumes.hooks` against
+ * the `session` built-in) react, and persist the new profile to
+ * `<worktree>/.rn-dev/profiles/<name>.json` so the next session
+ * boot picks it up.
+ *
+ * Mid-session reconfiguration of services (Metro port changes,
+ * env-mutation, etc.) is intentionally NOT done here — the hook is
+ * the extension point modules use to react. A profile change that
+ * needs a restart is the caller's responsibility (issue
+ * `session/stop` + re-attach with the new profile).
+ */
+async function handleProfileUpdate(
+  message: IpcMessage,
+  services: SessionServices,
+  supervisor: DaemonSupervisor,
+): Promise<unknown> {
+  const profileInput = readObjectField(message.payload, "profile");
+  if (profileInput === undefined) {
+    return {
+      ok: false,
+      code: "E_RPC_INVALID_PAYLOAD",
+      message: "session/profile-update: payload.profile is required",
+    };
+  }
+  const result = validateProfile(profileInput);
+  if (!result.ok) {
+    return { ok: false, code: result.code, message: result.message };
+  }
+  const validated = result.profile;
+
+  // Fire the hook BEFORE persistence so a hard-failing consumer
+  // can abort the change. `fire` throws on `onFail: "hard"`; let it
+  // propagate so the dispatch's catch returns E_RPC_FAILED with the
+  // hook's message attached.
+  await services.hookManager.fire(
+    "session/profile-changed",
+    { profile: validated },
+    validated,
+  );
+
+  const profilesDir = path.join(supervisor.getWorktree(), ".rn-dev", "profiles");
+  new ProfileStore(profilesDir).save(validated);
+
+  // Phase H2g — refresh SessionServices.validatedProfile so subsequent
+  // builder/build hook fires see the latest config. Refresh AFTER the
+  // session/profile-changed fire + persistence so a hard-failing
+  // consumer leaves both the in-memory and on-disk state untouched.
+  services.validatedProfile = validated;
+
+  return { ok: true };
 }
 
 function readStringField(
@@ -206,7 +320,26 @@ function parseBuildOptions(
   // Bound to the daemon's worktree. `path.relative` returns a string
   // starting with ".." when the second arg is above the first; an
   // exact match returns "". Absolute paths return themselves.
-  const rel = path.relative(worktree, projectRoot);
+  //
+  // realpath both sides BEFORE the relative check: macOS's
+  // `/private/var` ↔ `/var` symlink (and analogous setups on Linux)
+  // mean a caller computing projectRoot via process.cwd()/realpath can
+  // legitimately pass a symlink-resolved path while the daemon was
+  // spawned with the original. Without resolution the relative check
+  // returns `../../../private/var/…` and rejects the same physical
+  // directory the daemon is anchored to. realpathSync.native throws
+  // ENOENT for missing paths — fall back to the original input so the
+  // existing absolute-path check below still catches that case.
+  const resolveSafe = (input: string): string => {
+    try {
+      return realpathSync.native(input);
+    } catch {
+      return input;
+    }
+  };
+  const resolvedWorktree = resolveSafe(worktree);
+  const resolvedProjectRoot = resolveSafe(projectRoot);
+  const rel = path.relative(resolvedWorktree, resolvedProjectRoot);
   if (rel.startsWith("..") || path.isAbsolute(rel)) {
     return fail(
       "E_BUILD_PROJECTROOT_OUTSIDE_WORKTREE",
@@ -262,9 +395,33 @@ function parseBuildOptions(
       ? (p.env as Record<string, string>)
       : undefined;
 
+  // Optional iOS scheme/configuration. Mirror profile-guard's rule:
+  // present-but-empty is rejected so an empty payload field doesn't
+  // silently fall back to RN CLI's default-scheme heuristic.
+  let scheme: string | undefined;
+  if (p.scheme !== undefined) {
+    if (typeof p.scheme !== "string" || p.scheme.length === 0) {
+      return fail(
+        "E_RPC_INVALID_PAYLOAD",
+        "builder/build.scheme must be a non-empty string when present",
+      );
+    }
+    scheme = p.scheme;
+  }
+  let configuration: string | undefined;
+  if (p.configuration !== undefined) {
+    if (typeof p.configuration !== "string" || p.configuration.length === 0) {
+      return fail(
+        "E_RPC_INVALID_PAYLOAD",
+        "builder/build.configuration must be a non-empty string when present",
+      );
+    }
+    configuration = p.configuration;
+  }
+
   return {
     ok: true,
-    opts: { projectRoot, platform, port, variant, deviceId, env },
+    opts: { projectRoot, platform, port, variant, deviceId, env, scheme, configuration },
   };
 }
 

@@ -1,7 +1,10 @@
 import { EventEmitter } from "node:events";
-import { execSync, spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
+import { readFileSync, realpathSync } from "node:fs";
+import { join, resolve as pathResolve } from "node:path";
 import type { RegisteredModule } from "../../modules/registry.js";
 import { ModuleConfigStore } from "../../modules/config-store.js";
+import { buildSpawnCommand, wrapChild, type SpawnHandle } from "../spawn-utils.js";
 import { CapabilityRegistry } from "./capabilities.js";
 import { attachHostRpc } from "./host-rpc.js";
 import { ModuleInstance, type ModuleInstanceState } from "./instance.js";
@@ -14,20 +17,13 @@ import {
 } from "./rpc.js";
 import { Supervisor } from "./supervisor.js";
 
+// Re-exported so existing callers keep importing `SpawnHandle` from this
+// module — the canonical declaration now lives in `../spawn-utils.ts`.
+export type { SpawnHandle };
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
-
-export interface SpawnHandle {
-  pid: number;
-  stdin: NodeJS.WritableStream;
-  stdout: NodeJS.ReadableStream;
-  stderr: NodeJS.ReadableStream;
-  kill(signal?: NodeJS.Signals): boolean;
-  onExit(
-    listener: (code: number | null, signal: NodeJS.Signals | null) => void,
-  ): void;
-}
 
 export interface ModuleSpawner {
   spawn(manifest: RegisteredModule["manifest"], modulePath: string): SpawnHandle;
@@ -73,17 +69,31 @@ export class NodeSpawner implements ModuleSpawner {
     _manifest: RegisteredModule["manifest"],
     modulePath: string,
   ): SpawnHandle {
-    // On Linux with util-linux's `setpriv` available, prepend
-    // `setpriv --pdeathsig SIGKILL --` so the kernel kills the module
-    // the instant the daemon dies — closes the orphan window before
-    // the next daemon's startup-sweep runs. setpriv is standard on
-    // modern distros but not guaranteed; absent → we fall back to the
-    // startup sweep (see src/daemon/orphan-sweep.ts). macOS has no
-    // PDEATHSIG equivalent; practical impact bounded since dev
-    // machines restart daemons far more than servers do.
-    const { command, args } = buildSpawnCommand(modulePath);
+    // Resolve modulePath (a directory) to its entry script via
+    // package.json#main. Without this Node still finds and runs the
+    // entry, but `process.argv[1]` carries the directory path — which
+    // breaks the conventional `import.meta.url === pathToFileURL(argv[1])`
+    // entry check that modules use to gate `runModule()`. Symptom of
+    // the bug: subprocess starts, opens stdio, never responds to
+    // `initialize`, MODULE_ACTIVATION_TIMEOUT after 3s. Resolving
+    // here means argv[1] always matches the file `import.meta.url`
+    // points at.
+    const entry = resolveModuleEntry(modulePath);
+    const { command, args } = buildSpawnCommand({
+      command: "node",
+      args: [entry],
+    });
+    // cwd is the module's package root (where node_modules + dist
+    // live). Production passes a directory as modulePath; some tests
+    // (manager.integration.test.ts) pass the entry script directly.
+    // Resolve `cwd` from whichever shape we got — directory ↦ itself,
+    // file ↦ its dirname. spawn() throws ENOTDIR when cwd points at
+    // a non-directory, so feeding it a file would break the
+    // production case for fixtures.
+    const cwdDir = isDirectory(modulePath) ? modulePath : dirnameOf(modulePath);
     const child = spawn(command, args, {
       stdio: ["pipe", "pipe", "pipe"],
+      cwd: cwdDir,
       // POSIX: start a new process group so we can kill the whole group and
       // reap stray grandchildren spawned by the module.
       // Windows: detached creates a new process group too, but we don't rely
@@ -94,58 +104,62 @@ export class NodeSpawner implements ModuleSpawner {
   }
 }
 
-function buildSpawnCommand(modulePath: string): { command: string; args: string[] } {
-  if (process.platform === "linux" && hasSetpriv()) {
-    return {
-      command: "setpriv",
-      args: ["--pdeathsig", "SIGKILL", "--", "node", modulePath],
-    };
-  }
-  return { command: "node", args: [modulePath] };
-}
-
-let setprivCached: boolean | null = null;
-function hasSetpriv(): boolean {
-  if (setprivCached !== null) return setprivCached;
+function isDirectory(p: string): boolean {
   try {
-    // `which setpriv` returns 0 iff the binary is in PATH. stdio is
-    // ignored so this is silent; `execSync` throws on non-zero exit.
-    execSync("which setpriv", { stdio: "ignore" });
-    setprivCached = true;
+    return require("node:fs").statSync(p).isDirectory();
   } catch {
-    setprivCached = false;
+    return false;
   }
-  return setprivCached;
 }
 
-function wrapChild(child: ChildProcess): SpawnHandle {
-  if (!child.pid || !child.stdin || !child.stdout || !child.stderr) {
-    throw new Error(
-      `[ModuleHostManager] spawn returned an incomplete ChildProcess (pid=${child.pid}).`,
-    );
+function dirnameOf(p: string): string {
+  return require("node:path").dirname(p);
+}
+
+/**
+ * Resolve the module subprocess entry from `<modulePath>/package.json#main`.
+ * Falls back to `dist/index.js` (the convention every shipped module
+ * follows) when package.json is missing or unreadable — keeps the
+ * spawner working for modules that ship pre-built tarballs without a
+ * full package.json.
+ */
+function resolveModuleEntry(modulePath: string): string {
+  // If modulePath is a file (e.g. test fixtures pass the entry script
+  // directly), use it as-is. Production passes a directory containing
+  // package.json + dist/.
+  let entry: string;
+  if (!isDirectory(modulePath)) {
+    entry = modulePath;
+  } else {
+    const fallback = join(modulePath, "dist", "index.js");
+    try {
+      const pkgPath = join(modulePath, "package.json");
+      const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { main?: string };
+      entry =
+        typeof pkg.main === "string" && pkg.main.length > 0
+          ? pathResolve(modulePath, pkg.main)
+          : fallback;
+    } catch {
+      entry = fallback;
+    }
   }
-  const pid = child.pid;
-  return {
-    pid,
-    stdin: child.stdin,
-    stdout: child.stdout,
-    stderr: child.stderr,
-    kill(signal?: NodeJS.Signals): boolean {
-      try {
-        if (process.platform === "win32") {
-          return child.kill(signal);
-        }
-        // Negative pid = process group.
-        process.kill(-pid, signal ?? "SIGTERM");
-        return true;
-      } catch {
-        return false;
-      }
-    },
-    onExit(listener) {
-      child.on("exit", listener);
-    },
-  };
+
+  // Realpath the entry so the spawn-time `argv[1]` matches the
+  // `import.meta.url` Node sets after symlink resolution. Without this,
+  // dev installs that symlink ~/.rn-dev/modules/<id> → workspace path
+  // (or any setup with /private/var, ~/Library, iCloud Drive symlinks)
+  // hit the entry-detection bug where the module's own
+  // `import.meta.url === pathToFileURL(process.argv[1]).href` check
+  // fails — argv[1] is the symlink, import.meta.url is the realpath —
+  // so `runModule()` never runs and host-call times out with
+  // MODULE_ACTIVATION_TIMEOUT after 3s. realpathSync.native throws on
+  // missing entries; fall back so the existing path still surfaces a
+  // useful error downstream.
+  try {
+    return realpathSync.native(entry);
+  } catch {
+    return entry;
+  }
 }
 
 // ---------------------------------------------------------------------------

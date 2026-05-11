@@ -18,6 +18,15 @@ export interface Device {
 // ---------------------------------------------------------------------------
 
 /**
+ * Convention: adb assigns serials starting with `emulator-` to AVDs and
+ * arbitrary alphanumeric serials to physical devices. There is no other
+ * reliable signal in `adb devices` output to distinguish them.
+ */
+function isAndroidEmulatorSerial(serial: string): boolean {
+  return serial.startsWith("emulator-");
+}
+
+/**
  * Parse the text output of `adb devices`.
  *
  * Expected format:
@@ -51,6 +60,7 @@ export function parseAdbDevices(output: string): Device[] {
         name: serial,
         type: "android",
         status: "available",
+        isPhysical: !isAndroidEmulatorSerial(serial),
       });
     } else if (state === "unauthorized") {
       devices.push({
@@ -58,12 +68,67 @@ export function parseAdbDevices(output: string): Device[] {
         name: serial,
         type: "android",
         status: "unauthorized",
+        isPhysical: !isAndroidEmulatorSerial(serial),
       });
     }
     // Ignore offline, no permissions, etc.
   }
 
   return devices;
+}
+
+// ---------------------------------------------------------------------------
+// enrichAndroidNames — upgrade serials to friendly names via per-device adb
+// ---------------------------------------------------------------------------
+
+async function probe(cmd: string, timeout = 5000): Promise<string> {
+  try {
+    const out = await execAsync(cmd, { timeout });
+    return out.split("\n")[0]?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function capitalize(s: string): string {
+  return s.length > 0 ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+/**
+ * Replace each Android device's serial-as-name with a human-friendly label.
+ * Best-effort — falls back to the serial on any adb failure or timeout.
+ *
+ *  - Physical: prefers `ro.product.marketname` (Samsung-specific but very
+ *    user-friendly when present), falls back to "<manufacturer> <model>".
+ *  - Emulator: uses `adb emu avd name` (the AVD name), with underscores
+ *    replaced by spaces for display.
+ *
+ * Per-device probes run in parallel so the wizard's device step doesn't
+ * stall even with several attached devices.
+ */
+export async function enrichAndroidNames(devices: Device[]): Promise<Device[]> {
+  return Promise.all(
+    devices.map(async (d): Promise<Device> => {
+      if (d.type !== "android") return d;
+
+      if (d.isPhysical === false) {
+        const avd = await probe(`adb -s ${d.id} emu avd name`);
+        return avd ? { ...d, name: avd.replace(/_/g, " ") } : d;
+      }
+
+      const market = await probe(
+        `adb -s ${d.id} shell getprop ro.product.marketname`,
+      );
+      if (market) return { ...d, name: market };
+
+      const [manufacturer, model] = await Promise.all([
+        probe(`adb -s ${d.id} shell getprop ro.product.manufacturer`),
+        probe(`adb -s ${d.id} shell getprop ro.product.model`),
+      ]);
+      const friendly = [capitalize(manufacturer), model].filter(Boolean).join(" ");
+      return friendly ? { ...d, name: friendly } : d;
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -142,7 +207,8 @@ export async function listDevices(platform: "ios" | "android" | "both"): Promise
       const output = await execAsync("adb devices", {
         timeout: 15000, // 15s max
       });
-      devices.push(...parseAdbDevices(output));
+      const parsed = parseAdbDevices(output);
+      devices.push(...(await enrichAndroidNames(parsed)));
     } catch {
       // adb not available, timed out, or failed
     }
@@ -235,11 +301,14 @@ export function parseXctraceDevices(output: string): Device[] {
 
 /**
  * Boot an iOS simulator. Returns true on success, false on failure.
- * Currently only iOS simulators are supported.
+ * Physical devices are a no-op: they connect via USB/network and have nothing to boot.
  */
 export async function bootDevice(device: Device): Promise<boolean> {
   if (device.type !== "ios") {
     return false;
+  }
+  if (device.isPhysical) {
+    return true;
   }
 
   try {

@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
-import { parseAdbDevices, parseSimctlDevices } from "../device.js";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { parseAdbDevices, parseSimctlDevices, bootDevice, type Device } from "../device.js";
+import * as execAsync from "../exec-async.js";
 
 // ---------------------------------------------------------------------------
 // parseAdbDevices
@@ -23,6 +24,7 @@ describe("parseAdbDevices", () => {
       name: "emulator-5554",
       type: "android",
       status: "available",
+      isPhysical: false,
     });
 
     expect(devices[1]).toMatchObject({
@@ -30,6 +32,7 @@ describe("parseAdbDevices", () => {
       name: "R58M31YXXXXX",
       type: "android",
       status: "available",
+      isPhysical: true,
     });
 
     expect(devices[2]).toMatchObject({
@@ -37,7 +40,30 @@ describe("parseAdbDevices", () => {
       name: "ZX1G22BXXXXX",
       type: "android",
       status: "unauthorized",
+      isPhysical: true,
     });
+  });
+
+  it("flags emulator-prefixed serials as virtual and bare alphanumeric serials as physical", () => {
+    // Documents the assumption load-bearing for the wizard's UI labels —
+    // adb's only reliable signal for emulator-vs-phone is the `emulator-`
+    // prefix on the serial.
+    const output = [
+      "List of devices attached",
+      "emulator-5554\tdevice",
+      "emulator-5556\tdevice",
+      "R5CX23WBLKE\tdevice",
+      "ZY222ABCDE\tunauthorized",
+    ].join("\n");
+
+    const devices = parseAdbDevices(output);
+
+    expect(devices.map((d) => ({ id: d.id, isPhysical: d.isPhysical }))).toEqual([
+      { id: "emulator-5554", isPhysical: false },
+      { id: "emulator-5556", isPhysical: false },
+      { id: "R5CX23WBLKE", isPhysical: true },
+      { id: "ZY222ABCDE", isPhysical: true },
+    ]);
   });
 
   it("handles empty output (just header line)", () => {
@@ -160,5 +186,73 @@ describe("parseSimctlDevices", () => {
     const json = JSON.stringify({ devices: {} });
     const devices = parseSimctlDevices(json);
     expect(devices).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// bootDevice
+// ---------------------------------------------------------------------------
+
+describe("bootDevice", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("returns true without spawning simctl for physical iPhones", async () => {
+    const spy = vi
+      .spyOn(execAsync, "execShellAsync")
+      .mockResolvedValue("");
+
+    const physical: Device = {
+      id: "00008130-001A653A3E11001C",
+      name: "Martin Couso's iPhone 15",
+      type: "ios",
+      status: "shutdown",
+      isPhysical: true,
+    };
+
+    const result = await bootDevice(physical);
+
+    expect(result).toBe(true);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("returns false for android devices without spawning simctl", async () => {
+    const spy = vi
+      .spyOn(execAsync, "execShellAsync")
+      .mockResolvedValue("");
+
+    const android: Device = {
+      id: "emulator-5554",
+      name: "emulator-5554",
+      type: "android",
+      status: "available",
+    };
+
+    const result = await bootDevice(android);
+
+    expect(result).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("invokes simctl boot for iOS simulators", async () => {
+    const spy = vi
+      .spyOn(execAsync, "execShellAsync")
+      .mockResolvedValue("");
+
+    const sim: Device = {
+      id: "AAAAAAAA-0000-0000-0000-AAAAAAAAAAAA",
+      name: "iPhone 15",
+      type: "ios",
+      status: "shutdown",
+      isPhysical: false,
+    };
+
+    const result = await bootDevice(sim);
+
+    expect(result).toBe(true);
+    expect(spy).toHaveBeenCalledOnce();
+    expect(spy.mock.calls[0]?.[0]).toContain("xcrun simctl boot");
+    expect(spy.mock.calls[0]?.[0]).toContain(sim.id);
   });
 });

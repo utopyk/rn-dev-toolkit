@@ -1,0 +1,10 @@
+{
+  "name": "smoke-rn-with-hooks",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phase H2h smoke fixture — RN-shaped project with rn-dev.config.mjs declaring build/pre + build/post hooks. Drives the Phase H2g builder/build hook-firing path under fake-boot for the integration test.",
+  "main": "index.js",
+  "dependencies": {
+    "react-native": "0.74.0"
+  }
+}

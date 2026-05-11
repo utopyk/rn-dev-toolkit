@@ -1,6 +1,14 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, statSync, unlinkSync } from "node:fs";
-import { join, resolve } from "node:path";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import { IpcClient } from "../core/ipc.js";
 import { DAEMON_VERSION } from "./version.js";
 
@@ -30,7 +38,16 @@ export async function connectToDaemon(
   worktree: string,
   opts: ConnectToDaemonOptions = {},
 ): Promise<IpcClient> {
-  const { spawnTimeoutMs = 5_000, pollMs = 100, daemonEntry } = opts;
+  // 5s was tight even on hot-cache machines — a cold tsx compile on
+  // first daemon spawn against a fresh worktree easily takes 8-12s,
+  // which surfaced as `connectToDaemon: timed out after 5000ms` against
+  // acme on this machine. Bump the default to 30s; the daemon does
+  // not get spawned often enough for a wider window to bother anyone,
+  // and a 30s budget also covers slower machines (CI, throttled CPUs).
+  // The corresponding `connectToDaemonSession` watchdog is independent
+  // and progress-based, so this raise doesn't affect attach behaviour
+  // post-spawn.
+  const { spawnTimeoutMs = 30_000, pollMs = 100, daemonEntry } = opts;
 
   // Escape hatch for CI/tests and for the MCP-debug workflow where the
   // daemon was started out-of-band. Matches the `RN_DEV_DAEMON_SOCK` hook
@@ -214,17 +231,53 @@ export function spawnDetachedDaemon(
   //   - .tsx → bun (every dev path the project supports)
   //   - .js → process.execPath when it looks like node, else node
   const interpreter = pickDaemonInterpreter(entry);
+
+  // Capture daemon stdout + stderr to ~/.rn-dev/logs/daemon-<wt>-<ts>.log.
+  // Pre-fix: stdio: "ignore" discarded both, leaving a crashed daemon
+  // impossible to diagnose — the only signal upstream got was the
+  // socket dying (e.g. the renderer's "Daemon disconnected (metro):
+  // unknown" surfaces from supervisor.ts:253). With this redirect, a
+  // crash leaves a stack trace on disk that matches the daemon's
+  // wall-clock spawn time. One log file per spawn (no rotation
+  // needed yet); compaction can land later if volume becomes a
+  // concern.
+  const logsDir = join(homedir(), ".rn-dev", "logs");
+  mkdirSync(logsDir, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const logPath = join(logsDir, `daemon-${basename(worktree)}-${ts}.log`);
+  const logFd = openSync(logPath, "a");
+
+  // Electron launched outside a shell context (Finder, dock, packaged
+  // app, even Playwright on some CI runners) inherits a barebones PATH
+  // that doesn't include `~/.bun/bin`, `/opt/homebrew/bin`, or the
+  // user's nodenv/nvm shims. The result is `Error: spawn bun ENOENT`
+  // — the daemon never starts, the renderer hangs on
+  // `connectToDaemon: timed out` until the watchdog fires. Resolve
+  // the interpreter to an absolute path BEFORE spawning so PATH gaps
+  // can't kill us.
+  const interpreterAbsPath = resolveInterpreterAbsolute(interpreter);
   const child = spawn(
-    interpreter,
+    interpreterAbsPath,
     interpreter === "bun"
       ? ["run", entry, "daemon", worktree, "--foreground"]
       : [entry, "daemon", worktree, "--foreground"],
     {
       detached: true,
-      stdio: "ignore",
+      // stdin: ignore (daemon doesn't read stdin); stdout + stderr
+      // share the same log fd so write order matches what a terminal
+      // would have shown.
+      stdio: ["ignore", logFd, logFd],
       cwd: worktree,
+      // Augment PATH with the typical user-shell locations so anything
+      // the daemon itself spawns (pnpm, pod, xcodebuild, watchman) can
+      // also find its tools regardless of how Electron was launched.
+      env: { ...process.env, PATH: augmentedPath() },
     },
   );
+  // The OS keeps the FD open in the spawned child; the parent's
+  // reference is now superfluous and would prevent process tear-down
+  // from releasing the file handle promptly.
+  closeSync(logFd);
   child.unref();
   return child;
 }
@@ -241,6 +294,155 @@ function pickDaemonInterpreter(entry: string): string {
     "electron" in (process.versions as Record<string, unknown>);
   if (isElectron) return "node";
   return process.execPath;
+}
+
+/**
+ * The list of directories any user-installed dev tool tends to live
+ * in. Order matters — first hit wins so /opt/homebrew shadows the
+ * less-common /usr/local on Apple Silicon, and ~/.bun/bin shadows
+ * homebrew's `bun` (which is sometimes outdated).
+ */
+function userShellPathExtras(): string[] {
+  const home = homedir();
+  return [
+    join(home, ".bun", "bin"),
+    join(home, ".local", "bin"),
+    join(home, ".nodenv", "shims"),
+    join(home, ".nvm", "versions", "node", "current", "bin"),
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ];
+}
+
+function augmentedPath(): string {
+  const extras = userShellPathExtras().filter((p) => existsSync(p));
+  const current = process.env.PATH ?? "";
+  // De-dup but preserve order: extras first (so they shadow anything
+  // Electron's anaemic PATH might have brought), then the inherited
+  // PATH for anything we didn't explicitly enumerate.
+  const seen = new Set<string>();
+  const merged: string[] = [];
+  for (const dir of [...extras, ...current.split(":")]) {
+    if (!dir) continue;
+    if (seen.has(dir)) continue;
+    seen.add(dir);
+    merged.push(dir);
+  }
+  return merged.join(":");
+}
+
+/**
+ * Resolve the interpreter's absolute path so `spawn()` doesn't have
+ * to depend on the inherited PATH or per-cwd version-manager state.
+ *
+ * Pre-fix this only checked the shim dirs (e.g. `~/.nodenv/shims/`),
+ * which routes through the version manager AT RUNTIME using
+ * `.node-version` lookup from the spawned cwd. That bit us hard:
+ * acme's `.node-version` is 24.10.0, bun is installed for 20.18.0 +
+ * 22.17.0 only, and the daemon spawn cwd is acme — so the shim
+ * resolved 24.10.0 and emitted `nodenv: bun: command not found` to
+ * the daemon log file (then the renderer hung on
+ * `connectToDaemon: timed out`).
+ *
+ * Fix: prefer the actual VERSION-SPECIFIC binary path
+ * (`~/.nodenv/versions/<v>/bin/<name>`) over the shim. We pick the
+ * highest-version dir that has the binary so a user with multiple
+ * Node versions installed gets a current toolchain.
+ *
+ * Order of preference:
+ *   1. Absolute path passed in (override / execPath).
+ *   2. Version-specific paths under `~/.nodenv/versions/<v>/bin/`,
+ *      `~/.nvm/versions/node/<v>/bin/`, `~/.fnm/node-versions/<v>/bin/`.
+ *      Highest semver wins.
+ *   3. The static well-known dirs from `userShellPathExtras()` —
+ *      `~/.bun/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, etc.
+ *   4. Bare name — final fallback so spawn's ENOENT surfaces
+ *      diagnostically (and against our augmented env.PATH which is
+ *      better than the inherited Electron one).
+ */
+function resolveInterpreterAbsolute(name: string): string {
+  // If the caller passed an absolute path (RN_DEV_DAEMON_INTERPRETER
+  // override, or process.execPath as fallback), use it verbatim.
+  if (name.startsWith("/")) return name;
+  // Standard node binary in a Node-running parent — use its execPath.
+  if (name === "node") {
+    const exe = process.execPath;
+    // Electron's execPath is the electron binary; reject and fall
+    // through to PATH search.
+    const isElectron =
+      typeof process.versions === "object" &&
+      "electron" in (process.versions as Record<string, unknown>);
+    if (!isElectron && exe.endsWith("/node")) return exe;
+  }
+  // 1) Version-specific binaries (skip the shim — see comment above).
+  const versioned = findVersionedBinary(name);
+  if (versioned) return versioned;
+  // 2) Static well-known dirs (note: `userShellPathExtras` includes
+  //    the nodenv SHIMS path; we still want it as a last resort
+  //    because the user may have a single-version setup where the
+  //    shim resolves fine).
+  const candidates = userShellPathExtras().map((dir) => join(dir, name));
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  // 3) Final fallback — let spawn fail with ENOENT against the
+  //    augmented env.PATH so the error message is at least diagnostic.
+  return name;
+}
+
+/**
+ * Walk the per-version dirs of common Node version managers and
+ * return the path to `<name>` from the highest version that has it.
+ * Returns null if no version has the binary.
+ */
+function findVersionedBinary(name: string): string | null {
+  const home = homedir();
+  const versionsRoots: Array<{ root: string; binSubpath: string[] }> = [
+    { root: join(home, ".nodenv", "versions"), binSubpath: ["bin"] },
+    { root: join(home, ".nvm", "versions", "node"), binSubpath: ["bin"] },
+    { root: join(home, ".fnm", "node-versions"), binSubpath: ["installation", "bin"] },
+  ];
+  let bestPath: string | null = null;
+  let bestVer: number[] | null = null;
+  for (const { root, binSubpath } of versionsRoots) {
+    if (!existsSync(root)) continue;
+    let entries: string[];
+    try {
+      // Use require here to avoid the dynamic-import dance — this is a
+      // sync helper called from spawn().
+      entries = (require("node:fs") as typeof import("node:fs"))
+        .readdirSync(root);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const candidate = join(root, entry, ...binSubpath, name);
+      if (!existsSync(candidate)) continue;
+      const parts = entry.replace(/^v/, "").split(".").map((s) => Number(s));
+      if (parts.some((p) => Number.isNaN(p))) continue;
+      if (!bestVer || compareSemver(parts, bestVer) > 0) {
+        bestVer = parts;
+        bestPath = candidate;
+      }
+    }
+  }
+  return bestPath;
+}
+
+function compareSemver(a: number[], b: number[]): number {
+  const len = Math.max(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const av = a[i] ?? 0;
+    const bv = b[i] ?? 0;
+    if (av !== bv) return av - bv;
+  }
+  return 0;
 }
 
 export async function waitForSocket(

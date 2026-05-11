@@ -12,6 +12,7 @@ import {
 } from "@rn-dev/module-sdk";
 import type { RnDevModule } from "../core/types.js";
 import { isDisabled as isModuleDisabled } from "./disabled-flag.js";
+import { assertBuiltInAllowed } from "./built-in-allowlist.js";
 import { warnIfUnknownPermission } from "../core/module-host/capabilities.js";
 
 // ---------------------------------------------------------------------------
@@ -96,6 +97,16 @@ export interface LoadManifestsResult {
 export class ModuleRegistry {
   private modules: Map<string, RnDevModule> = new Map();
   private manifestModules: Map<string, RegisteredModule> = new Map();
+
+  // Phase H2c — type-erased storage for in-process built-in capability
+  // instances. Keyed by manifest.id (built-ins are always global scope).
+  // `unknown` is the right type here for the same reason React Context
+  // stores `unknown`: registration sites know the concrete capability
+  // shape, and `getBuiltIn<T>(id)` lets call sites narrow at retrieval
+  // via the type parameter. The registry never inspects the value
+  // itself. This is the project's documented escape hatch for the
+  // "no any/no unknown" rule (CLAUDE.md).
+  private builtInInstances: Map<string, unknown> = new Map();
 
   // -------------------------------------------------------------------------
   // Ink (legacy) modules — unchanged API
@@ -185,7 +196,7 @@ export class ModuleRegistry {
    */
   registerBuiltIn(
     manifest: ModuleManifest,
-    options: { scopeUnit?: string } = {},
+    options: { scopeUnit?: string; instance?: unknown } = {},
   ): RegisteredModule {
     const validation = validateManifest(manifest);
     if (!validation.valid) {
@@ -197,6 +208,9 @@ export class ModuleRegistry {
         { errors: validation.errors },
       );
     }
+    // Allowlist check happens AFTER schema validation so `manifest.id`
+    // is known well-formed before we read it.
+    assertBuiltInAllowed(validation.manifest.id);
     enforceToolPrefix(validation.manifest, { isBuiltIn: true });
 
     const scopeUnit =
@@ -211,7 +225,49 @@ export class ModuleRegistry {
       kind: "built-in-privileged",
     };
     this.registerManifest(registered);
+    if (options.instance !== undefined) {
+      this.builtInInstances.set(validation.manifest.id, options.instance);
+    }
     return registered;
+  }
+
+  /**
+   * Phase H2c — single-source-of-truth resolver for in-process built-in
+   * capabilities. Throws if `id` was never `registerBuiltIn`'d, or if
+   * the registration didn't include an `instance` (e.g. the synthetic
+   * `session` built-in is manifest-only and has no capability object).
+   *
+   * Lives on `ModuleRegistry` rather than `ModuleHostManager` because
+   * `ModuleHostManager.acquire()` already throws `E_BUILT_IN_NOT_SPAWNABLE`
+   * for built-in-privileged manifests — keeping the resolver separate
+   * preserves that carve-out invariant at the type level (architecture-
+   * strategist finding 4).
+   *
+   * The type parameter `T` is the caller's contract: they know the
+   * concrete capability interface that was registered. The registry
+   * itself is type-erased (see `builtInInstances` field comment).
+   */
+  getBuiltIn<T>(id: string): T {
+    if (!this.builtInInstances.has(id)) {
+      const known = this.getManifest(id, "global");
+      if (known === undefined) {
+        throw new Error(
+          `ModuleRegistry.getBuiltIn("${id}"): no built-in with that id has been registered.`,
+        );
+      }
+      throw new Error(
+        `ModuleRegistry.getBuiltIn("${id}"): module is registered as ` +
+          `built-in but no capability instance was provided to ` +
+          `registerBuiltIn(). Either pass { instance } at registration ` +
+          `time or use getManifest() if only the manifest is needed.`,
+      );
+    }
+    return this.builtInInstances.get(id) as T;
+  }
+
+  /** Phase H2c — non-throwing variant for callers that need to branch. */
+  hasBuiltInInstance(id: string): boolean {
+    return this.builtInInstances.has(id);
   }
 
   unregisterManifest(id: string, scopeUnit: string): boolean {

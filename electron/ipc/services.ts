@@ -35,6 +35,7 @@ import { listDevices } from '../../src/core/device.js';
 import { detectAllPackageManagers, detectPackageManager } from '../../src/core/clean.js';
 import { connectElectronToDaemon } from '../daemon-connect.js';
 import { serviceBus } from '../../src/app/service-bus.js';
+import { triggerBuildsIfNeeded } from '../../src/app/auto-build.js';
 import type { DaemonSession } from '../../src/app/client/session.js';
 import type { Profile } from '../../src/core/types.js';
 import { instances, state, send, appendLog, toSummary, findFreePort, type InstanceState } from './state.js';
@@ -127,10 +128,22 @@ async function settlePackageManager(
 
 /**
  * Detect Manual code signing on iOS projects + prompt the renderer to
- * switch to Automatic. The daemon's build flow will break on Manual
- * signing without the Fastlane-managed certificates; fixing it here
- * BEFORE `connectElectronToDaemon` keeps the prompt in the same UX
- * lane as the package-manager conflict.
+ * switch to Automatic. **Default is to KEEP Manual signing** — many
+ * projects (acme is the canonical case) have Manual signing wired
+ * intentionally with proper distribution certs, and our auto-flip
+ * destroys that configuration.
+ *
+ * Pre-fix this prompt offered "Switch to Automatic" as the FIRST
+ * option (so the muscle-memory click breaks signing). Post-fix the
+ * order is reversed: Skip is the safe default; Switch is the
+ * remediation for projects that DON'T have certs locally. The action
+ * label is also more honest ("Rewrite project.pbxproj") so the user
+ * sees what's about to happen.
+ *
+ * The right long-term fix is the `build/discover-bundles` hook —
+ * the mobile app declares its `signingStyle` per bundle, and this
+ * prompt skips the projects that have Manual signing on purpose. See
+ * docs/plans/2026-05-05-build-bundle-hook-design.md.
  */
 async function settleCodeSigning(
   instance: InstanceState,
@@ -161,24 +174,33 @@ async function settleCodeSigning(
     const manualMatches = content.match(/CODE_SIGN_STYLE\s*=\s*Manual/g);
     if (!manualMatches || manualMatches.length === 0) break;
 
-    emit(`⚠ Manual code signing detected (${manualMatches.length} targets)`);
+    emit(`ℹ Manual code signing detected (${manualMatches.length} targets) — keeping as-is. Run "Switch to Automatic" only if local builds fail with a missing-cert error.`);
     const signingResponse = await new Promise<string>((resolve) => {
       const promptId = `signing-${instance.id}-${Date.now()}`;
       send('instance:prompt', {
         instanceId: instance.id,
         promptId,
-        title: 'Code Signing Conflict',
+        title: 'Code Signing — Manual',
         message:
-          `This project uses Manual code signing (set by CI/Fastlane). Local builds will fail without the CI certificates.\n\nSwitch to Automatic signing? This won't break CI — Fastlane overrides it at build time.`,
+          `This project uses Manual code signing. Most projects with Manual ` +
+          `signing have their distribution certificates set up correctly — ` +
+          `keep it as-is unless local builds fail with a "no matching ` +
+          `provisioning profile" error.\n\nIf you do need Automatic, this ` +
+          `will rewrite project.pbxproj on disk (committed file). The change ` +
+          `is reversible via git.`,
+        // Skip first = the safe default. Pre-fix Switch was first and
+        // cost the user their pbxproj.
         options: [
-          { value: 'fix', label: '✔ Switch to Automatic signing', cleanup: 'Safe — CI overrides this' },
-          { value: 'skip', label: 'Skip — I have the certificates' },
+          { value: 'skip', label: '✔ Keep Manual signing (recommended)' },
+          { value: 'fix', label: 'Rewrite project.pbxproj → Automatic signing' },
         ],
       });
       ipcMain.handle(`prompt:respond:${promptId}`, async (_, data) => {
         resolve(data.value);
         return { ok: true };
       });
+      // Default-on-timeout is now 'skip' (was 'skip' previously too,
+      // pinning here to make the safe default explicit).
       setTimeout(() => resolve('skip'), 60_000);
     });
 
@@ -190,9 +212,9 @@ async function settleCodeSigning(
         .replace(/PROVISIONING_PROFILE_SPECIFIER\s*=\s*"[^"]*"/g, 'PROVISIONING_PROFILE_SPECIFIER = ""')
         .replace(/PROVISIONING_PROFILE_SPECIFIER\s*=\s*[^;]+;/g, 'PROVISIONING_PROFILE_SPECIFIER = "";');
       require('fs').writeFileSync(pbxproj, fixed);
-      emit('  ✔ Switched to Automatic signing');
+      emit('  ✔ Switched to Automatic signing (project.pbxproj modified — review with git diff)');
     } else {
-      emit('  ℹ Keeping Manual signing');
+      emit('  ✔ Keeping Manual signing');
     }
     break;
   }
@@ -392,5 +414,14 @@ export async function startRealServices(
   const session = await attachDaemonSession(defaultProfile, targetProjectRoot);
 
   wireInstanceEvents(instance, session);
+
+  // Mirror the TUI start-flow's auto-build: dirty/clean/ultra-clean modes
+  // expect a fresh build after Metro is up; quick mode skips it.
+  // Without this call, the Electron GUI would silently never build —
+  // the renderer's `instance:build:*` events would never fire and the
+  // user's app would not get reinstalled on the device after a code
+  // change.
+  triggerBuildsIfNeeded(session, defaultProfile, targetProjectRoot);
+
   return session;
 }

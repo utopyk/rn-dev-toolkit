@@ -301,4 +301,52 @@ describe("CdpProxy transparency", () => {
     fx.upstreamSockets[0]!.close();
     await expect(p).rejects.toThrow(/upstream-closed/);
   });
+
+  it("Bug A regression — downstream connect against an unreachable upstream does not bubble an unhandled rejection", async () => {
+    // Repro: DevToolsManager creates a proxy with the placeholder URL
+    // `ws://127.0.0.1:<metro-port>/inspector/no-target` while no Hermes
+    // target is selected. When Fusebox connects to that proxy, the proxy
+    // calls `void this.openUpstream()` — pre-fix, the rejected promise
+    // bubbled as an unhandled rejection and crashed the daemon under
+    // Bun's default unhandled-rejection policy. Captured in
+    // ~/.rn-dev/logs/daemon-acme-mobile-app-2026-05-04T20-57-23-814Z.log.
+
+    // Capture any unhandled rejection that fires during this test.
+    const rejections: unknown[] = [];
+    const onRejection = (reason: unknown): void => {
+      rejections.push(reason);
+    };
+    process.on("unhandledRejection", onRejection);
+
+    try {
+      // Pick a random unused port for the unreachable upstream.
+      const probe = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+      await new Promise<void>((r) => probe.once("listening", () => r()));
+      const unusedPort = (probe.address() as AddressInfo).port;
+      await new Promise<void>((r) => probe.close(() => r()));
+
+      const proxy = new CdpProxy({
+        upstreamUrl: `ws://127.0.0.1:${unusedPort}/inspector/no-target`,
+        // No onError, no onUpstreamClose — mirrors the no-target call site
+        // in src/core/devtools.ts:210-214.
+      });
+      proxies.push(proxy);
+      const { port, nonce } = await proxy.start();
+
+      const fusebox = await connectFusebox(port, nonce);
+      fuseboxen.push(fusebox);
+
+      // Give openUpstream time to try, fail, and (pre-fix) throw.
+      await waitMs(150);
+
+      expect(
+        rejections,
+        `Unhandled rejection bubbled from CdpProxy.openUpstream — daemon would crash under Bun. Captured: ${rejections
+          .map((r) => (r instanceof Error ? r.message : String(r)))
+          .join("; ")}`,
+      ).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
 });

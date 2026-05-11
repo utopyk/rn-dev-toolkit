@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   ModuleRegistry,
   builtInModulePath,
@@ -6,9 +6,23 @@ import {
 import {
   devSpaceManifest,
   lintTestManifest,
+  sessionManifest,
   settingsManifest,
 } from "../built-in/manifests.js";
+import {
+  __addBuiltInAllowedForTests,
+  __resetBuiltInAllowlistForTests,
+} from "../built-in-allowlist.js";
 import type { ModuleManifest } from "@rn-dev/module-sdk";
+
+beforeEach(() => {
+  // Synthetic fixture id used by the tool-prefix-waiver test below.
+  __addBuiltInAllowedForTests("privileged-tools");
+});
+
+afterEach(() => {
+  __resetBuiltInAllowlistForTests();
+});
 
 describe("registerBuiltIn — stamps kind + sentinel path + isBuiltIn", () => {
   it("stamps kind='built-in-privileged', isBuiltIn=true, state='active'", () => {
@@ -81,25 +95,36 @@ describe("registerBuiltIn — stamps kind + sentinel path + isBuiltIn", () => {
 });
 
 describe("built-in manifests — shape + contributes blocks", () => {
-  it("each of the 3 existing built-ins registers without error", () => {
+  it("each of the 4 existing built-ins registers without error", () => {
     // Phase 11: `metro-logs` moved out of built-ins into the
-    // `@rn-dev-modules/metro-logs` 3p module — the three remaining
-    // built-ins below are the ones kept in-process for Phase 11+.
+    // `@rn-dev-modules/metro-logs` 3p module. Phase H1: `session`
+    // joins the in-process built-ins to host the daemon's lifecycle
+    // hooks (`init` + `profile-changed`).
     const registry = new ModuleRegistry();
     registry.registerBuiltIn(devSpaceManifest);
     registry.registerBuiltIn(lintTestManifest);
     registry.registerBuiltIn(settingsManifest);
+    registry.registerBuiltIn(sessionManifest);
 
     expect(
       registry.getAllManifests().map((m) => m.manifest.id).sort(),
-    ).toEqual(["dev-space", "lint-test", "settings"]);
+    ).toEqual(["dev-space", "lint-test", "session", "settings"]);
   });
 
   it("settings contributes a config schema", () => {
     expect(settingsManifest.contributes?.config?.schema).toBeDefined();
   });
 
-  it("every built-in contributes a TUI view keyed by the module id", () => {
+  it("session declares provides.hooks for init + profile-changed", () => {
+    expect(sessionManifest.provides?.hooks).toEqual(["init", "profile-changed"]);
+  });
+
+  it("session contributes no TUI/MCP surface (host-only contribution-points)", () => {
+    expect(sessionManifest.contributes).toBeUndefined();
+  });
+
+  it("every TUI-bearing built-in contributes a view keyed by the module id", () => {
+    // session is exempt — it has no UI surface.
     const manifests = [
       devSpaceManifest,
       lintTestManifest,

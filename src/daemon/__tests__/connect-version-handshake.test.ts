@@ -1,5 +1,6 @@
 import net from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -116,6 +117,105 @@ function startFakeOldDaemon(
   return { sockPath, pidPath, closed };
 }
 
+/**
+ * Read the pid recorded by the daemon at `<worktree>/.rn-dev/pid` and return
+ * it. Returns `null` if the file is missing or unparseable. The pid file
+ * format is set by `ModuleLockfile.acquire` — see `src/daemon/spawn.ts`.
+ */
+function readDaemonPid(worktree: string): number | null {
+  const pidPath = join(worktree, ".rn-dev", "pid");
+  if (!existsSync(pidPath)) return null;
+  try {
+    const raw = readFileSync(pidPath, "utf8");
+    const parsed = JSON.parse(raw) as { pid?: unknown };
+    return typeof parsed.pid === "number" ? parsed.pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processIsAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return false;
+}
+
+/**
+ * Tear down a worktree-scoped daemon defensively. Pre-fix, cleanup ran in
+ * push order so `rmSync(worktree)` deleted the sock before the
+ * `daemon/shutdown` request could reach it, and there was no SIGKILL
+ * fallback when the daemon outlived its socket. The result was 5+ leaked
+ * `bun run … daemon /var/folders/.../rn-dev-version-…` processes per CI
+ * run. This helper:
+ *
+ *   1. Reads the pid file BEFORE removing the worktree.
+ *   2. Sends `daemon/shutdown` (best-effort) and waits up to 2s for exit.
+ *   3. SIGKILLs the pid if the daemon is still alive.
+ *   4. Then removes the worktree.
+ */
+async function teardownDaemonAndWorktree(
+  worktree: string,
+  client: IpcClient | null,
+): Promise<void> {
+  const pid = readDaemonPid(worktree);
+  if (client) {
+    try {
+      await client.send({
+        type: "command",
+        action: "daemon/shutdown",
+        id: "test-cleanup",
+      });
+    } catch {
+      /* best-effort — daemon may already be down or sock torn */
+    }
+  }
+  if (pid !== null && processIsAlive(pid)) {
+    const exited = await waitForExit(pid, 2_000);
+    if (!exited && processIsAlive(pid)) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+  try {
+    rmSync(worktree, { recursive: true, force: true });
+  } catch {
+    /* best-effort */
+  }
+}
+
+/**
+ * Count the number of leaked test-fixture daemons currently running. Matches
+ * any `bun … daemon /…/rn-dev-version-…` process — both `-handshake-` and
+ * `-fastpath-` fixtures created by this suite. Used by Bug F's regression
+ * guard.
+ */
+function countLeakedDaemons(): number {
+  try {
+    const out = execSync(
+      "pgrep -fl 'src/index.tsx daemon .*rn-dev-version-' || true",
+      { encoding: "utf8" },
+    );
+    return out.split("\n").filter((line) => line.trim().length > 0).length;
+  } catch {
+    return 0;
+  }
+}
+
 async function pingDaemonVersion(client: IpcClient): Promise<string> {
   const resp = await client.send({
     type: "command",
@@ -127,27 +227,37 @@ async function pingDaemonVersion(client: IpcClient): Promise<string> {
 }
 
 describe("connectToDaemon — version handshake", () => {
-  const cleanups: Array<() => Promise<void> | void> = [];
+  // Each test registers its (worktree, client) tuple with the active scope
+  // before doing any work that could throw. afterEach drains the scope in
+  // reverse insertion order so the daemon is always shut down BEFORE its
+  // worktree is removed (Bug F: pre-fix, the rmSync ran before
+  // daemon/shutdown could reach the sock, leaking the daemon process).
+  const teardowns: Array<{ worktree: string; client: IpcClient | null }> = [];
+  const extraCleanups: Array<() => Promise<void> | void> = [];
 
   afterEach(async () => {
-    for (const fn of cleanups.splice(0)) {
+    for (const fn of extraCleanups.splice(0).reverse()) {
       try {
         await fn();
       } catch {
         /* best-effort */
       }
     }
+    for (const t of teardowns.splice(0).reverse()) {
+      await teardownDaemonAndWorktree(t.worktree, t.client);
+    }
   });
 
   it("detects a stale daemon (mismatched version), shuts it down, and cold-spawns a fresh one", async () => {
     const worktree = mkdtempSync(join(tmpdir(), "rn-dev-version-handshake-"));
-    cleanups.push(() => rmSync(worktree, { recursive: true, force: true }));
+    const teardown = { worktree, client: null as IpcClient | null };
+    teardowns.push(teardown);
 
     // Stand up the fake old daemon and confirm a direct ping returns the
     // stale version — proves the fixture is wired correctly before the
     // production code under test even runs.
     const fake = startFakeOldDaemon(worktree, "0.0.0");
-    cleanups.push(() => fake.closed);
+    extraCleanups.push(() => fake.closed);
 
     // Production code under test: connectToDaemon should notice the
     // version mismatch, shutdown the fake, and cold-spawn a fresh daemon
@@ -159,17 +269,7 @@ describe("connectToDaemon — version handshake", () => {
       spawnTimeoutMs: 10_000,
       pollMs: 50,
     });
-    cleanups.push(async () => {
-      try {
-        await client.send({
-          type: "command",
-          action: "daemon/shutdown",
-          id: "test-cleanup",
-        });
-      } catch {
-        /* daemon may already be down */
-      }
-    });
+    teardown.client = client;
 
     const version = await pingDaemonVersion(client);
     expect(
@@ -187,24 +287,15 @@ describe("connectToDaemon — version handshake", () => {
     // assert "no restart" by capturing the daemon's pid via daemon/ping
     // before and after the second connect.
     const worktree = mkdtempSync(join(tmpdir(), "rn-dev-version-fastpath-"));
-    cleanups.push(() => rmSync(worktree, { recursive: true, force: true }));
+    const teardown = { worktree, client: null as IpcClient | null };
+    teardowns.push(teardown);
 
     const first = await connectToDaemon(worktree, {
       daemonEntry: CLI_ENTRY,
       spawnTimeoutMs: 10_000,
       pollMs: 50,
     });
-    cleanups.push(async () => {
-      try {
-        await first.send({
-          type: "command",
-          action: "daemon/shutdown",
-          id: "test-cleanup",
-        });
-      } catch {
-        /* best-effort */
-      }
-    });
+    teardown.client = first;
 
     const versionBefore = await pingDaemonVersion(first);
 
@@ -220,5 +311,37 @@ describe("connectToDaemon — version handshake", () => {
     const versionAfter = await pingDaemonVersion(second);
 
     expect(versionAfter).toBe(versionBefore);
+  }, 30_000);
+
+  it("Bug F regression — back-to-back tests leave no leftover daemon processes", async () => {
+    // Pre-fix, this assertion was load-bearing: each prior test left a
+    // detached `bun … daemon …rn-dev-version-…` process behind because
+    // the worktree (and its sock) was removed before daemon/shutdown
+    // could reach the daemon. Snapshot the current count, run a tiny
+    // session, run the existing teardown, and assert the count is back
+    // to the snapshot.
+    const before = countLeakedDaemons();
+
+    const worktree = mkdtempSync(join(tmpdir(), "rn-dev-version-handshake-"));
+    const client = await connectToDaemon(worktree, {
+      daemonEntry: CLI_ENTRY,
+      spawnTimeoutMs: 10_000,
+      pollMs: 50,
+    });
+    // Force a real round-trip so the daemon is definitely up before
+    // teardown.
+    const v = await pingDaemonVersion(client);
+    expect(v).toMatch(/^\d+\.\d+\.\d+/);
+
+    await teardownDaemonAndWorktree(worktree, client);
+
+    // Give SIGKILL fallback a beat to register in ps.
+    await new Promise((r) => setTimeout(r, 200));
+
+    const after = countLeakedDaemons();
+    expect(
+      after,
+      `Daemon process leak detected: ${after} > ${before}. Pre-fix this delta grew by 1 per test run.`,
+    ).toBeLessThanOrEqual(before);
   }, 30_000);
 });

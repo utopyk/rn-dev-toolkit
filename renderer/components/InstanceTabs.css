@@ -96,37 +96,9 @@
 .instance-tab.active .instance-tab-close { opacity: 1; }
 .instance-tab-close:hover { background: var(--error); color: #fff; }
 
-.instance-tab-close.confirming {
-  opacity: 1;
-  background: var(--booting);
-  color: var(--ink);
-  font-weight: 700;
-  font-size: 10px;
-}
-
-.instance-tab-confirm {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--surface);
-  color: var(--ink);
-  font-size: 11px;
-  font-weight: 600;
-  padding: 6px 12px;
-  border-radius: var(--radius-pill);
-  box-shadow: var(--neu-raised-xs), var(--glow-medium);
-  border: 1px solid var(--accent-border);
-  white-space: nowrap;
-  z-index: 10;
-  pointer-events: none;
-  animation: fade-in-confirm 0.15s ease;
-}
-
-@keyframes fade-in-confirm {
-  from { opacity: 0; transform: translateX(-50%) translateY(-4px); }
-  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
-}
+/* Two-click confirm + .confirming animation + .instance-tab-confirm chip
+ * removed 2026-05-07. The "are you sure" gate moved to a real modal in
+ * renderer/App.tsx after the inline confirm was reported as unusual UX. */
 
 .instance-tab-add {
   display: flex;

@@ -98,6 +98,14 @@ export interface ConnectElectronToDaemonOptions {
 export async function connectElectronToDaemon(
   opts: ConnectElectronToDaemonOptions,
 ): Promise<DaemonSession> {
+  // No mode-based timeout. `connectToDaemonSession` uses an idle
+  // watchdog — it fires only when the daemon goes silent (no events at
+  // all) for `sessionReadyIdleTimeoutMs` (default 90s). A clean boot
+  // that legitimately spends 5 minutes in `pnpm install` keeps petting
+  // the watchdog through pnpm's per-package log lines; a 20-minute
+  // xcodebuild keeps petting it through xcodebuild's per-file lines.
+  // Slow machine + heavy build is no longer a kill criterion. Only a
+  // truly stuck daemon — no progress events whatsoever — fails fast.
   const session = await connectToDaemonSession(opts.projectRoot, opts.profile, {
     daemonEntry: opts.daemonEntry ?? resolveDaemonEntry(),
   });

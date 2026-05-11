@@ -5,6 +5,7 @@ import { getCurrentBranch, getWorktrees } from '../../src/core/project.js';
 import { listDevices } from '../../src/core/device.js';
 import { execShellAsync } from '../../src/core/exec-async.js';
 import { detectAllPackageManagers } from '../../src/core/clean.js';
+import { discoverBundles } from '../../src/core/build-discovery.js';
 import { state } from './state.js';
 
 export function registerWizardHandlers() {
@@ -58,6 +59,17 @@ export function registerWizardHandlers() {
       };
     } catch (err: any) {
       return { ok: false, error: err.message?.slice(0, 200) ?? 'Failed to create worktree' };
+    }
+  });
+
+  ipcMain.handle('wizard:getBundles', async (_, platform: 'ios' | 'android') => {
+    if (!state.projectRoot) return { bundles: [] };
+    if (platform !== 'ios' && platform !== 'android') return { bundles: [] };
+    try {
+      return await discoverBundles({ projectRoot: state.projectRoot, platform });
+    } catch (err: any) {
+      console.error('[ipc] wizard:getBundles error:', err?.message);
+      return { bundles: [] };
     }
   });
 

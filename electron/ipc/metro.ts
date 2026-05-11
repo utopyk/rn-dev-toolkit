@@ -12,6 +12,15 @@ import { instances, state, appendLog, send } from './state.js';
 let metroClient: MetroClient | null = null;
 serviceBus.on('metro', (client: MetroClient) => {
   metroClient = client;
+  // Bug B follow-on — Metro shares the daemon-disconnect failure mode
+  // with DevTools: a `metro:reload` IPC against a dead daemon-client
+  // surfaced `Error: subscribe.send: connection already closed` from
+  // src/core/ipc.ts:332 (the user-reported stack on Bug A). Null the
+  // cached ref so subsequent calls fall through to the "Metro not
+  // running" branch instead of throwing across the IPC boundary.
+  client.on('disconnected', () => {
+    if (metroClient === client) metroClient = null;
+  });
 });
 
 export function registerMetroHandlers() {

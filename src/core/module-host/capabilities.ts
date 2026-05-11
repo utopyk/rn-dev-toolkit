@@ -74,12 +74,48 @@ export const KNOWN_PERMISSIONS: ReadonlyArray<string> = [
   "exec:simctl",
   "exec:react-native",
   "fs:artifacts",
+  // Phase H2d — gates HookHostCapability registration. Modules that need
+  // to fire OTHER modules' hooks programmatically (rare; mostly internal
+  // host code) declare this; consumers via manifest `consumes.hooks` do
+  // NOT need it — the host fires consumed hooks automatically.
+  "host:hooks:dispatch",
   "metro:logs:read",
   "metro:logs:mutate",
   "network:outbound",
 ];
 
 const KNOWN_PERMISSION_SET = new Set<string>(KNOWN_PERMISSIONS);
+
+/**
+ * Phase H2d — canonical capability ids the host registers, paired with
+ * `KNOWN_PERMISSIONS`. Same intent (typo detector at register-time, NOT
+ * a security boundary) but for the capability id surface rather than
+ * the permission strings that gate access to them.
+ *
+ * Adding a new built-in capability? Add its id here in the same commit
+ * so a typo in the register call surfaces a console warning instead of
+ * silently dropping the capability behind an unmatchable id.
+ */
+export const KNOWN_CAPABILITIES: ReadonlyArray<string> = [
+  // SDK-synthesized (also in RESERVED_CAPABILITY_IDS — listed for
+  // typo-detector completeness)
+  "appInfo",
+  "log",
+  // Subsystem capabilities registered at session boot
+  "artifacts",
+  "devtools",
+  "metro",
+  "metro-logs",
+  "modules",
+  // Phase H2d — built-in build module's hook-host capability surface.
+  // The factory binds the `build/` slot prefix; gated by
+  // `host:hooks:dispatch`. Future H3 capabilities (clean:hooks,
+  // metro:hooks, devtools:hooks, preflight:hooks) follow the same
+  // <module>:hooks naming.
+  "build:hooks",
+];
+
+const KNOWN_CAPABILITY_SET = new Set<string>(KNOWN_CAPABILITIES);
 
 /**
  * Phase 10 P2-7 / Phase 11 — permission aliases. Maps a legacy umbrella
@@ -163,6 +199,32 @@ export function resetUnknownPermissionWarningsForTests(): void {
   warnedUnknownPermissions.clear();
 }
 
+/**
+ * Phase H2d — capability-id typo detector, mirroring
+ * `warnIfUnknownPermission`. Called from `CapabilityRegistry.register()`
+ * on every non-reserved id so a typo in the register-call site (e.g.
+ * `"build:hook"` vs the canonical `"build:hooks"`) surfaces immediately
+ * instead of silently being shadowed at every `resolve()` callsite.
+ */
+const warnedUnknownCapabilities = new Set<string>();
+
+export function warnIfUnknownCapability(id: string): void {
+  if (KNOWN_CAPABILITY_SET.has(id)) return;
+  if (warnedUnknownCapabilities.has(id)) return;
+  warnedUnknownCapabilities.add(id);
+  // Same Security P2-B reasoning as warnIfUnknownPermission: don't
+  // enumerate the canonical list — readers can `import KNOWN_CAPABILITIES`.
+  // eslint-disable-next-line no-console
+  console.warn(
+    `[module-host] capability "${id}" is not on the host's canonical capability list — likely a typo. Consumers resolving by this id will never match.`,
+  );
+}
+
+/** Reset the warning dedup set — tests only. */
+export function resetUnknownCapabilityWarningsForTests(): void {
+  warnedUnknownCapabilities.clear();
+}
+
 export class CapabilityRegistry {
   private readonly entries = new Map<string, StoredCapability>();
 
@@ -175,6 +237,11 @@ export class CapabilityRegistry {
         `Capability id "${id}" is reserved (SDK synthesizes it client-side); pass { allowReserved: true } only from host startup.`,
       );
     }
+    // Phase H2d — typo-detector for the capability id itself. Warn-only
+    // (advisory, mirrors KNOWN_PERMISSIONS behaviour); the register call
+    // still succeeds so an out-of-tree built-in with a brand-new id can
+    // run during development before being added to the canonical list.
+    warnIfUnknownCapability(id);
     if (options.requiredPermission) {
       warnIfUnknownPermission(
         options.requiredPermission,

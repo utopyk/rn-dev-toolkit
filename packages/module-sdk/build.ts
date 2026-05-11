@@ -23,7 +23,7 @@ const result = await Bun.build({
   format: "esm",
   minify: false,
   sourcemap: "external",
-  external: ["vscode-jsonrpc", "ajv"],
+  external: ["vscode-jsonrpc", "ajv", "semver"],
 });
 
 if (!result.success) {

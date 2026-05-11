@@ -43,7 +43,7 @@ describe("fake-boot: built-in modules registered", () => {
     for (const c of cleanups.splice(0)) c();
   });
 
-  it("modules/list returns marketplace + settings + dev-space + lint-test under fake boot", async () => {
+  it("modules/list returns marketplace + settings + dev-space + lint-test + session + build under fake boot", async () => {
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
     const daemon = await spawnTestDaemon(worktree, {
@@ -60,7 +60,14 @@ describe("fake-boot: built-in modules registered", () => {
       });
       const payload = resp.payload as { modules?: Array<{ id: string }> };
       const ids = (payload.modules ?? []).map((m) => m.id).sort();
-      expect(ids).toEqual(["dev-space", "lint-test", "marketplace", "settings"]);
+      expect(ids).toEqual([
+        "build",
+        "dev-space",
+        "lint-test",
+        "marketplace",
+        "session",
+        "settings",
+      ]);
     } finally {
       session.disconnect();
     }

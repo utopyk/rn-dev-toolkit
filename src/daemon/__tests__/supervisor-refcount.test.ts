@@ -25,6 +25,8 @@ import { ArtifactStore } from "../../core/artifact.js";
 import { CapabilityRegistry } from "../../core/module-host/capabilities.js";
 import { MetroLogsStore } from "../../core/metro-logs/buffer.js";
 import { ModuleRegistry } from "../../modules/registry.js";
+import { HookManager } from "../../core/hooks/manager.js";
+import { getDefaultAuditLog } from "../../core/audit-log.js";
 
 // Phase 13.5 unit-level coverage of DaemonSupervisor.attach/release.
 // Integration coverage at src/app/client/__tests__/session-release.test.ts
@@ -71,6 +73,14 @@ function makeFakeBoot(): { boot: SessionBootFn; lastServices: { current: Session
       metroLogsStore: new MetroLogsStore(),
       capabilities: new CapabilityRegistry(),
       moduleEvents: new EventEmitter(),
+      hookManager: new HookManager({
+        auditLog: getDefaultAuditLog(),
+        daemonPid: process.pid,
+      }),
+      // Phase H2g — minimal stub; refcount tests don't fire hooks so the
+      // brand integrity isn't load-bearing here.
+      validatedProfile: opts.profile as never,
+      bootTrace: [],
       dispose: async () => {
         /* no-op */
       },

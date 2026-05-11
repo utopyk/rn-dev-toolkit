@@ -13,6 +13,22 @@ export interface Profile {
   env: Record<string, string>;
   packageManager?: "npm" | "yarn" | "pnpm"; // override auto-detection
   projectRoot: string;
+  /**
+   * iOS scheme to build (e.g. "Acme" vs "Acme-beta"). Optional —
+   * RN CLI defaults to the workspace name when unset, which is right
+   * for projects with a single user-facing scheme. Required when the
+   * project has multiple schemes with different signing configurations
+   * (the acme case: production vs beta have different cert chains).
+   * The right long-term home for this is a build hook the mobile app
+   * itself contributes — see `docs/plans/2026-05-05-build-bundle-hook-design.md`.
+   */
+  scheme?: string;
+  /**
+   * iOS configuration name. Optional — defaults to "Debug" for
+   * `buildVariant: "debug"` and "Release" for "release". Set when the
+   * project ships custom configurations (e.g. "DebugQA").
+   */
+  configuration?: string;
 }
 
 export interface PreflightConfig {

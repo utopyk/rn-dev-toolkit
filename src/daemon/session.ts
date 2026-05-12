@@ -10,6 +10,8 @@
 //   stopping -> stopped         (teardown complete)
 // No other transitions are legal — the supervisor enforces them.
 
+import type { SessionId } from "../core/identifiers.js";
+
 export type SessionStatus = "stopped" | "starting" | "running" | "stopping";
 
 /**
@@ -48,6 +50,26 @@ export const INITIAL_SESSION_STATE: SessionState = Object.freeze({
 // before the ArtifactStore-hashed key is computed (in the "starting"
 // state) it falls back to the absolute worktree path. 13.3 clients
 // should tolerate both representations until boot completes.
+//
+// Phase D1 — every variant gains `sessionId: SessionId` (DR-5). Both
+// fields coexist: `worktreeKey` keeps the existing service-internal
+// lookup path working in MetroManager/DevToolsManager; `sessionId` is
+// the new identity dimension that lets renderer + MCP route events to
+// the right tab/agent context. Lifted into the generic envelope so a
+// future variant addition can't accidentally omit one of the two.
+
+/**
+ * Common envelope for every SessionEvent variant. Discriminated by
+ * `kind`; carries both `worktreeKey` (legacy service-keying dimension)
+ * and `sessionId` (D1 identity dimension). Variants extend by binding
+ * `kind` and `data`.
+ */
+interface SessionEventEnvelope<K extends string, D> {
+  kind: K;
+  worktreeKey: string;
+  sessionId: SessionId;
+  data: D;
+}
 
 export type SessionEvent =
   | SessionStatusEvent
@@ -65,29 +87,25 @@ export type SessionEvent =
   | SessionLogEvent
   | HooksFiredEvent;
 
-export interface SessionStatusEvent {
-  kind: "session/status";
-  worktreeKey: string;
-  data: { status: SessionStatus };
-}
+export type SessionStatusEvent = SessionEventEnvelope<
+  "session/status",
+  { status: SessionStatus }
+>;
 
-export interface MetroStatusEvent {
-  kind: "metro/status";
-  worktreeKey: string;
-  data: { status: string };
-}
+export type MetroStatusEvent = SessionEventEnvelope<
+  "metro/status",
+  { status: string }
+>;
 
-export interface MetroLogEvent {
-  kind: "metro/log";
-  worktreeKey: string;
-  data: { line: string; stream: "stdout" | "stderr" };
-}
+export type MetroLogEvent = SessionEventEnvelope<
+  "metro/log",
+  { line: string; stream: "stdout" | "stderr" }
+>;
 
-export interface DevtoolsStatusEvent {
-  kind: "devtools/status";
-  worktreeKey: string;
-  data: DevtoolsStatusPayload;
-}
+export type DevtoolsStatusEvent = SessionEventEnvelope<
+  "devtools/status",
+  DevtoolsStatusPayload
+>;
 
 /**
  * DevTools publishes a loose `status` envelope — the manager decides
@@ -97,71 +115,64 @@ export interface DevtoolsStatusEvent {
  */
 export type DevtoolsStatusPayload = Record<string, unknown>;
 
-export interface ModulesStateChangedEvent {
-  kind: "modules/state-changed";
-  worktreeKey: string;
-  data: { moduleId: string; scopeUnit: string; from: string; to: string };
-}
+export type ModulesStateChangedEvent = SessionEventEnvelope<
+  "modules/state-changed",
+  { moduleId: string; scopeUnit: string; from: string; to: string }
+>;
 
-export interface ModulesCrashedEvent {
-  kind: "modules/crashed";
-  worktreeKey: string;
-  data: { moduleId: string; scopeUnit: string; reason: string };
-}
+export type ModulesCrashedEvent = SessionEventEnvelope<
+  "modules/crashed",
+  { moduleId: string; scopeUnit: string; reason: string }
+>;
 
-export interface ModulesFailedEvent {
-  kind: "modules/failed";
-  worktreeKey: string;
-  data: { moduleId: string; scopeUnit: string; reason: string };
-}
+export type ModulesFailedEvent = SessionEventEnvelope<
+  "modules/failed",
+  { moduleId: string; scopeUnit: string; reason: string }
+>;
 
 /**
  * Coalesced network-capture delta fired by DevToolsManager every 100ms
  * while a target session is attached. The payload carries identifiers
  * only — clients re-query `devtools/listNetwork` to resolve entries.
  */
-export interface DevtoolsDeltaEvent {
-  kind: "devtools/delta";
-  worktreeKey: string;
-  data: {
+export type DevtoolsDeltaEvent = SessionEventEnvelope<
+  "devtools/delta",
+  {
     addedIds: readonly string[];
     updatedIds: readonly string[];
     evictedIds: readonly string[];
-  };
-}
+  }
+>;
 
 // Phase H2b — `source` discriminator on every Builder wire event:
 // "builtin" today, "override" once H4's BuildHostCapability wrapper
 // starts synthesizing events from override hook scripts. Lets MCP
 // subscribers + the renderer distinguish "build failed" from "override
 // hook crashed" without re-checking the daemon's underlying state.
-export interface BuilderLineEvent {
-  kind: "builder/line";
-  worktreeKey: string;
-  data: {
+export type BuilderLineEvent = SessionEventEnvelope<
+  "builder/line",
+  {
     source: "builtin" | "override";
     text: string;
     stream: "stdout" | "stderr";
     replace?: boolean;
-  };
-}
+  }
+>;
 
-export interface BuilderProgressEvent {
-  kind: "builder/progress";
-  worktreeKey: string;
-  data: { source: "builtin" | "override"; phase: string };
-}
+export type BuilderProgressEvent = SessionEventEnvelope<
+  "builder/progress",
+  { source: "builtin" | "override"; phase: string }
+>;
 
-export interface BuilderDoneEvent {
-  kind: "builder/done";
-  worktreeKey: string;
-  data: {
+export type BuilderDoneEvent = SessionEventEnvelope<
+  "builder/done",
+  {
     source: "builtin" | "override";
     success: boolean;
     errors: BuilderErrorSnapshot[];
     platform?: "ios" | "android";
-  };
-}
+  }
+>;
 
 /**
  * Phase H2g — fired on every HookManager hook completion (success and
@@ -170,17 +181,16 @@ export interface BuilderDoneEvent {
  * daemon log. The shape mirrors the HookManager's internal `hooks/fired`
  * emit but with `worktreeKey` for fan-out routing.
  */
-export interface HooksFiredEvent {
-  kind: "hooks/fired";
-  worktreeKey: string;
-  data: {
+export type HooksFiredEvent = SessionEventEnvelope<
+  "hooks/fired",
+  {
     target: string;
     ok: boolean;
     fired: number;
     skipped: number;
     failureCount: number;
-  };
-}
+  }
+>;
 
 /**
  * Shape pushed over the wire for BuildError. Mirrors core/types.ts
@@ -196,10 +206,9 @@ export interface BuilderErrorSnapshot {
   suggestion?: string;
 }
 
-export interface WatcherActionCompleteEvent {
-  kind: "watcher/action-complete";
-  worktreeKey: string;
-  data: {
+export type WatcherActionCompleteEvent = SessionEventEnvelope<
+  "watcher/action-complete",
+  {
     name: string;
     result: {
       action: string;
@@ -207,11 +216,10 @@ export interface WatcherActionCompleteEvent {
       output: string;
       durationMs: number;
     };
-  };
-}
+  }
+>;
 
-export interface SessionLogEvent {
-  kind: "session/log";
-  worktreeKey: string;
-  data: { level: "info" | "warn" | "error"; message: string };
-}
+export type SessionLogEvent = SessionEventEnvelope<
+  "session/log",
+  { level: "info" | "warn" | "error"; message: string }
+>;

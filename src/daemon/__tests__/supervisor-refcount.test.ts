@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DaemonSupervisor, type SessionBootFn } from "../supervisor.js";
+import { generateSessionId } from "../../core/identifiers.js";
 import type { IpcServer } from "../../core/ipc.js";
 import type {
   BootSessionServicesOptions,
@@ -315,6 +316,49 @@ describe("DaemonSupervisor.attach / release (unit)", () => {
     const r = await sup.release("c1");
     expect(r.stoppedSession).toBe(false);
     expect(r.attached).toBe(0);
+  });
+
+  it("per-session attachedConnections sets stay isolated — release from session A leaves session B intact", async () => {
+    // Phase D1 — `release(connId)` walks every entry now (architecture
+    // finding #2). The historical "the only session" assumption is gone;
+    // pin the isolation invariant here so a future refactor that
+    // accidentally tracks attachments globally can't slip past the gate.
+    const { boot } = makeFakeBoot();
+    const sup = new DaemonSupervisor({ worktree: tmpRoot, ipc: fakeIpc, bootFn: boot });
+
+    const sidA = generateSessionId();
+    const sidB = generateSessionId();
+    const profileA: Profile = { ...makeProfile(tmpRoot), name: "alpha", metroPort: 8081 };
+    const profileB: Profile = { ...makeProfile(tmpRoot), name: "beta", metroPort: 8082 };
+
+    const startA = await sup.startSession(sidA, profileA);
+    expect(startA.kind).toBe("ok");
+    const startB = await sup.startSession(sidB, profileB);
+    expect(startB.kind).toBe("ok");
+
+    sup.attachToSession(sidA, "connA1", profileA);
+    sup.attachToSession(sidA, "connA2", profileA);
+    sup.attachToSession(sidB, "connB1", profileB);
+
+    await waitFor(() => sup.getSessionState(sidA)?.status === "running", 1_000);
+    await waitFor(() => sup.getSessionState(sidB)?.status === "running", 1_000);
+
+    // Release connA1 — only session A's count should drop. Session B
+    // is untouched even though release scans every entry.
+    await sup.releaseConnectionFromAllSessions("connA1");
+    expect(sup.getSessionEntry(sidA)?.attachedConnections.size).toBe(1);
+    expect(sup.getSessionEntry(sidB)?.attachedConnections.size).toBe(1);
+
+    // Release the LAST attacher on session A — session A should tear
+    // down. Session B keeps running.
+    await sup.releaseConnectionFromAllSessions("connA2");
+    expect(sup.getSessionEntry(sidA)).toBeUndefined(); // deleted on stop
+    expect(sup.getSessionState(sidB)?.status).toBe("running");
+    expect(sup.getSessionEntry(sidB)?.attachedConnections.size).toBe(1);
+
+    // Cleanup.
+    await sup.releaseConnectionFromAllSessions("connB1");
+    expect(sup.getSessionEntry(sidB)).toBeUndefined();
   });
 
   it("boot failure clears the attached set so the next attacher boots cleanly", async () => {

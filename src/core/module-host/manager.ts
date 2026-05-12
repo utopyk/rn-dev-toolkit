@@ -276,10 +276,22 @@ export class ModuleHostManager extends EventEmitter {
     entry.consumers.delete(consumerId);
 
     if (entry.consumers.size === 0) {
-      if (entry.registered.manifest.scope === "global") {
-        this.scheduleIdleShutdown(entry);
-      } else {
-        await this.stopEntry(entry);
+      const scope = entry.registered.manifest.scope;
+      switch (scope) {
+        case "global":
+          this.scheduleIdleShutdown(entry);
+          break;
+        case "per-worktree":
+        case "workspace":
+          await this.stopEntry(entry);
+          break;
+        default: {
+          // Exhaustiveness guard — adding a new ModuleScope value (e.g.
+          // a future `per-session`) is a compile error here until the
+          // refcount/idle-shutdown semantics are decided. See plan § A6.
+          const _exhaustive: never = scope;
+          throw new Error(`module-host: unhandled scope ${String(_exhaustive)}`);
+        }
       }
     }
   }
@@ -450,10 +462,25 @@ export class ModuleHostManager extends EventEmitter {
 
     instance.transitionTo("active");
 
-    const lockfile =
-      manifest.scope === "global"
-        ? new ModuleLockfile(lockfilePathFor(manifest.id))
-        : null;
+    // Singleton lockfile only applies to `global`-scope modules (one
+    // subprocess per host, enforced at the OS level via the lockfile).
+    // `per-worktree` / `workspace` modules already key the manager's
+    // entry map by scopeUnit, so an OS-level lockfile would duplicate
+    // that guarantee. Exhaustive switch — see plan § A6.
+    let lockfile: ModuleLockfile | null;
+    switch (manifest.scope) {
+      case "global":
+        lockfile = new ModuleLockfile(lockfilePathFor(manifest.id));
+        break;
+      case "per-worktree":
+      case "workspace":
+        lockfile = null;
+        break;
+      default: {
+        const _exhaustive: never = manifest.scope;
+        throw new Error(`module-host: unhandled scope ${String(_exhaustive)}`);
+      }
+    }
     lockfile?.acquire({ pid: child.pid, uid: process.getuid?.() ?? 0 });
 
     const entry: InternalEntry = {

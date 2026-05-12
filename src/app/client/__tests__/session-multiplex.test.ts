@@ -101,8 +101,10 @@ describe("connectToDaemonSession — events/subscribe wire payload", () => {
         // Capture the payload for assertions.
         capturedSubscribePayloads.push(message.payload);
 
-        // Reply: subscribed, session is "starting" (not yet running).
-        // This puts connectToDaemonSession into the "wait for running event" path.
+        // Phase D2 — the subscribe ack carries the minted sessionId.
+        // The client's `connectToDaemonSession` reads it via
+        // `parseSubscribeResponse` and surfaces it as `session.sessionId`.
+        const sessionId = "00000000-0000-0000-0000-000000000abc";
         reply({
           type: "response",
           action: "events/subscribe",
@@ -112,11 +114,13 @@ describe("connectToDaemonSession — events/subscribe wire payload", () => {
             status: "starting",
             started: true,
             attached: 1,
+            sessionId,
           },
         });
 
         // Push a session/status "running" event after a microtask tick so
         // the subscribe confirmation has been processed by the client first.
+        // Phase D2 — events also carry sessionId per `SessionEventEnvelope`.
         setImmediate(() => {
           reply({
             type: "event",
@@ -125,6 +129,7 @@ describe("connectToDaemonSession — events/subscribe wire payload", () => {
             payload: {
               kind: "session/status",
               worktreeKey: FAKE_WORKTREE_KEY,
+              sessionId,
               data: { status: "running" },
             },
           });

@@ -9,9 +9,17 @@
 //
 // Phase D1 — internal state is a `Map<SessionId, SessionEntry>`. Two
 // concurrent sessions for the same worktree are allowed at the
-// supervisor layer (gated by the wire protocol — `index.ts` RPC
-// handlers still rely on the legacy single-session facade below until
-// D2 threads sessionId through every dispatcher).
+// supervisor layer.
+//
+// Phase D2 — the legacy single-session facade (`start`, `stop`,
+// `attach`, `release`, `getServices`, `getState`, `getAttachedCount`,
+// `getSessionWorktreeKey`) is gone. Every callsite — `src/daemon/index.ts`
+// dispatchers, `src/daemon/client-rpcs.ts` — now threads `SessionId`
+// through the per-session API. The single-session "back-compat" shape
+// (e.g. `session/stop` with no sessionId) lives at the dispatcher layer,
+// not in the supervisor: the dispatcher resolves "the only active
+// session" via `listSessions()` before calling the per-session API. The
+// supervisor itself only speaks `SessionId`.
 //
 // Concurrency model: each entry carries its own `bootEpoch` and
 // `bootInFlight`. `bootAsync` validates `entry.bootEpoch ===
@@ -26,11 +34,8 @@ import type { IpcServer } from "../core/ipc.js";
 import { ArtifactStore } from "../core/artifact.js";
 import { ModuleRegistry } from "../modules/registry.js";
 import { readHostVersion } from "../core/host-version.js";
-import type { Profile } from "../core/types.js";
-import {
-  generateSessionId,
-  type SessionId,
-} from "../core/identifiers.js";
+import { type SessionId } from "../core/identifiers.js";
+import type { ValidatedProfile } from "./profile-guard.js";
 import {
   INITIAL_SESSION_STATE,
   type SessionState,
@@ -63,7 +68,7 @@ export interface DaemonSupervisorOptions {
 }
 
 export interface StartSessionOptions {
-  profile: Profile;
+  profile: ValidatedProfile;
 }
 
 export type StartSessionResult =
@@ -109,10 +114,11 @@ type WiredServices = {
  * Per-session state. Lifted from the flat singleton fields of the
  * pre-D1 supervisor; one entry per active session in `this.sessions`.
  *
- * `activeProfile` is typed `Profile` for D1 — D2 tightens to
- * `ValidatedProfile` when the RPC dispatchers in `index.ts` are rewired
- * to pass the validated brand through (today they validate at the
- * boundary but pass the unbranded form into the supervisor).
+ * Phase D2 — `activeProfile` is `ValidatedProfile`. The dispatcher
+ * validates payloads at the wire boundary via `validateProfile` and
+ * passes the branded result down; `bootSessionServices` then re-uses
+ * the same branded profile for HookManager.fire so the spawn boundary
+ * cannot be reached with attacker-controlled fields.
  *
  * `acquiredModules` is allocated empty in D1 and populated by D4's
  * cross-session ModuleHost refcount work — pre-allocated here so the
@@ -123,7 +129,7 @@ export interface SessionEntry {
   sessionId: SessionId;
   state: SessionState;
   wired: WiredServices | null;
-  activeProfile: Profile;
+  activeProfile: ValidatedProfile;
   bootEpoch: number;
   bootInFlight: Promise<void> | null;
   /** ArtifactStore-hashed worktree key. Stable for the entry's lifetime. */
@@ -166,13 +172,13 @@ export class DaemonSupervisor extends EventEmitter {
    * collisions return `E_SESSION_ALREADY_EXISTS`. Port collisions with
    * any other active session on this daemon return `E_PORT_CONFLICT`.
    *
-   * Phase D1 — primary API. The legacy `start({ profile })` facade
-   * below mints a fresh sessionId and delegates here, preserving the
-   * single-session-at-a-time invariant the legacy callers rely on.
+   * Phase D2 — primary API. The dispatcher in `src/daemon/index.ts`
+   * is the only caller that mints sessionIds (via `generateSessionId`);
+   * test fixtures may inject their own to assert deterministic IDs.
    */
   async startSession(
     sessionId: SessionId,
-    profile: Profile,
+    profile: ValidatedProfile,
   ): Promise<StartSessionResult> {
     if (this.sessions.has(sessionId)) {
       return {
@@ -275,7 +281,7 @@ export class DaemonSupervisor extends EventEmitter {
   attachToSession(
     sessionId: SessionId,
     connectionId: string,
-    profile: Profile,
+    profile: ValidatedProfile,
   ): AttachSessionResult {
     const entry = this.sessions.get(sessionId);
     if (!entry) {
@@ -450,175 +456,8 @@ export class DaemonSupervisor extends EventEmitter {
   }
 
   // ===========================================================================
-  // Legacy single-session facade (D1 back-compat — D2 deletes these)
-  // ===========================================================================
-  //
-  // The wire-protocol-level dispatchers in src/daemon/index.ts still
-  // operate in a single-session world: `session/start` takes no
-  // sessionId, `session/stop` takes no sessionId, `events/subscribe`
-  // identifies by profile. Phase D2 threads sessionId through every
-  // dispatcher and removes this facade. Until then, these methods
-  // preserve today's behavior at the cost of refusing a second
-  // concurrent session — only the new primary API above can boot
-  // two sessions at once.
-
-  async start(opts: StartSessionOptions): Promise<StartSessionResult> {
-    if (this.hasAnyActiveSession()) {
-      return {
-        kind: "error",
-        code: "E_SESSION_ALREADY_RUNNING",
-        message: `session is ${this.legacyAggregateStatus()}; stop it before starting a new one`,
-      };
-    }
-    return this.startSession(generateSessionId(), opts.profile);
-  }
-
-  async stop(): Promise<StopSessionResult> {
-    const entry = this.firstNonStoppedEntry();
-    if (!entry) {
-      return { kind: "ok", status: "stopped" };
-    }
-    return this.stopEntry(entry);
-  }
-
-  async attach(
-    connectionId: string,
-    opts: StartSessionOptions,
-  ): Promise<AttachSessionResult> {
-    // Match existing single-session behavior: prefer the only active
-    // session if one exists; otherwise boot fresh.
-    const existing = this.firstNonStoppedEntry();
-    if (existing) {
-      if (existing.state.status === "stopping") {
-        return {
-          kind: "error",
-          code: "E_SESSION_STOPPING",
-          message: "session is stopping; wait for stopped before attaching",
-        };
-      }
-      if (!profileMatches(existing.activeProfile, opts.profile)) {
-        return {
-          kind: "error",
-          code: "E_PROFILE_MISMATCH",
-          message: `daemon already running profile "${existing.activeProfile.name}"; cannot attach to "${opts.profile.name}"`,
-        };
-      }
-      existing.attachedConnections.add(connectionId);
-      return {
-        kind: "ok",
-        status: existing.state.status,
-        started: false,
-        attached: existing.attachedConnections.size,
-        sessionId: existing.sessionId,
-      };
-    }
-
-    const sessionId = generateSessionId();
-    const startResult = await this.startSession(sessionId, opts.profile);
-    if (startResult.kind === "error") {
-      return startResult;
-    }
-    const entry = this.sessions.get(sessionId);
-    if (!entry) {
-      // startSession set the entry; the only path to remove it before
-      // this point is a synchronous boot failure that already cleaned
-      // up. Surface the same "already stopped" signal.
-      return {
-        kind: "error",
-        code: "E_UNKNOWN_SESSION",
-        message: "session vanished between start and attach",
-      };
-    }
-    entry.attachedConnections.add(connectionId);
-    return {
-      kind: "ok",
-      status: startResult.status,
-      started: true,
-      attached: entry.attachedConnections.size,
-      sessionId,
-    };
-  }
-
-  async release(connectionId: string): Promise<ReleaseSessionResult> {
-    return this.releaseConnectionFromAllSessions(connectionId);
-  }
-
-  /**
-   * Legacy single-session view. Returns the only active session's
-   * services, or null. In a multi-session world (only reachable via
-   * `startSession` directly today) this returns the first running
-   * session's services — D2 callers must thread sessionId to be
-   * precise.
-   */
-  getServices(): SessionServices | null {
-    for (const entry of this.sessions.values()) {
-      if (entry.wired) return entry.wired.services;
-    }
-    return null;
-  }
-
-  /**
-   * Legacy single-session aggregate state. Returns the only entry's
-   * state, or INITIAL_SESSION_STATE when no entries exist. With
-   * multiple entries, returns the first non-stopped entry's state.
-   */
-  getState(): SessionState {
-    const entry = this.firstNonStoppedEntry();
-    return entry ? entry.state : INITIAL_SESSION_STATE;
-  }
-
-  /**
-   * Legacy single-session aggregate count. Sums attached counts across
-   * every entry — single-session callers see today's behavior (a
-   * single entry's count) without code change.
-   */
-  getAttachedCount(): number {
-    let total = 0;
-    for (const entry of this.sessions.values()) {
-      total += entry.attachedConnections.size;
-    }
-    return total;
-  }
-
-  /**
-   * Legacy single-session worktreeKey. Returns the only active
-   * session's hashed worktree key. With multiple entries, returns the
-   * first entry's key (callers in this state should use the per-session
-   * API). With zero entries, returns the raw worktree path — matches
-   * pre-D1 behavior where the field was stamped at construction time.
-   */
-  getSessionWorktreeKey(): string {
-    const entry = this.firstNonStoppedEntry();
-    return entry ? entry.sessionWorktreeKey : this.worktree;
-  }
-
-  // ===========================================================================
   // Internals
   // ===========================================================================
-
-  private hasAnyActiveSession(): boolean {
-    for (const entry of this.sessions.values()) {
-      if (entry.state.status !== "stopped") return true;
-    }
-    return false;
-  }
-
-  private firstNonStoppedEntry(): SessionEntry | undefined {
-    for (const entry of this.sessions.values()) {
-      if (entry.state.status !== "stopped") return entry;
-    }
-    return undefined;
-  }
-
-  /**
-   * Legacy `start()` returns `E_SESSION_ALREADY_RUNNING` with a status
-   * string from the existing session — keep the message shape so
-   * existing callers' error messages don't change.
-   */
-  private legacyAggregateStatus(): SessionStatus {
-    const entry = this.firstNonStoppedEntry();
-    return entry ? entry.state.status : "stopped";
-  }
 
   private async stopEntry(entry: SessionEntry): Promise<StopSessionResult> {
     if (entry.state.status === "stopped") {
@@ -945,7 +784,7 @@ export class DaemonSupervisor extends EventEmitter {
  * sufficient as a sanity gate. Both `worktree` fields are normalised
  * to "" for the comparison so null and absence read equivalent.
  */
-function profileMatches(active: Profile, incoming: Profile): boolean {
+function profileMatches(active: ValidatedProfile, incoming: ValidatedProfile): boolean {
   return (
     active.name === incoming.name &&
     (active.worktree ?? "") === (incoming.worktree ?? "")

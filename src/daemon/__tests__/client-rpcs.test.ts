@@ -40,12 +40,9 @@ describe("daemon client RPCs (integration)", () => {
     });
     liveHandles.push(daemon);
 
-    const events: IpcMessage[] = [];
-    const sub = await daemon.client.subscribe(
-      { type: "command", action: "events/subscribe", id: "sub" },
-      { onEvent: (evt) => events.push(evt) },
-    );
-
+    // Phase D2 — events/subscribe { profile } boots-and-attaches in one
+    // round-trip. Observer-mode subscribes (no profile) are gone; the
+    // sub socket now owns the session refcount.
     const profile = {
       name: "test",
       isDefault: true,
@@ -61,12 +58,11 @@ describe("daemon client RPCs (integration)", () => {
       env: {},
       projectRoot: worktree,
     };
-    await daemon.client.send({
-      type: "command",
-      action: "session/start",
-      id: "start",
-      payload: { profile },
-    });
+    const events: IpcMessage[] = [];
+    const sub = await daemon.client.subscribe(
+      { type: "command", action: "events/subscribe", id: "sub", payload: { profile } },
+      { onEvent: (evt) => events.push(evt) },
+    );
     await waitForEvent(events, (evt) => {
       const p = payload(evt);
       return p?.kind === "metro/status" && p.data?.status === "running";

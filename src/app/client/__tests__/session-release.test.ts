@@ -129,7 +129,7 @@ describe("connectToDaemonSession ref-counted release (Phase 13.5)", () => {
     await sessionC.release();
   });
 
-  it("attach with a different profile is rejected with E_PROFILE_MISMATCH", async () => {
+  it("attach with a different profile on the same port is rejected with E_PORT_CONFLICT", async () => {
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
 
@@ -156,13 +156,20 @@ describe("connectToDaemonSession ref-counted release (Phase 13.5)", () => {
       mismatchError = err as Error;
     }
     expect(mismatchError).not.toBeNull();
-    expect(mismatchError?.message).toMatch(/E_PROFILE_MISMATCH/);
+    // Phase D2 — multi-session model allows two distinct profiles on
+    // different ports, so the gate that fires here is the
+    // `E_PORT_CONFLICT` from `startSession`'s port-collision check (both
+    // profiles use 8081 in this fixture). The pre-D2 single-session
+    // facade returned `E_PROFILE_MISMATCH`; the per-session rule is
+    // "you can't share a port, but you can run different profiles."
+    expect(mismatchError?.message).toMatch(/E_PORT_CONFLICT/);
 
     // Session A is still healthy.
     const statusResp = await sessionA.client.send({
       type: "command",
       action: "session/status",
       id: "status-after-mismatch",
+      payload: { sessionId: sessionA.sessionId },
     });
     const sp = statusResp.payload as { status?: string; attached?: number };
     expect(sp.status).toBe("running");

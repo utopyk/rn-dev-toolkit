@@ -35,14 +35,31 @@ describe("daemon session boot (integration)", () => {
     });
     liveHandles.push(daemon);
 
-    // 1. Subscribe to session events BEFORE starting the session so we
-    //    don't race the starting/running emissions.
+    // Phase D2 — events/subscribe { profile } boots-and-attaches in one
+    // round-trip. Observer-mode subscribes (no profile) are gone; this
+    // test exercises the canonical boot-or-join path.
+    const profile = {
+      name: "test",
+      isDefault: true,
+      worktree: null,
+      branch: "main",
+      platform: "ios",
+      mode: "quick",
+      metroPort: 8081,
+      devices: {},
+      buildVariant: "debug",
+      preflight: { checks: [], frequency: "once" },
+      onSave: [],
+      env: {},
+      projectRoot: worktree,
+    };
     const events: IpcMessage[] = [];
     const sub = await daemon.client.subscribe(
       {
         type: "command",
         action: "events/subscribe",
         id: "sub-1",
+        payload: { profile },
       },
       {
         onEvent: (evt) => {
@@ -54,34 +71,11 @@ describe("daemon session boot (integration)", () => {
     expect((sub.initial.payload as { subscribed: boolean }).subscribed).toBe(
       true,
     );
+    expect(
+      typeof (sub.initial.payload as { sessionId?: string }).sessionId,
+    ).toBe("string");
 
     try {
-      // 2. session/start returns {status: "starting"} immediately; the
-      //    boot happens asynchronously and emits events as it progresses.
-      const startResp = await daemon.client.send({
-        type: "command",
-        action: "session/start",
-        id: "start-1",
-        payload: {
-          profile: {
-            name: "test",
-            isDefault: true,
-            worktree: null,
-            branch: "main",
-            platform: "ios",
-            mode: "quick",
-            metroPort: 8081,
-            devices: {},
-            buildVariant: "debug",
-            preflight: { checks: [], frequency: "once" },
-            onSave: [],
-            env: {},
-            projectRoot: worktree,
-          },
-        },
-      });
-      expect(startResp.type).toBe("response");
-      expect((startResp.payload as { status: string }).status).toBe("starting");
 
       // 3. Wait for metro/status: running event (starting → running
       //    transition is what the client cares about most).

@@ -55,26 +55,30 @@ describe("tui daemon client (integration)", () => {
       projectRoot: worktree,
     };
 
-    // --- Client #1: the "TUI" that quits mid-session -----------------
+    // Phase D2 — the original "TUI quit mid-session, session survives"
+    // assertion exploited the pre-D2 observer-mode loophole where a
+    // subscribe socket without a profile didn't refcount and `session/start`
+    // booted with `attached.size === 0`. With observer mode CUT, the
+    // refcount IS load-bearing; a session lives exactly as long as it
+    // has attachers. The architectural property still holds: a single
+    // client disconnect doesn't kill the session as long as a sibling
+    // is still attached. This test now exercises that — two
+    // simultaneous attachers via boot-or-join, then sub1 closes, sub2
+    // keeps the session alive.
     const client1 = new IpcClient(daemon.sockPath);
+    const client2 = new IpcClient(daemon.sockPath);
 
     const events1: IpcMessage[] = [];
     const sub1 = await client1.subscribe(
-      { type: "command", action: "events/subscribe", id: "sub-1" },
+      { type: "command", action: "events/subscribe", id: "sub-1", payload: { profile } },
       { onEvent: (evt) => events1.push(evt) },
     );
     expect(sub1.initial.type).toBe("response");
+    expect((sub1.initial.payload as { subscribed: boolean }).subscribed).toBe(true);
 
-    const start = await client1.send({
-      type: "command",
-      action: "session/start",
-      id: "start-1",
-      payload: { profile },
-    });
-    expect((start.payload as { status: string }).status).toBe("starting");
-
-    // Wait for the fake boot's running emit before disconnecting so
-    // the churn happens mid-session, not pre-boot.
+    // Wait for the fake boot's running emit before bringing sub2 online
+    // so the boot-or-join path takes its "matching profile" branch
+    // (vs racing the boot lock and joining the same in-flight boot).
     await waitForEvent(events1, (evt) => {
       const p = evt.payload as
         | { kind?: string; data?: { status?: string } }
@@ -84,14 +88,25 @@ describe("tui daemon client (integration)", () => {
       );
     }, 3_000);
 
-    // Simulate TUI quit: drop the subscription socket.
+    // Second attacher BEFORE the first one disconnects so the
+    // refcount stays positive across the churn.
+    const events2: IpcMessage[] = [];
+    const sub2 = await client2.subscribe(
+      { type: "command", action: "events/subscribe", id: "sub-2", payload: { profile } },
+      { onEvent: (evt) => events2.push(evt) },
+    );
+    expect(sub2.initial.type).toBe("response");
+    expect((sub2.initial.payload as { subscribed: boolean }).subscribed).toBe(true);
+
+    // Simulate TUI quit: drop the first subscription socket. The
+    // daemon's refcount drops to 1; sub2 keeps the session alive.
     sub1.close();
 
-    // --- Client #2: a fresh reconnect after "TUI restart" -------------
-    // Session state must persist across the disconnect — that's the
-    // whole point of moving services into the daemon.
-    const client2 = new IpcClient(daemon.sockPath);
+    // Give the daemon a beat to process the socket close.
+    await new Promise((r) => setTimeout(r, 100));
 
+    // session/status must still be "running" — the architectural
+    // property the daemon-owned session model was designed to provide.
     const statusResp = await client2.send({
       type: "command",
       action: "session/status",
@@ -99,15 +114,6 @@ describe("tui daemon client (integration)", () => {
     });
     const statusPayload = statusResp.payload as { status?: string };
     expect(statusPayload.status).toBe("running");
-
-    // New subscription must still receive metro events — daemon kept
-    // the supervisor + service emitters alive.
-    const events2: IpcMessage[] = [];
-    const sub2 = await client2.subscribe(
-      { type: "command", action: "events/subscribe", id: "sub-2" },
-      { onEvent: (evt) => events2.push(evt) },
-    );
-    expect(sub2.initial.type).toBe("response");
 
     // Trigger a new event the second client can observe — session/stop
     // causes the fake boot's dispose path to emit "stopped". If the

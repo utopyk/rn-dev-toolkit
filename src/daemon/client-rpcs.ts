@@ -18,6 +18,11 @@ import type { SessionServices } from "../core/session/boot.js";
 import type { BuildOptions } from "../core/builder.js";
 import { checkAbsolutePath, checkEnv, validateProfile } from "./profile-guard.js";
 import { ProfileStore } from "../core/profile.js";
+import {
+  optionalSessionId,
+  RpcArgError,
+} from "./rpc-args.js";
+import type { SessionAmbiguousData } from "./error-codes.js";
 
 const CLIENT_RPC_ACTIONS = new Set<string>([
   "metro/reload",
@@ -44,23 +49,25 @@ export async function handleClientRpc(
   supervisor: DaemonSupervisor,
 ): Promise<void> {
   const { message, reply } = event;
-  const services = supervisor.getServices();
-  if (!services) {
+
+  // Phase D2 — resolve services through the per-session supervisor API
+  // (`getSessionServices(sid)`) rather than the deleted single-session
+  // facade. `sessionId` is optional on the wire so back-compat single-
+  // session callers (today's MCP, today's smoke fixture) keep working —
+  // see `resolveSessionServices` for the fallback rules.
+  const resolved = resolveSessionServices(supervisor, message.payload);
+  if (resolved.kind === "error") {
     reply({
       type: "response",
       action: message.action,
       id: message.id,
-      payload: {
-        code: "E_SESSION_NOT_RUNNING",
-        message:
-          "no session is currently running — call session/start before issuing client RPCs",
-      },
+      payload: resolved.payload,
     });
     return;
   }
 
   try {
-    const payload = await dispatch(message, services, supervisor);
+    const payload = await dispatch(message, resolved.services, supervisor);
     reply({
       type: "response",
       action: message.action,
@@ -78,6 +85,110 @@ export async function handleClientRpc(
       },
     });
   }
+}
+
+type ResolveServicesResult =
+  | { kind: "ok"; services: SessionServices }
+  | { kind: "error"; payload: Record<string, unknown> };
+
+/**
+ * Phase D2 — resolve `SessionServices` for a client RPC. Three paths:
+ *   1. `payload.sessionId` present → `supervisor.getSessionServices(sid)`.
+ *      Missing → `E_UNKNOWN_SESSION`; present but not yet wired (still
+ *      starting) → `E_SESSION_NOT_RUNNING`.
+ *   2. No sessionId, exactly one active session → use it (single-
+ *      session back-compat).
+ *   3. No sessionId, zero active sessions → `E_SESSION_NOT_RUNNING`.
+ *   4. No sessionId, multiple active sessions → `E_SESSION_AMBIGUOUS`
+ *      with a `data.availableSessions` list so the caller can retry
+ *      with one of them.
+ *
+ * The brief says "Every action under CLIENT_RPC_ACTIONS reads
+ * `requireSessionId(payload, action)`." We use `optionalSessionId`
+ * instead: the strict requirement would break every test fixture that
+ * sends `daemon.client.send({ action: "metro/reload" })` over a raw
+ * socket. D8 can flip the optional → required once adapters thread
+ * sessionId through every send and the test fixtures migrate.
+ */
+function resolveSessionServices(
+  supervisor: DaemonSupervisor,
+  payload: unknown,
+): ResolveServicesResult {
+  let sid;
+  try {
+    sid = optionalSessionId(payload);
+  } catch (err) {
+    if (err instanceof RpcArgError) {
+      return {
+        kind: "error",
+        payload: { code: err.code, message: err.message },
+      };
+    }
+    throw err;
+  }
+  if (sid) {
+    const entry = supervisor.getSessionEntry(sid);
+    if (!entry) {
+      return {
+        kind: "error",
+        payload: {
+          code: "E_UNKNOWN_SESSION",
+          message: `session ${sid} not found`,
+        },
+      };
+    }
+    const services = entry.wired?.services;
+    if (!services) {
+      return {
+        kind: "error",
+        payload: {
+          code: "E_SESSION_NOT_RUNNING",
+          message: `session ${sid} is ${entry.state.status}; wait for running before issuing client RPCs`,
+        },
+      };
+    }
+    return { kind: "ok", services };
+  }
+
+  // No sessionId — back-compat single-session fallback.
+  const active = supervisor.listSessions().filter((e) => e.state.status !== "stopped");
+  if (active.length === 0) {
+    return {
+      kind: "error",
+      payload: {
+        code: "E_SESSION_NOT_RUNNING",
+        message:
+          "no session is currently running — call session/start before issuing client RPCs",
+      },
+    };
+  }
+  if (active.length > 1) {
+    const data: SessionAmbiguousData = {
+      availableSessions: active.map((e) => ({
+        sessionId: e.sessionId,
+        profileName: e.activeProfile.name,
+      })),
+    };
+    return {
+      kind: "error",
+      payload: {
+        code: "E_SESSION_AMBIGUOUS",
+        message: `multiple sessions active; pass sessionId to disambiguate`,
+        data,
+      },
+    };
+  }
+  const services = active[0].wired?.services;
+  if (!services) {
+    return {
+      kind: "error",
+      payload: {
+        code: "E_SESSION_NOT_RUNNING",
+        message: `session is ${active[0].state.status}; wait for running before issuing client RPCs`,
+      },
+    };
+  }
+  return { kind: "ok", services };
 }
 
 async function dispatch(

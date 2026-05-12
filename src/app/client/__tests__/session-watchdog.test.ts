@@ -34,6 +34,7 @@ import type { Profile } from "../../../core/types.js";
 //      hanging forever.
 
 const FAKE_WORKTREE_KEY = "stub-watchdog-worktree";
+const FAKE_SESSION_ID = "00000000-0000-0000-0000-000000000abc";
 
 function makeProfile(projectRoot: string): Profile {
   return {
@@ -104,7 +105,7 @@ describe("connectToDaemonSession — idle-watchdog timeout strategy", () => {
           type: "response",
           action: "events/subscribe",
           id: message.id,
-          payload: { subscribed: true, status: "starting", started: true, attached: 1 },
+          payload: { subscribed: true, status: "starting", started: true, attached: 1, sessionId: FAKE_SESSION_ID },
         });
         // Emit lifecycle/log progress events at 80ms intervals while
         // the boot conceptually does its long work. Idle window in
@@ -122,6 +123,7 @@ describe("connectToDaemonSession — idle-watchdog timeout strategy", () => {
               payload: {
                 kind: "lifecycle/log",
                 worktreeKey: FAKE_WORKTREE_KEY,
+                sessionId: FAKE_SESSION_ID,
                 data: { message: `progress step ${i + 1}` },
               },
             });
@@ -135,6 +137,7 @@ describe("connectToDaemonSession — idle-watchdog timeout strategy", () => {
               payload: {
                 kind: "session/status",
                 worktreeKey: FAKE_WORKTREE_KEY,
+                sessionId: FAKE_SESSION_ID,
                 data: { status: "running" },
               },
             });
@@ -179,7 +182,7 @@ describe("connectToDaemonSession — idle-watchdog timeout strategy", () => {
           type: "response",
           action: "events/subscribe",
           id: message.id,
-          payload: { subscribed: true, status: "starting", started: true, attached: 1 },
+          payload: { subscribed: true, status: "starting", started: true, attached: 1, sessionId: FAKE_SESSION_ID },
         });
         // Emit a couple of progress events, then go silent forever
         // — simulates a daemon that gets partway through boot then
@@ -192,6 +195,7 @@ describe("connectToDaemonSession — idle-watchdog timeout strategy", () => {
             payload: {
               kind: "lifecycle/log",
               worktreeKey: FAKE_WORKTREE_KEY,
+              sessionId: FAKE_SESSION_ID,
               data: { message: "preflight ok" },
             },
           });
@@ -204,6 +208,7 @@ describe("connectToDaemonSession — idle-watchdog timeout strategy", () => {
             payload: {
               kind: "lifecycle/log",
               worktreeKey: FAKE_WORKTREE_KEY,
+              sessionId: FAKE_SESSION_ID,
               data: { message: "watchman wipe started" },
             },
           });
@@ -240,7 +245,7 @@ describe("connectToDaemonSession — idle-watchdog timeout strategy", () => {
           type: "response",
           action: "events/subscribe",
           id: message.id,
-          payload: { subscribed: true, status: "starting", started: true, attached: 1 },
+          payload: { subscribed: true, status: "starting", started: true, attached: 1, sessionId: FAKE_SESSION_ID },
         });
         // Never emit anything else — daemon is wedged from the start.
       }

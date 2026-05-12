@@ -29,6 +29,7 @@ import {
 } from "../../daemon/spawn.js";
 import type { IpcClient, IpcMessage } from "../../core/ipc.js";
 import type { Profile } from "../../core/types.js";
+import { asSessionId, type SessionId } from "../../core/identifiers.js";
 import { MetroClient } from "./metro-adapter.js";
 import { DevToolsClient } from "./devtools-adapter.js";
 import { BuilderClient } from "./builder-adapter.js";
@@ -87,6 +88,19 @@ export interface DaemonSession {
    */
   lifecycle: SessionClient;
   worktreeKey: string;
+  /**
+   * Phase D2 — server-minted SessionId surfaced from
+   * `events/subscribe`'s ack (or its joiner shortcut). Clients route
+   * every follow-up sessionId-keyed RPC (sessions/list,
+   * session/status { sessionId }, session/stop { sessionId },
+   * metro/* / devtools/* / builder/* when D3+ adapters thread it)
+   * through this field. Branded `SessionId` so misuses (passing
+   * `worktreeKey` where `sessionId` is required) are caught at compile
+   * time. Empty-string is unreachable in production because the
+   * daemon's ack carries a non-empty UUID; the parser refuses to mint
+   * a session whose id is empty.
+   */
+  sessionId: SessionId;
   /**
    * Phase 13.5 trichotomy of session-end methods:
    *   - `disconnect()` / `release()` — close the subscribe socket. The
@@ -195,6 +209,7 @@ export async function connectToDaemonSession(
   const lifecycle = new SessionClient();
 
   let worktreeKey: string | null = null;
+  let sessionId: SessionId | null = null;
   let resolveRunning!: () => void;
   let rejectRunning!: (err: Error) => void;
   const runningPromise = new Promise<void>((res, rej) => {
@@ -358,6 +373,13 @@ export async function connectToDaemonSession(
       `connectToDaemonSession: events/subscribe rejected (${subPayload.code ?? "unknown"}): ${subPayload.message ?? ""}`,
     );
   }
+  // Phase D2 — capture the server-minted SessionId surfaced by the
+  // ack. The boot-or-join branch returns it from `attachToSession`
+  // (existing or fresh entry); the attach-by-id branch echoes the
+  // caller's input. Empty-string is rejected by `asSessionId`.
+  if (subPayload.sessionId) {
+    sessionId = asSessionId(subPayload.sessionId);
+  }
 
   // Phase 13.6 PR-C — wire the deferred proxy now that sub is open.
   // Every subsequent session.client.send() and every adapter .send()
@@ -407,6 +429,12 @@ export async function connectToDaemonSession(
       "connectToDaemonSession: session became running without emitting a worktreeKey",
     );
   }
+  if (!sessionId) {
+    sub.close();
+    throw new Error(
+      "connectToDaemonSession: events/subscribe ack omitted sessionId — daemon is older than Phase D2",
+    );
+  }
 
   const disconnect = (): void => {
     if (closed) return;
@@ -426,10 +454,15 @@ export async function connectToDaemonSession(
 
   const stop = async (): Promise<void> => {
     try {
+      // Phase D2 — pass `sessionId` so the daemon disambiguates in a
+      // multi-session world. Single-session daemons accept the legacy
+      // `session/stop {}` shape too; passing the sessionId is the
+      // strict-correct form.
       await sub.send({
         type: "command",
         action: "session/stop",
         id: idGen(),
+        payload: { sessionId },
       });
     } finally {
       disconnect();
@@ -445,6 +478,7 @@ export async function connectToDaemonSession(
     modules,
     lifecycle,
     worktreeKey,
+    sessionId,
     disconnect,
     release,
     stop,
@@ -463,6 +497,12 @@ interface SubscribeAck {
   status?: "stopped" | "starting" | "running" | "stopping";
   started?: boolean;
   attached?: number;
+  /**
+   * Phase D2 — server-minted SessionId surfaced from the
+   * `events/subscribe` ack. Absent only when the daemon predates D2;
+   * the caller falls back to `worktreeKey`-keyed flows in that case.
+   */
+  sessionId?: string;
 }
 interface SubscribeReject {
   subscribed: false;
@@ -494,6 +534,10 @@ function parseSubscribeResponse(
         : undefined,
     started: typeof p.started === "boolean" ? p.started : undefined,
     attached: typeof p.attached === "number" ? p.attached : undefined,
+    sessionId:
+      typeof p.sessionId === "string" && p.sessionId.length > 0
+        ? p.sessionId
+        : undefined,
   };
 }
 
@@ -508,19 +552,40 @@ function parseStatusResponse(payload: unknown): { worktreeKey?: string } {
 /**
  * Runtime guard for the event envelopes the daemon pushes over
  * `events/subscribe`. Every variant of SessionEvent carries a string
- * `kind`, a string `worktreeKey`, and a `data` field. Anything else
- * is discarded rather than silently narrowed downstream (Kieran P1-3
- * on PR #17).
+ * `kind`, a string `worktreeKey`, a string `sessionId`, and a `data`
+ * field. Anything else is discarded rather than silently narrowed
+ * downstream (Kieran P1-3 on PR #17).
+ *
+ * Phase D2 — `sessionId` joins `worktreeKey` as a required field. The
+ * supervisor's event-fan-out emits both per D1's
+ * `SessionEventEnvelope<K, D>`. Multi-session clients route on
+ * `sessionId`; legacy single-session clients still see the
+ * `worktreeKey` field for back-compat.
  */
 function parseSessionEventEnvelope(
   payload: unknown,
-): { kind: string; worktreeKey: string; data: unknown } | null {
+): {
+  kind: string;
+  worktreeKey: string;
+  sessionId: string;
+  data: unknown;
+} | null {
   if (!payload || typeof payload !== "object") return null;
   const p = payload as Record<string, unknown>;
-  if (typeof p.kind !== "string" || typeof p.worktreeKey !== "string") {
+  if (
+    typeof p.kind !== "string" ||
+    typeof p.worktreeKey !== "string" ||
+    typeof p.sessionId !== "string" ||
+    p.sessionId.length === 0
+  ) {
     return null;
   }
-  return { kind: p.kind, worktreeKey: p.worktreeKey, data: p.data };
+  return {
+    kind: p.kind,
+    worktreeKey: p.worktreeKey,
+    sessionId: p.sessionId,
+    data: p.data,
+  };
 }
 
 function readStatus(data: unknown): string | null {

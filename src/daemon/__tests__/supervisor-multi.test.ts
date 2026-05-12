@@ -11,6 +11,7 @@ import type {
   SessionServices,
 } from "../../core/session/boot.js";
 import type { Profile } from "../../core/types.js";
+import type { ValidatedProfile } from "../profile-guard.js";
 import type { MetroManager } from "../../core/metro.js";
 import type { DevToolsManager } from "../../core/devtools.js";
 import type { Builder } from "../../core/builder.js";
@@ -27,8 +28,17 @@ import type { SessionEvent } from "../session.js";
 // `Map<SessionId, SessionEntry>` makes possible. Integration coverage
 // at the wire boundary lands with D2.
 
-function makeProfile(projectRoot: string, name: string, metroPort: number): Profile {
-  return {
+function makeProfile(
+  projectRoot: string,
+  name: string,
+  metroPort: number,
+): ValidatedProfile {
+  // Phase D2 — supervisor.startSession + attachToSession take a
+  // branded ValidatedProfile. Unit fixtures hand-build the shape +
+  // assert the brand without re-running validateProfile (the shape is
+  // exhaustive and the brand is a phantom type). Production code goes
+  // through profile-guard at every wire boundary.
+  const profile: Profile = {
     name,
     isDefault: false,
     worktree: null,
@@ -43,6 +53,7 @@ function makeProfile(projectRoot: string, name: string, metroPort: number): Prof
     env: {},
     projectRoot,
   };
+  return profile as ValidatedProfile;
 }
 
 function makeFakeBoot(): SessionBootFn {

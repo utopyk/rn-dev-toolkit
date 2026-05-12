@@ -11,6 +11,26 @@ describe("bidirectional flag enforcement", () => {
   const liveHandles: TestDaemonHandle[] = [];
   const cleanups: Array<() => void> = [];
 
+  // Phase D2 — events/subscribe requires `{ profile }` or
+  // `{ sessionId }`; observer-mode is cut. The bidirectional gate
+  // tests still want a subscribe socket to live on; they pass a valid
+  // profile so the subscribe ack returns and then drive the gated RPC.
+  const profile = (worktree: string) => ({
+    name: "test",
+    isDefault: true,
+    worktree: null as string | null,
+    branch: "main",
+    platform: "ios" as const,
+    mode: "quick" as const,
+    metroPort: 8081,
+    devices: {},
+    buildVariant: "debug",
+    preflight: { checks: [], frequency: "once" as const },
+    onSave: [],
+    env: {},
+    projectRoot: worktree,
+  });
+
   afterEach(async () => {
     for (const h of liveHandles.splice(0)) await h.stop();
     for (const c of cleanups.splice(0)) c();
@@ -30,7 +50,9 @@ describe("bidirectional flag enforcement", () => {
         type: "command",
         action: "events/subscribe",
         id: "sub-1",
-        payload: {},   // no supportsBidirectionalRpc
+        // Phase D2 — profile is now required (observer-mode CUT). The
+        // non-bidirectional flag is what we're testing.
+        payload: { profile: profile(worktree) },
       },
       { onEvent: () => {} },
     );
@@ -60,13 +82,14 @@ describe("bidirectional flag enforcement", () => {
         type: "command",
         action: "events/subscribe",
         id: "sub-1",
-        payload: { supportsBidirectionalRpc: true },
+        payload: { profile: profile(worktree), supportsBidirectionalRpc: true },
       },
       { onEvent: () => {} },
     );
     try {
-      // The daemon will reply with E_SESSION_NOT_RUNNING because no
-      // session/start was issued, but crucially NOT E_RPC_NOT_AUTHORIZED.
+      // The daemon will reply with a real metro/reload result (since
+      // the subscribe boots the session via boot-or-join), but
+      // crucially NOT E_RPC_NOT_AUTHORIZED.
       const r = await sub.send({
         type: "command",
         action: "metro/reload",
@@ -147,13 +170,15 @@ describe("bidirectional flag enforcement", () => {
     });
 
     // ── Connection A: non-bidirectional subscribe socket ──────────────────
+    // Phase D2 — profile required; the boot-or-join branch lands on
+    // the same session bootSub booted, since the profile matches.
     const clientA = new IpcClient(sockPath);
     const subA = await clientA.subscribe(
       {
         type: "command",
         action: "events/subscribe",
         id: "sub-A",
-        payload: {},   // no supportsBidirectionalRpc
+        payload: { profile },   // no supportsBidirectionalRpc
       },
       { onEvent: () => {} },
     );
@@ -190,7 +215,7 @@ describe("bidirectional flag enforcement", () => {
         type: "command",
         action: "events/subscribe",
         id: "sub-B",
-        payload: { supportsBidirectionalRpc: true },
+        payload: { profile, supportsBidirectionalRpc: true },
       },
       { onEvent: () => {} },
     );

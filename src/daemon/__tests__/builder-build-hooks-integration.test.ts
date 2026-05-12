@@ -110,16 +110,19 @@ describe("builder/build hook firing — daemon integration (H2h)", () => {
     });
     liveHandles.push(daemon);
 
-    // Subscribe FIRST so we don't miss the hooks/fired events that
-    // land while the build is in flight. daemon.client.subscribe()
-    // returns a long-lived sub-socket with an onEvent callback.
+    // Phase D2 — observer-mode subscribes are gone. The session is
+    // booted by `connectToDaemonSession` (which subscribes with the
+    // profile) below; a separate raw subscribe socket joins via
+    // boot-or-join to collect hooks/fired events. The raw subscribe
+    // opens AFTER connectToDaemonSession so it joins the already-
+    // running session via boot-or-join's "matching profile" shortcut.
+    const profile = fixtureProfile(worktree);
+    const session = await connectToDaemonSession(worktree, profile);
     const subEvents: IpcMessage[] = [];
     const sub = await daemon.client.subscribe(
-      { type: "command", action: "events/subscribe", id: "sub-1" },
+      { type: "command", action: "events/subscribe", id: "sub-1", payload: { profile } },
       { onEvent: (evt) => subEvents.push(evt) },
     );
-
-    const session = await connectToDaemonSession(worktree, fixtureProfile(worktree));
     try {
 
       const buildResp = await daemon.client.send({

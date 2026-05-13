@@ -12,7 +12,6 @@ describe("SessionErrorCode union", () => {
     }
     // Pre-existing codes.
     takesCode("E_PROFILE_MISMATCH");
-    takesCode("E_SESSION_ALREADY_RUNNING");
     takesCode("E_SESSION_NOT_RUNNING");
     takesCode("E_SESSION_STOPPING");
     takesCode("E_RPC_FAILED");

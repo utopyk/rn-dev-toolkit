@@ -278,7 +278,16 @@ describe("daemon session boot (integration)", () => {
     expect(ping.type).toBe("response");
   }, 15_000);
 
-  it("rejects session/start when a session is already running", async () => {
+  // Phase D8 — invert the singleton-pin. Pre-D8 a second `session/start`
+  // against an active daemon was rejected with `E_SESSION_ALREADY_RUNNING`.
+  // The multi-session contract is:
+  //   - Distinct sessionIds + distinct metroPorts → both succeed.
+  //   - Same sessionId (only reachable in unit tests; the RPC auto-mints
+  //     a fresh one) → `E_SESSION_ALREADY_EXISTS`. Pinned in
+  //     `supervisor-multi.test.ts:176`.
+  //   - Distinct sessionIds + colliding metroPort → `E_PORT_CONFLICT`.
+
+  it("two session/start calls with distinct profiles + distinct ports BOTH succeed (D8)", async () => {
     const { path: worktree, cleanup } = makeTestWorktree();
     cleanups.push(cleanup);
 
@@ -287,45 +296,101 @@ describe("daemon session boot (integration)", () => {
     });
     liveHandles.push(daemon);
 
-    const minimalProfile = {
-      name: "test",
-      isDefault: true,
-      worktree: null,
-      branch: "main",
-      platform: "ios",
-      mode: "quick",
-      metroPort: 8081,
-      devices: {},
-      buildVariant: "debug",
-      preflight: { checks: [], frequency: "once" },
-      onSave: [],
-      env: {},
-      projectRoot: worktree,
-    };
+    const profileA = makeMinimalProfile(worktree, "alpha", 8081);
+    const profileB = makeMinimalProfile(worktree, "beta", 8082);
 
-    // First start succeeds.
     const first = await daemon.client.send({
       type: "command",
       action: "session/start",
-      id: "start-a",
-      payload: { profile: minimalProfile },
+      id: "d8-start-a",
+      payload: { profile: profileA },
     });
-    expect((first.payload as { status: string }).status).toBe("starting");
+    const firstPayload = first.payload as { status?: string; sessionId?: string };
+    expect(firstPayload.status).toBe("starting");
+    expect(typeof firstPayload.sessionId).toBe("string");
 
-    // Wait for running by polling status (no event subscription here).
-    await waitForStatus(daemon, "running", 3_000);
-
-    // Second start while running returns an error envelope.
     const second = await daemon.client.send({
       type: "command",
       action: "session/start",
-      id: "start-b",
-      payload: { profile: minimalProfile },
+      id: "d8-start-b",
+      payload: { profile: profileB },
     });
-    const errPayload = second.payload as { code?: string };
-    expect(errPayload.code).toBe("E_SESSION_ALREADY_RUNNING");
+    const secondPayload = second.payload as { status?: string; sessionId?: string };
+    expect(secondPayload.status).toBe("starting");
+    expect(typeof secondPayload.sessionId).toBe("string");
+    expect(secondPayload.sessionId).not.toBe(firstPayload.sessionId);
+
+    // sessions/list reports both. (`session/status` without sessionId
+    // would now return E_SESSION_AMBIGUOUS — multi-session callers use
+    // sessions/list as the canonical snapshot.)
+    const listResp = await daemon.client.send({
+      type: "command",
+      action: "sessions/list",
+      id: "d8-list",
+    });
+    const listPayload = listResp.payload as {
+      sessions?: Array<{ sessionId?: string; profileName?: string }>;
+    };
+    const ids = (listPayload.sessions ?? []).map((e) => e.sessionId).sort();
+    expect(ids).toEqual(
+      [firstPayload.sessionId, secondPayload.sessionId].sort(),
+    );
+    const names = (listPayload.sessions ?? []).map((e) => e.profileName).sort();
+    expect(names).toEqual(["alpha", "beta"]);
+  }, 15_000);
+
+  it("two session/start calls with distinct profiles but colliding metroPort return E_PORT_CONFLICT (D8)", async () => {
+    const { path: worktree, cleanup } = makeTestWorktree();
+    cleanups.push(cleanup);
+
+    const daemon = await spawnTestDaemon(worktree, {
+      env: { RN_DEV_DAEMON_BOOT_MODE: "fake" },
+    });
+    liveHandles.push(daemon);
+
+    // Same port (8081) on both — different names so this isn't an
+    // E_SESSION_ALREADY_EXISTS clash, and different sessionIds get
+    // auto-minted by the RPC handler.
+    const profileA = makeMinimalProfile(worktree, "alpha", 8081);
+    const profileB = makeMinimalProfile(worktree, "beta-same-port", 8081);
+
+    const first = await daemon.client.send({
+      type: "command",
+      action: "session/start",
+      id: "d8-port-a",
+      payload: { profile: profileA },
+    });
+    expect((first.payload as { status?: string }).status).toBe("starting");
+
+    const second = await daemon.client.send({
+      type: "command",
+      action: "session/start",
+      id: "d8-port-b",
+      payload: { profile: profileB },
+    });
+    const errPayload = second.payload as { code?: string; message?: string };
+    expect(errPayload.code).toBe("E_PORT_CONFLICT");
+    expect(errPayload.message).toMatch(/port\s+8081/i);
   }, 15_000);
 });
+
+function makeMinimalProfile(worktree: string, name: string, metroPort: number) {
+  return {
+    name,
+    isDefault: false,
+    worktree: null,
+    branch: "main",
+    platform: "ios",
+    mode: "quick",
+    metroPort,
+    devices: {},
+    buildVariant: "debug",
+    preflight: { checks: [], frequency: "once" },
+    onSave: [],
+    env: {},
+    projectRoot: worktree,
+  };
+}
 
 async function waitForEvent(
   events: IpcMessage[],

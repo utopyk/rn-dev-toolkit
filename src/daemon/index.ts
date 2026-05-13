@@ -477,12 +477,15 @@ async function handleSessionStart(
   // would auto-release on send-conn close (a few ms after the
   // response) and tear the session down underneath the caller.
   //
-  // Multi-session semantics: this handler preserves the single-session
-  // invariant from the pre-D2 world — if ANY session is already active
-  // it rejects with `E_SESSION_ALREADY_RUNNING`. Multi-session callers
-  // boot additional sessions via `events/subscribe { profile }` on a
-  // fresh socket. D8 flips this rule (the `session-boot.test.ts:287`
-  // assertion).
+  // Phase D8 — multi-session: this RPC mints a fresh sessionId on
+  // every call and delegates collision handling to the supervisor.
+  // Pre-D8 the handler enforced single-session via a wrapping
+  // `E_SESSION_ALREADY_RUNNING` gate; the supervisor's per-session
+  // Map<SessionId, …> + `E_SESSION_ALREADY_EXISTS` (sessionId clash)
+  // + `E_PORT_CONFLICT` (metroPort clash) is the new contract.
+  // sessionId is auto-minted, so `E_SESSION_ALREADY_EXISTS` from this
+  // entry point is unreachable in practice — collisions surface via
+  // `E_PORT_CONFLICT` instead.
   const payloadCandidate = event.message.payload;
   const profileCandidate =
     payloadCandidate &&
@@ -498,20 +501,6 @@ async function handleSessionStart(
       action: "session/start",
       id: event.message.id,
       payload: { code: validation.code, message: validation.message },
-    });
-    return;
-  }
-
-  const active = activeSessions(supervisor);
-  if (active.length > 0) {
-    event.reply({
-      type: "response",
-      action: "session/start",
-      id: event.message.id,
-      payload: {
-        code: "E_SESSION_ALREADY_RUNNING",
-        message: `session is ${active[0].state.status}; stop it before starting a new one`,
-      },
     });
     return;
   }

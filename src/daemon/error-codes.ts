@@ -3,12 +3,13 @@
 //
 // Before this file existed, error codes were bare string literals at
 // each `code: "E_..."` site in [src/daemon/index.ts] and adjacent
-// handlers. The renames the multi-session plan introduces
-// (`E_PROFILE_MISMATCH` → `E_SESSION_NOT_FOUND` for the attach-by-id
-// path; `E_SESSION_ALREADY_RUNNING` → `E_SESSION_ALREADY_EXISTS` for
-// the same-sessionId case) would land silently — any string-comparing
-// caller keeps compiling against the old code. With a central union,
-// a rename or addition becomes a compile error at every consumer.
+// handlers. The multi-session migration renames (`E_PROFILE_MISMATCH` →
+// `E_SESSION_NOT_FOUND` for the attach-by-id path; D8 lifted the
+// `E_SESSION_ALREADY_RUNNING` singleton-pin in favor of
+// `E_SESSION_ALREADY_EXISTS` + `E_PORT_CONFLICT`) would land silently
+// otherwise — any string-comparing caller keeps compiling against the
+// old code. With a central union, a rename or addition becomes a
+// compile error at every consumer.
 //
 // Adoption is incremental: existing handlers can keep emitting string
 // literals; new handlers in D1+ use the union. The compiler enforces
@@ -21,9 +22,8 @@
  * as they're introduced in D1+. See decision register § A5.
  */
 export type SessionErrorCode =
-  // Pre-existing — emitted by today's single-session supervisor.
+  // Pre-existing — emitted by today's supervisor.
   | "E_PROFILE_MISMATCH"
-  | "E_SESSION_ALREADY_RUNNING"
   | "E_SESSION_NOT_RUNNING"
   | "E_SESSION_STOPPING"
   // Pre-existing — emitted by the daemon RPC dispatcher.

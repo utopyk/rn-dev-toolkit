@@ -5,13 +5,22 @@ import { CapabilityRegistry } from "../capabilities.js";
 import type { RegisteredModule } from "../../../modules/registry.js";
 import type { ModuleManifest } from "@rn-dev/module-sdk";
 
-// Phase D4 — cross-session ModuleHost refcount. Two sessions for the
-// same worktree both `acquire()` the same (moduleId, scopeUnit) pair;
-// the manager holds ONE subprocess and only shuts it down once BOTH
-// sessions have released. Walks the real echo fixture so the assertions
-// also pin the spawn-down handshake under real `per-worktree` semantics
-// (the scope this plan unblocked at § B4 — `global` would route through
-// the idle-shutdown timer instead and obscure the refcount edge).
+// Phase D4 — ModuleHostManager refcount across multiple consumers.
+//
+// Note: in production today each session boots its own
+// `ModuleHostManager` (createModuleSystem runs per-boot), so the
+// "two sessions share a manager" architecture isn't currently
+// reachable through the daemon — both consumers below live in the
+// SAME manager instance. The unit-level invariant the test pins is
+// still load-bearing: ModuleHostManager's `consumers: Set<string>`
+// drops the subprocess only on rc=0, which is the precondition for
+// any future shared-manager design and is the property the
+// supervisor's D4 release walk relies on per-session.
+//
+// Walks the real echo fixture so the assertions also pin the
+// spawn-down handshake under real `per-worktree` semantics
+// (`global` would route through the idle-shutdown timer instead
+// and obscure the refcount edge).
 
 const FIXTURE_DIR = join(
   __dirname,

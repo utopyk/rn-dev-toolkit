@@ -69,6 +69,7 @@ function makeFakeBoot(): { boot: SessionBootFn; lastServices: { current: Session
   const lastServices = { current: null as SessionServices | null };
   const boot: SessionBootFn = async (opts: BootSessionServicesOptions) => {
     const services: SessionServices = {
+      sessionId: opts.sessionId,
       metro: new EventEmitter() as unknown as MetroManager,
       devtools: new EventEmitter() as unknown as DevToolsManager,
       builder: new EventEmitter() as unknown as Builder,

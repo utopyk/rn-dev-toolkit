@@ -18,19 +18,44 @@ import { describe, it, expect, vi } from "vitest";
 import { handleBuilderBuild } from "../client-rpcs.js";
 import type { SessionServices } from "../../core/session/boot.js";
 import type { DaemonSupervisor } from "../supervisor.js";
-import type { Builder } from "../../core/builder.js";
+import type { Builder, BuildHandle, BuildResult } from "../../core/builder.js";
 import type { HookManager } from "../../core/hooks/manager.js";
 import type { ValidatedProfile } from "../profile-guard.js";
 import type { IpcMessage } from "../../core/ipc.js";
+import { generateSessionId } from "../../core/identifiers.js";
 
 const PROFILE_A = { tag: "A" } as unknown as ValidatedProfile;
 const PROFILE_B = { tag: "B" } as unknown as ValidatedProfile;
 
-function makeBuilder(): Builder {
-  // Real EventEmitter so .once('done') wiring in the handler reaches
-  // our manual emit. Cast to Builder for the SessionServices field.
+/**
+ * Phase D3 — fake `Builder` whose `build()` returns a `BuildHandle`
+ * whose `promise` resolves when the test emits `done` on the
+ * EventEmitter. Mirrors the real Builder contract: the promise is
+ * the post-hook trigger; the `done` event still fires for downstream
+ * fan-out. Tests emit `done` to settle the promise.
+ */
+function makeBuilder(opts?: { onBuild?: (opts: unknown) => void }): Builder {
   const e = new EventEmitter();
-  (e as unknown as { build: (opts: unknown) => void }).build = vi.fn();
+  let counter = 0;
+  (e as unknown as { build: (opts: unknown) => BuildHandle }).build = vi.fn(
+    (callOpts: unknown): BuildHandle => {
+      opts?.onBuild?.(callOpts);
+      const buildId = `bh-${++counter}`;
+      let resolveResult!: (r: BuildResult) => void;
+      const promise = new Promise<BuildResult>((resolve) => {
+        resolveResult = resolve;
+      });
+      // Wire the test's manual `done` emit to settle this build's
+      // promise — same single-resolution contract the real Builder
+      // honours via its child_process exit handler.
+      e.once("done", () =>
+        resolveResult({ success: true, errors: [], rawOutput: "" }),
+      );
+      return { buildId, promise, cancel: () => {} };
+    },
+  );
+  (e as unknown as { dispose: () => Promise<void> }).dispose = async () =>
+    undefined;
   return e as unknown as Builder;
 }
 
@@ -43,6 +68,7 @@ function makeServices(
 ): SessionServices {
   const hookManager = { fire: fire as FireFn } as unknown as HookManager;
   return {
+    sessionId: generateSessionId(),
     metro: undefined as never,
     devtools: undefined as never,
     watcher: null,
@@ -85,9 +111,10 @@ function buildMsg(payload: unknown = VALID_BUILD_PAYLOAD): IpcMessage {
 describe("builder/build hook firing (H2g)", () => {
   it("fires build/pre BEFORE invoking Builder.build()", async () => {
     const calls: string[] = [];
-    const builder = makeBuilder();
-    (builder as unknown as { build: (opts: unknown) => void }).build = vi.fn(() => {
-      calls.push("builder.build");
+    const builder = makeBuilder({
+      onBuild: () => {
+        calls.push("builder.build");
+      },
     });
     const fire = vi.fn(async (target: string) => {
       calls.push(`fire:${target}`);
@@ -111,9 +138,12 @@ describe("builder/build hook firing (H2g)", () => {
   });
 
   it("aborts the RPC with E_HOOK_FAILED when build/pre throws (onFail:'hard')", async () => {
-    const builder = makeBuilder();
     const buildSpy = vi.fn();
-    (builder as unknown as { build: (opts: unknown) => void }).build = buildSpy;
+    const builder = makeBuilder({
+      onBuild: () => {
+        buildSpy();
+      },
+    });
     const fire = vi.fn(async (target: string) => {
       if (target === "build/pre") throw new Error("hook hard-failed");
       return { ok: true, fired: 0, skipped: 0, failures: [] };
@@ -138,7 +168,6 @@ describe("builder/build hook firing (H2g)", () => {
   it("fires build/post AFTER the Builder emits 'done'", async () => {
     const calls: string[] = [];
     const builder = makeBuilder();
-    (builder as unknown as { build: (opts: unknown) => void }).build = vi.fn();
     const fire = vi.fn(async (target: string) => {
       calls.push(`fire:${target}`);
       return { ok: true, fired: 0, skipped: 0, failures: [] };
@@ -147,8 +176,10 @@ describe("builder/build hook firing (H2g)", () => {
     const services = makeServices(fire, builder);
     await handleBuilderBuild(buildMsg(), services, fakeSupervisor("/tmp/wt"));
 
-    // Trigger 'done' — build/post should fire (detached, so wait one
-    // microtask for the .catch() chain to settle).
+    // Trigger 'done' — build/post should fire. The fake Builder's
+    // build() wires this emit to its returned BuildHandle.promise
+    // resolver, so the handler's `handle.promise.then()` chain
+    // settles on the next microtask.
     (builder as unknown as EventEmitter).emit("done", { success: true });
     await new Promise((r) => setImmediate(r));
 
@@ -160,9 +191,8 @@ describe("builder/build hook firing (H2g)", () => {
     );
   });
 
-  it("uses .once() on 'done' so a second build does not double-fire post from a stale subscriber", async () => {
+  it("scopes post-hook to each build's BuildHandle.promise so a second build does not double-fire post from a stale subscriber", async () => {
     const builder = makeBuilder();
-    (builder as unknown as { build: (opts: unknown) => void }).build = vi.fn();
     const fire = vi.fn(async () => ({
       ok: true,
       fired: 0,
@@ -199,7 +229,6 @@ describe("builder/build hook firing (H2g)", () => {
 
   it("a build/post hook failure does NOT propagate (RPC has long since returned)", async () => {
     const builder = makeBuilder();
-    (builder as unknown as { build: (opts: unknown) => void }).build = vi.fn();
     const fire = vi.fn(async (target: string) => {
       if (target === "build/post") throw new Error("post-hook hard-failed");
       return { ok: true, fired: 0, skipped: 0, failures: [] };

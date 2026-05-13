@@ -198,29 +198,29 @@ async function dispatch(
 ): Promise<unknown> {
   switch (message.action) {
     case "metro/reload": {
-      const ok = services.metro.reload(services.worktreeKey);
+      const ok = services.metro.reload(services.sessionId);
       return { ok };
     }
     case "metro/devMenu": {
-      const ok = services.metro.devMenu(services.worktreeKey);
+      const ok = services.metro.devMenu(services.sessionId);
       return { ok };
     }
     case "metro/getInstance": {
-      return { instance: services.metro.getInstance(services.worktreeKey) };
+      return { instance: services.metro.getInstance(services.sessionId) };
     }
     case "devtools/listNetwork": {
       const filter = readObjectField(message.payload, "filter");
       const list = services.devtools.listNetwork(
-        services.worktreeKey,
+        services.sessionId,
         filter as Parameters<typeof services.devtools.listNetwork>[1],
       );
       return list;
     }
     case "devtools/status": {
-      return services.devtools.status(services.worktreeKey);
+      return services.devtools.status(services.sessionId);
     }
     case "devtools/clear": {
-      services.devtools.clear(services.worktreeKey);
+      services.devtools.clear(services.sessionId);
       return { ok: true };
     }
     case "devtools/selectTarget": {
@@ -231,15 +231,16 @@ async function dispatch(
           message: "devtools/selectTarget: targetId is required",
         };
       }
-      await services.devtools.selectTarget(services.worktreeKey, targetId);
+      await services.devtools.selectTarget(services.sessionId, targetId);
       return { ok: true };
     }
     case "devtools/restart": {
       // Composition lives in DevToolsManager.restart() — the manager
-      // owns the per-worktree state machine, so exposing the boundary
-      // as a single atomic verb here keeps concurrent observers from
-      // seeing the stop/start gap. Architecture P1-2 on PR #26.
-      return services.devtools.restart(services.worktreeKey);
+      // owns the per-session state machine (Phase D3 flipped this
+      // from worktreeKey), so exposing the boundary as a single
+      // atomic verb here keeps concurrent observers from seeing the
+      // stop/start gap. Architecture P1-2 on PR #26.
+      return services.devtools.restart(services.sessionId);
     }
     case "builder/build": {
       return await handleBuilderBuild(message, services, supervisor);
@@ -305,26 +306,37 @@ export async function handleBuilderBuild(
     };
   }
 
-  // Arrange the post-fire BEFORE kicking off the Builder so we can't
-  // miss a fast 'done' (e.g. concurrency-guard rejection emits 'done'
-  // synchronously). once() so a long-lived Builder instance doesn't
-  // leak listeners across builds.
-  services.builder.once("done", () => {
-    void services.hookManager
-      .fire(
+  // Phase D3 — Builder.build() returns a `BuildHandle` whose promise
+  // resolves exactly once per call. Attaching the post-hook on
+  // `handle.promise` instead of `services.builder.once("done")`
+  // closes two pre-D3 hazards in one shot:
+  //   1. listener leak — the previous `once("done")` callback stayed
+  //      attached for the lifetime of the Builder if `done` never
+  //      fired (e.g. wedged subprocess). The promise resolver chain
+  //      settles when the subprocess exits or the concurrency guard
+  //      rejects.
+  //   2. cross-talk — `auto-build.ts` fires iOS+Android concurrently
+  //      against one Builder. The pre-D3 once() listener for the
+  //      iOS build's post-hook would also fire on the *Android*
+  //      build's synchronous concurrency-guard `done`, then unhook
+  //      itself before the real iOS done arrived. Promise resolution
+  //      is per-handle by construction, so each build's post-hook
+  //      lines up with its own outcome.
+  const handle = services.builder.build(parsed.opts);
+  void handle.promise
+    .then(() =>
+      services.hookManager.fire(
         "build/post",
         { profile: services.validatedProfile },
         services.validatedProfile,
-      )
-      .catch(() => {
-        // build/post failures (incl. onFail:'hard') are intentionally
-        // swallowed: the build is already done, the RPC has long since
-        // returned, and the failure surfaces via the audit log + the
-        // hooks/fired session event the dispatcher emits regardless.
-      });
-  });
-
-  services.builder.build(parsed.opts);
+      ),
+    )
+    .catch(() => {
+      // build/post failures (incl. onFail:'hard') are intentionally
+      // swallowed: the build is already done, the RPC has long since
+      // returned, and the failure surfaces via the audit log + the
+      // hooks/fired session event the dispatcher emits regardless.
+    });
   return { ok: true };
 }
 

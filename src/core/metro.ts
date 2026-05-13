@@ -6,6 +6,7 @@ import * as net from "net";
 import { spawn, execFile } from "child_process";
 import type { ArtifactStore } from "./artifact.js";
 import type { MetroInstance } from "./types.js";
+import type { SessionId } from "./identifiers.js";
 
 /**
  * Resolve react-native binary: prefer local .bin, fall back to npx.
@@ -52,14 +53,21 @@ export function isMetroStartupBanner(line: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Manages multiple Metro bundler instances, one per worktree.
+ * Manages multiple Metro bundler instances, one per session. Phase D3
+ * flipped the Map key from `worktreeKey` to `SessionId` (alone — not a
+ * composite) so two concurrent sessions for the same worktree on
+ * different metroPorts can coexist. `worktreeKey` survives as metadata
+ * on each `MetroInstance` because port persistence and MetroLogsStore
+ * routing remain keyed by worktree.
  *
- * Emits:
- *   'log'    — { worktreeKey, line, stream: 'stdout' | 'stderr' }
- *   'status' — { worktreeKey, status, error?: string }
+ * Emits (Phase D3 — payloads now carry both `sessionId` and
+ * `worktreeKey`; consumers route on sessionId, log stores fan out on
+ * worktreeKey):
+ *   'log'    — { sessionId, worktreeKey, line, stream: 'stdout' | 'stderr' }
+ *   'status' — { sessionId, worktreeKey, status, error?: string }
  */
 export class MetroManager extends EventEmitter {
-  private instances: Map<string, MetroInstance> = new Map();
+  private instances: Map<SessionId, MetroInstance> = new Map();
 
   constructor(
     private artifacts: ArtifactStore,
@@ -335,6 +343,7 @@ export class MetroManager extends EventEmitter {
    * subscribe without MetroManager needing to buffer them.
    */
   start(options: {
+    sessionId: SessionId;
     worktreeKey: string;
     projectRoot: string;
     port?: number;
@@ -343,6 +352,7 @@ export class MetroManager extends EventEmitter {
     env?: Record<string, string>;
   }): MetroInstance {
     const {
+      sessionId,
       worktreeKey,
       projectRoot,
       port: explicitPort,
@@ -350,6 +360,10 @@ export class MetroManager extends EventEmitter {
       verbose = false,
       env,
     } = options;
+
+    if (this.instances.has(sessionId)) {
+      throw new Error(`MetroManager: session ${sessionId} already started`);
+    }
 
     const port = explicitPort ?? this.allocatePort(worktreeKey);
 
@@ -373,6 +387,7 @@ export class MetroManager extends EventEmitter {
     });
 
     const instance: MetroInstance = {
+      sessionId,
       worktree: worktreeKey,
       port,
       pid: proc.pid ?? 0,
@@ -381,7 +396,7 @@ export class MetroManager extends EventEmitter {
       projectRoot,
     };
 
-    this.instances.set(worktreeKey, instance);
+    this.instances.set(sessionId, instance);
 
     // Read a Node stream line by line — non-blocking
     const attachStream = (stream: NodeJS.ReadableStream | null, streamName: "stdout" | "stderr") => {
@@ -399,9 +414,9 @@ export class MetroManager extends EventEmitter {
               instance.status === "starting"
             ) {
               instance.status = "running";
-              this.emit("status", { worktreeKey, status: "running" });
+              this.emit("status", { sessionId, worktreeKey, status: "running" });
             }
-            this.emit("log", { worktreeKey, line, stream: streamName });
+            this.emit("log", { sessionId, worktreeKey, line, stream: streamName });
           }
         }
       });
@@ -420,7 +435,7 @@ export class MetroManager extends EventEmitter {
     let probeAttempts = 0;
     const startupProbe = setInterval(() => {
       probeAttempts++;
-      const current = this.instances.get(worktreeKey);
+      const current = this.instances.get(sessionId);
       if (!current || current.status !== "starting" || probeAttempts > 60) {
         clearInterval(startupProbe);
         return;
@@ -432,7 +447,7 @@ export class MetroManager extends EventEmitter {
           (res) => {
             if (res.statusCode === 200 && instance.status === "starting") {
               instance.status = "running";
-              this.emit("status", { worktreeKey, status: "running" });
+              this.emit("status", { sessionId, worktreeKey, status: "running" });
               clearInterval(startupProbe);
             }
             res.resume();
@@ -449,13 +464,17 @@ export class MetroManager extends EventEmitter {
 
     // Handle process exit
     proc.on("exit", (code) => {
-      const current = this.instances.get(worktreeKey);
+      const current = this.instances.get(sessionId);
       if (current) {
         const exitCode = code ?? 1;
         const newStatus = exitCode === 0 ? "stopped" : "error";
         current.status = newStatus;
-        const payload: { worktreeKey: string; status: string; error?: string } =
-          { worktreeKey, status: newStatus };
+        const payload: {
+          sessionId: SessionId;
+          worktreeKey: string;
+          status: string;
+          error?: string;
+        } = { sessionId, worktreeKey, status: newStatus };
         if (exitCode !== 0) {
           payload.error = `Metro exited with code ${exitCode}`;
         }
@@ -467,11 +486,11 @@ export class MetroManager extends EventEmitter {
   }
 
   /**
-   * Stop the Metro instance for `worktreeKey` by sending SIGTERM.
+   * Stop the Metro instance for `sessionId` by sending SIGTERM.
    * Returns true if an instance was found and signalled, false otherwise.
    */
-  stop(worktreeKey: string): boolean {
-    const instance = this.instances.get(worktreeKey);
+  stop(sessionId: SessionId): boolean {
+    const instance = this.instances.get(sessionId);
     if (!instance) {
       return false;
     }
@@ -488,15 +507,19 @@ export class MetroManager extends EventEmitter {
     }
 
     instance.status = "stopped";
-    this.instances.delete(worktreeKey);
-    this.emit("status", { worktreeKey, status: "stopped" });
+    this.instances.delete(sessionId);
+    this.emit("status", {
+      sessionId,
+      worktreeKey: instance.worktree,
+      status: "stopped",
+    });
     return true;
   }
 
   /** Stop all running Metro instances. */
   stopAll(): void {
-    for (const key of [...this.instances.keys()]) {
-      this.stop(key);
+    for (const sid of [...this.instances.keys()]) {
+      this.stop(sid);
     }
   }
 
@@ -504,8 +527,8 @@ export class MetroManager extends EventEmitter {
   // Accessors
   // -------------------------------------------------------------------------
 
-  getInstance(worktreeKey: string): MetroInstance | null {
-    return this.instances.get(worktreeKey) ?? null;
+  getInstance(sessionId: SessionId): MetroInstance | null {
+    return this.instances.get(sessionId) ?? null;
   }
 
   getAll(): MetroInstance[] {
@@ -516,8 +539,8 @@ export class MetroManager extends EventEmitter {
    * Send a reload signal to the Metro instance's connected device.
    * Uses the Metro dev server's /reload endpoint.
    */
-  reload(worktreeKey: string): boolean {
-    const instance = this.instances.get(worktreeKey);
+  reload(sessionId: SessionId): boolean {
+    const instance = this.instances.get(sessionId);
     if (!instance || instance.status !== "running") return false;
     try {
       const http = require("http") as typeof import("http");
@@ -537,8 +560,8 @@ export class MetroManager extends EventEmitter {
    * Open dev menu on the connected device.
    * Uses the Metro dev server's /open-debugger endpoint.
    */
-  devMenu(worktreeKey: string): boolean {
-    const instance = this.instances.get(worktreeKey);
+  devMenu(sessionId: SessionId): boolean {
+    const instance = this.instances.get(sessionId);
     if (!instance || instance.status !== "running") return false;
     try {
       const http = require("http") as typeof import("http");

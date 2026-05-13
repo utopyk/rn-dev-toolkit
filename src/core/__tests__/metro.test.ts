@@ -12,7 +12,17 @@ import { tmpdir } from "os";
 import { join } from "path";
 import { ArtifactStore } from "../artifact.js";
 import { MetroManager, METRO_STARTUP_BANNERS, isMetroStartupBanner } from "../metro.js";
+import { asSessionId, type SessionId } from "../identifiers.js";
 import type { MetroInstance } from "../types.js";
+
+/**
+ * Test sugar: brand a string as a SessionId for the typed API. Production
+ * callers always go through `generateSessionId()`; the tests need
+ * deterministic ids (`wt-x`, `wt-store`, etc.) for assertion clarity.
+ */
+function sid(s: string): SessionId {
+  return asSessionId(s);
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -144,9 +154,10 @@ describe("MetroManager", () => {
 
     it("skips ports already used by running instances", () => {
       // Register a running instance on port 8081
-      (manager as unknown as { instances: Map<string, MetroInstance> }).instances.set(
-        "wt-running",
+      (manager as unknown as { instances: Map<SessionId, MetroInstance> }).instances.set(
+        sid("wt-running"),
         {
+          sessionId: sid("wt-running"),
           worktree: "wt-running",
           port: 8081,
           pid: 99,
@@ -163,9 +174,10 @@ describe("MetroManager", () => {
     it("throws when no ports are available in range", () => {
       // Fill all ports in range [8081, 8085] with running instances
       for (let p = 8081; p <= 8085; p++) {
-        (manager as unknown as { instances: Map<string, MetroInstance> }).instances.set(
-          `wt-${p}`,
+        (manager as unknown as { instances: Map<SessionId, MetroInstance> }).instances.set(
+          sid(`wt-${p}`),
           {
+            sessionId: sid(`wt-${p}`),
             worktree: `wt-${p}`,
             port: p,
             pid: p,
@@ -233,11 +245,12 @@ describe("MetroManager", () => {
 
   describe("getInstance()", () => {
     it("returns null when no instance exists for key", () => {
-      expect(manager.getInstance("wt-unknown")).toBeNull();
+      expect(manager.getInstance(sid("wt-unknown"))).toBeNull();
     });
 
     it("returns the instance after it has been registered", () => {
       const instance: MetroInstance = {
+        sessionId: sid("wt-x"),
         worktree: "wt-x",
         port: 8081,
         pid: 1001,
@@ -245,12 +258,12 @@ describe("MetroManager", () => {
         startedAt: new Date(),
         projectRoot: "/proj/x",
       };
-      (manager as unknown as { instances: Map<string, MetroInstance> }).instances.set(
-        "wt-x",
+      (manager as unknown as { instances: Map<SessionId, MetroInstance> }).instances.set(
+        sid("wt-x"),
         instance
       );
 
-      expect(manager.getInstance("wt-x")).toBe(instance);
+      expect(manager.getInstance(sid("wt-x"))).toBe(instance);
     });
   });
 
@@ -261,6 +274,7 @@ describe("MetroManager", () => {
 
     it("returns all registered instances", () => {
       const a: MetroInstance = {
+        sessionId: sid("wt-a"),
         worktree: "wt-a",
         port: 8081,
         pid: 1,
@@ -269,6 +283,7 @@ describe("MetroManager", () => {
         projectRoot: "/a",
       };
       const b: MetroInstance = {
+        sessionId: sid("wt-b"),
         worktree: "wt-b",
         port: 8082,
         pid: 2,
@@ -277,9 +292,9 @@ describe("MetroManager", () => {
         projectRoot: "/b",
       };
 
-      const instances = (manager as unknown as { instances: Map<string, MetroInstance> }).instances;
-      instances.set("wt-a", a);
-      instances.set("wt-b", b);
+      const instances = (manager as unknown as { instances: Map<SessionId, MetroInstance> }).instances;
+      instances.set(sid("wt-a"), a);
+      instances.set(sid("wt-b"), b);
 
       const all = manager.getAll();
       expect(all).toHaveLength(2);
@@ -298,6 +313,7 @@ describe("MetroManager", () => {
       const spawnMock = spawn as Mock;
 
       manager.start({
+        sessionId: sid("wt-spawn"),
         worktreeKey: "wt-spawn",
         projectRoot: "/my/project",
         port: 8081,
@@ -317,6 +333,7 @@ describe("MetroManager", () => {
       const spawnMock = spawn as Mock;
 
       manager.start({
+        sessionId: sid("wt-reset"),
         worktreeKey: "wt-reset",
         projectRoot: "/my/project",
         port: 8081,
@@ -332,6 +349,7 @@ describe("MetroManager", () => {
       const spawnMock = spawn as Mock;
 
       manager.start({
+        sessionId: sid("wt-verbose"),
         worktreeKey: "wt-verbose",
         projectRoot: "/my/project",
         port: 8081,
@@ -344,12 +362,13 @@ describe("MetroManager", () => {
 
     it("stores instance with status 'starting' after spawn", async () => {
       manager.start({
+        sessionId: sid("wt-store"),
         worktreeKey: "wt-store",
         projectRoot: "/my/project",
         port: 8082,
       });
 
-      const instance = manager.getInstance("wt-store");
+      const instance = manager.getInstance(sid("wt-store"));
       expect(instance).not.toBeNull();
       expect(instance!.status).toBe("starting");
       expect(instance!.port).toBe(8082);
@@ -358,6 +377,7 @@ describe("MetroManager", () => {
 
     it("returns the MetroInstance", () => {
       const instance = manager.start({
+        sessionId: sid("wt-ret"),
         worktreeKey: "wt-ret",
         projectRoot: "/my/project",
         port: 8081,
@@ -373,28 +393,29 @@ describe("MetroManager", () => {
 
   describe("stop()", () => {
     it("returns false when no instance exists", () => {
-      expect(manager.stop("wt-missing")).toBe(false);
+      expect(manager.stop(sid("wt-missing"))).toBe(false);
     });
 
     it("returns true and removes instance when it exists", () => {
       manager.start({
+        sessionId: sid("wt-stop"),
         worktreeKey: "wt-stop",
         projectRoot: "/proj",
         port: 8081,
       });
 
-      expect(manager.getInstance("wt-stop")).not.toBeNull();
+      expect(manager.getInstance(sid("wt-stop"))).not.toBeNull();
 
-      const result = manager.stop("wt-stop");
+      const result = manager.stop(sid("wt-stop"));
       expect(result).toBe(true);
-      expect(manager.getInstance("wt-stop")).toBeNull();
+      expect(manager.getInstance(sid("wt-stop"))).toBeNull();
     });
   });
 
   describe("stopAll()", () => {
     it("stops all running instances", () => {
-      manager.start({ worktreeKey: "wt-1", projectRoot: "/p1", port: 8081 });
-      manager.start({ worktreeKey: "wt-2", projectRoot: "/p2", port: 8082 });
+      manager.start({ sessionId: sid("wt-1"), worktreeKey: "wt-1", projectRoot: "/p1", port: 8081 });
+      manager.start({ sessionId: sid("wt-2"), worktreeKey: "wt-2", projectRoot: "/p2", port: 8082 });
 
       expect(manager.getAll()).toHaveLength(2);
 

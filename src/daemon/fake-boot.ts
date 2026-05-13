@@ -50,9 +50,9 @@ interface FakeMetroSurface {
   on(event: string, listener: (...args: unknown[]) => void): unknown;
   off(event: string, listener: (...args: unknown[]) => void): unknown;
   emit(event: string, ...args: unknown[]): unknown;
-  reload(worktreeKey: string): boolean;
-  devMenu(worktreeKey: string): boolean;
-  getInstance(worktreeKey: string): MetroInstance | null;
+  reload(sessionId: string): boolean;
+  devMenu(sessionId: string): boolean;
+  getInstance(sessionId: string): MetroInstance | null;
   stopAll(): void;
 }
 
@@ -60,15 +60,15 @@ interface FakeDevtoolsSurface {
   on(event: string, listener: (...args: unknown[]) => void): unknown;
   off(event: string, listener: (...args: unknown[]) => void): unknown;
   emit(event: string, ...args: unknown[]): unknown;
-  listNetwork(worktreeKey: string): {
+  listNetwork(sessionId: string): {
     entries: readonly unknown[];
     cursorDropped: boolean;
     meta: Record<string, unknown>;
   };
-  status(worktreeKey: string): Record<string, unknown>;
-  clear(worktreeKey: string): void;
-  selectTarget(worktreeKey: string, targetId: string): Promise<void>;
-  restart(worktreeKey: string): Promise<{ proxyPort: number; sessionNonce: string }>;
+  status(sessionId: string): Record<string, unknown>;
+  clear(sessionId: string): void;
+  selectTarget(sessionId: string, targetId: string): Promise<void>;
+  restart(sessionId: string): Promise<{ proxyPort: number; sessionNonce: string }>;
   dispose(): Promise<void>;
 }
 
@@ -76,7 +76,14 @@ interface FakeBuilderSurface {
   on(event: string, listener: (...args: unknown[]) => void): unknown;
   off(event: string, listener: (...args: unknown[]) => void): unknown;
   emit(event: string, ...args: unknown[]): unknown;
-  build(opts: BuildOptions): void;
+  build(opts: BuildOptions): FakeBuildHandle;
+  dispose(): Promise<void>;
+}
+
+interface FakeBuildHandle {
+  buildId: string;
+  promise: Promise<{ success: boolean; errors: unknown[]; rawOutput: string }>;
+  cancel(): void;
 }
 
 interface FakeModuleHostSurface {
@@ -108,7 +115,8 @@ export async function fakeBootSessionServices(
   opts: BootSessionServicesOptions,
 ): Promise<SessionServices> {
   const worktreeKey = opts.artifactStore.worktreeHash(opts.profile.worktree);
-  const metro = makeFakeMetro(worktreeKey);
+  const sessionId = opts.sessionId;
+  const metro = makeFakeMetro(worktreeKey, sessionId);
   const devtools = makeFakeDevtools();
   const builder = makeFakeBuilder();
   const capabilities = new CapabilityRegistry();
@@ -190,10 +198,10 @@ export async function fakeBootSessionServices(
   // and lets the listener attach first. "running" follows shortly
   // after so the integration test's `waitForEvent` completes.
   setTimeout(() => {
-    metro.emit("status", { worktreeKey, status: "starting" });
+    metro.emit("status", { sessionId, worktreeKey, status: "starting" });
   }, 5);
   setTimeout(() => {
-    metro.emit("status", { worktreeKey, status: "running" });
+    metro.emit("status", { sessionId, worktreeKey, status: "running" });
   }, 25);
 
   // Hook system parity with production three-phase boot. Build the
@@ -251,10 +259,11 @@ export async function fakeBootSessionServices(
 
   const dispose = async (): Promise<void> => {
     modulesIpc.unregister();
-    metro.emit("status", { worktreeKey, status: "stopped" });
+    metro.emit("status", { sessionId, worktreeKey, status: "stopped" });
   };
 
   return {
+    sessionId,
     metro: metro as FakeMetroSurface as unknown as MetroManager,
     devtools: devtools as FakeDevtoolsSurface as unknown as DevToolsManager,
     watcher: null as FileWatcher | null,
@@ -283,17 +292,31 @@ export async function fakeBootSessionServices(
   };
 }
 
-function makeFakeMetro(worktreeKey: string): EventEmitter & FakeMetroSurface {
+function makeFakeMetro(
+  worktreeKey: string,
+  sessionId: string,
+): EventEmitter & FakeMetroSurface {
   const emitter = new EventEmitter() as EventEmitter & FakeMetroSurface;
-  emitter.reload = (_wt: string): boolean => {
-    emitter.emit("log", { worktreeKey, line: "[fake] reload", stream: "stdout" });
+  emitter.reload = (_sid: string): boolean => {
+    emitter.emit("log", {
+      sessionId,
+      worktreeKey,
+      line: "[fake] reload",
+      stream: "stdout",
+    });
     return true;
   };
-  emitter.devMenu = (_wt: string): boolean => {
-    emitter.emit("log", { worktreeKey, line: "[fake] devMenu", stream: "stdout" });
+  emitter.devMenu = (_sid: string): boolean => {
+    emitter.emit("log", {
+      sessionId,
+      worktreeKey,
+      line: "[fake] devMenu",
+      stream: "stdout",
+    });
     return true;
   };
-  emitter.getInstance = (_wt: string): MetroInstance | null => ({
+  emitter.getInstance = (_sid: string): MetroInstance | null => ({
+    sessionId,
     worktree: "/fake",
     port: 8081,
     pid: 0,
@@ -309,24 +332,24 @@ function makeFakeMetro(worktreeKey: string): EventEmitter & FakeMetroSurface {
 
 function makeFakeDevtools(): EventEmitter & FakeDevtoolsSurface {
   const emitter = new EventEmitter() as EventEmitter & FakeDevtoolsSurface;
-  emitter.listNetwork = (worktreeKey: string) => ({
+  emitter.listNetwork = (sessionId: string) => ({
     entries: [] as readonly unknown[],
     cursorDropped: false,
-    meta: { worktreeKey },
+    meta: { sessionId },
   });
-  emitter.status = (worktreeKey: string): Record<string, unknown> => ({
-    meta: { worktreeKey },
+  emitter.status = (sessionId: string): Record<string, unknown> => ({
+    meta: { sessionId },
     targets: [],
     rnVersion: null,
     proxyPort: null,
     sessionNonce: null,
     bodyCaptureEnabled: false,
   });
-  emitter.clear = (worktreeKey: string): void => {
-    emitter.emit("status", { worktreeKey });
+  emitter.clear = (sessionId: string): void => {
+    emitter.emit("status", { sessionId });
   };
   emitter.selectTarget = async (
-    _worktreeKey: string,
+    _sessionId: string,
     _targetId: string,
   ): Promise<void> => {
     /* no-op in fake */
@@ -336,7 +359,7 @@ function makeFakeDevtools(): EventEmitter & FakeDevtoolsSurface {
   // noting for any future test that wants to verify the proxy was
   // actually torn down + rebound (Kieran TS P2-3 on PR #26).
   emitter.restart = async (
-    _worktreeKey: string,
+    _sessionId: string,
   ): Promise<{ proxyPort: number; sessionNonce: string }> => ({
     proxyPort: 9999,
     sessionNonce: "fake-nonce",
@@ -349,7 +372,18 @@ function makeFakeDevtools(): EventEmitter & FakeDevtoolsSurface {
 
 function makeFakeBuilder(): EventEmitter & FakeBuilderSurface {
   const emitter = new EventEmitter() as EventEmitter & FakeBuilderSurface;
-  emitter.build = (opts: BuildOptions): void => {
+  emitter.build = (opts: BuildOptions): FakeBuildHandle => {
+    // Mint a buildId per call so the FakeBuilder's wire shape matches
+    // the real Builder's Phase D3 contract. Tests that depended on
+    // the old void-returning build() consume the BuildHandle's
+    // promise instead of attaching a `.once("done")` listener.
+    const buildId = `fake-${Math.random().toString(36).slice(2, 10)}`;
+    let resolveResult!: (r: { success: boolean; errors: unknown[]; rawOutput: string }) => void;
+    const promise = new Promise<{ success: boolean; errors: unknown[]; rawOutput: string }>(
+      (resolve) => {
+        resolveResult = resolve;
+      },
+    );
     // Emit a deterministic sequence of line → progress → done. Each emit
     // is on a separate tick so subscribers observe the ordering the
     // real Builder produces.
@@ -363,8 +397,24 @@ function makeFakeBuilder(): EventEmitter & FakeBuilderSurface {
       emitter.emit("progress", { phase: "compiling" });
     });
     setImmediate(() => {
-      emitter.emit("done", { success: true, errors: [], platform: opts.platform });
+      emitter.emit("done", {
+        success: true,
+        errors: [],
+        platform: opts.platform,
+        buildId,
+      });
+      resolveResult({ success: true, errors: [], rawOutput: "" });
     });
+    return {
+      buildId,
+      promise,
+      cancel: () => {
+        /* no-op in fake */
+      },
+    };
+  };
+  emitter.dispose = async (): Promise<void> => {
+    /* no-op in fake */
   };
   return emitter;
 }

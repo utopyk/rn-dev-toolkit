@@ -26,7 +26,12 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import type { MetroManager } from "../metro.js";
 import type { MetroInstance } from "../types.js";
+import { asSessionId, type SessionId } from "../identifiers.js";
 import { DevToolsManager } from "../devtools.js";
+
+function sid(s: string): SessionId {
+  return asSessionId(s);
+}
 import type {
   AnyDomainTap,
   CdpCommand,
@@ -87,16 +92,16 @@ class StubConsoleTap implements AnyDomainTap {
 // ---------------------------------------------------------------------------
 
 interface MetroFake extends EventEmitter {
-  getInstance(worktreeKey: string): MetroInstance | undefined;
-  setInstance(worktreeKey: string, instance: MetroInstance | undefined): void;
+  getInstance(sessionId: SessionId): MetroInstance | undefined;
+  setInstance(sessionId: SessionId, instance: MetroInstance | undefined): void;
 }
 
 function makeMetroFake(): MetroFake {
   const bus = new EventEmitter() as MetroFake;
   const instances = new Map<string, MetroInstance>();
-  bus.getInstance = (k) => instances.get(k);
+  bus.getInstance = (k) => instances.get(k as string);
   bus.setInstance = (k, i) => {
-    if (i) instances.set(k, i);
+    if (i) instances.set(k as string, i);
     else instances.delete(k);
   };
   return bus;
@@ -188,7 +193,8 @@ describe("DomainTap seam (pre-Phase-3 architectural gate)", () => {
       },
     ]);
     metro = makeMetroFake();
-    metro.setInstance("w1", {
+    metro.setInstance(sid("w1"), {
+      sessionId: sid("w1"),
       worktree: "w1",
       port: env.metroPort,
       pid: 1,
@@ -209,13 +215,13 @@ describe("DomainTap seam (pre-Phase-3 architectural gate)", () => {
   });
 
   it("registered stub tap is attached on start()", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     expect(stub.attachCount).toBe(1);
   });
 
   it("flushes enable commands from every registered tap", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(50);
     // Upstream should have received Network.enable (built-in) AND
     // Console.enable + Runtime.enable (stub). We assert on presence, not
@@ -235,7 +241,7 @@ describe("DomainTap seam (pre-Phase-3 architectural gate)", () => {
   });
 
   it("dispatches Console events only to the Console tap", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     env.send(
       JSON.stringify({
@@ -246,11 +252,11 @@ describe("DomainTap seam (pre-Phase-3 architectural gate)", () => {
     await waitMs(30);
     expect(stub.events.map((e) => e.method)).toEqual(["Console.messageAdded"]);
     // NetworkTap's ring must stay empty — it never saw the Console event.
-    expect(mgr.listNetwork("w1").entries).toHaveLength(0);
+    expect(mgr.listNetwork(sid("w1")).entries).toHaveLength(0);
   });
 
   it("dispatches Network events only to the Network tap", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     env.send(
       JSON.stringify({
@@ -263,12 +269,12 @@ describe("DomainTap seam (pre-Phase-3 architectural gate)", () => {
       })
     );
     await waitMs(30);
-    expect(mgr.listNetwork("w1").entries).toHaveLength(1);
+    expect(mgr.listNetwork(sid("w1")).entries).toHaveLength(1);
     expect(stub.events).toHaveLength(0);
   });
 
   it("propagates metro-restart session boundary to every tap's ring", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     // Seed one entry in each tap so we can see the epoch bump clearly.
     env.send(
@@ -288,21 +294,21 @@ describe("DomainTap seam (pre-Phase-3 architectural gate)", () => {
       })
     );
     await waitMs(30);
-    const networkEpochBefore = mgr.status("w1").meta.bufferEpoch;
+    const networkEpochBefore = mgr.status(sid("w1")).meta.bufferEpoch;
     const stubEpochBefore = stub.ring.state.bufferEpoch;
 
-    metro.emit("status", { worktreeKey: "w1", status: "stopped" });
+    metro.emit("status", { sessionId: sid("w1"), worktreeKey: "w1", status: "stopped" });
 
-    const networkEpochAfter = mgr.status("w1").meta.bufferEpoch;
+    const networkEpochAfter = mgr.status(sid("w1")).meta.bufferEpoch;
     expect(networkEpochAfter).toBe(networkEpochBefore + 1);
     expect(stub.ring.state.bufferEpoch).toBe(stubEpochBefore + 1);
     expect(stub.ring.state.sessionBoundary?.reason).toBe("metro-restart");
   });
 
   it("detaches every registered tap on stop()", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
-    await mgr.stop("w1");
+    await mgr.stop(sid("w1"));
     expect(stub.detachCount).toBeGreaterThanOrEqual(1);
   });
 
@@ -310,7 +316,7 @@ describe("DomainTap seam (pre-Phase-3 architectural gate)", () => {
     // Regression guard: the manager must not assume taps handle every event.
     // NetworkTap should still populate its ring even when a second tap is
     // registered and receives an unrelated event right before.
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     env.send(
       JSON.stringify({
@@ -329,7 +335,7 @@ describe("DomainTap seam (pre-Phase-3 architectural gate)", () => {
       })
     );
     await waitMs(30);
-    expect(mgr.listNetwork("w1").entries.map((e) => e.requestId)).toEqual(["r1"]);
+    expect(mgr.listNetwork(sid("w1")).entries.map((e) => e.requestId)).toEqual(["r1"]);
     expect(stub.events.map((e) => e.method)).toEqual(["Console.messageAdded"]);
   });
 });

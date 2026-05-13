@@ -6,6 +6,7 @@ import { ArtifactStore } from "../../core/artifact.js";
 import { IpcServer } from "../../core/ipc.js";
 import { ModuleRegistry } from "../../modules/registry.js";
 import { fakeBootSessionServices } from "../fake-boot.js";
+import { generateSessionId } from "../../core/identifiers.js";
 import { SubscribeRegistry } from "../subscribe-registry.js";
 import type { Profile } from "../../core/types.js";
 import type { SessionServices } from "../../core/session/boot.js";
@@ -77,6 +78,7 @@ describe("three-phase boot trace (fake-boot)", () => {
     await ipc.start();
 
     services = await fakeBootSessionServices({
+      sessionId: generateSessionId(),
       profile: makeProfile(tmpRoot),
       projectRoot: tmpRoot,
       artifactStore: new ArtifactStore(tmpRoot),
@@ -112,6 +114,7 @@ describe("three-phase boot trace (fake-boot)", () => {
     await ipc.start();
 
     services = await fakeBootSessionServices({
+      sessionId: generateSessionId(),
       profile: makeProfile(tmpRoot),
       projectRoot: tmpRoot,
       artifactStore: new ArtifactStore(tmpRoot),
@@ -142,6 +145,7 @@ describe("three-phase boot trace (fake-boot)", () => {
     await ipc.start();
 
     services = await fakeBootSessionServices({
+      sessionId: generateSessionId(),
       profile: makeProfile(tmpRoot),
       projectRoot: tmpRoot,
       artifactStore: new ArtifactStore(tmpRoot),

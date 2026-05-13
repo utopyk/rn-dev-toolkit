@@ -533,6 +533,7 @@ export class DaemonSupervisor extends EventEmitter {
     const hostVersion = readHostVersion();
 
     const services = await this.bootFn({
+      sessionId: entry.sessionId,
       profile: entry.activeProfile,
       projectRoot: this.worktree,
       artifactStore,

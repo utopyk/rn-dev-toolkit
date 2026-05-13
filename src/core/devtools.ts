@@ -12,15 +12,16 @@
  *   - Query API: listNetwork / getNetwork / clear / selectTarget / status.
  *   - Coalesced delta emit every 100 ms.
  *
- * Events:
- *   'delta'  — { worktreeKey, addedIds, updatedIds, evictedIds, meta }
- *   'status' — { worktreeKey, meta }
+ * Events (Phase D3 — payloads carry `sessionId` + `worktreeKey`):
+ *   'delta'  — { sessionId, worktreeKey, addedIds, updatedIds, evictedIds, meta }
+ *   'status' — { sessionId, worktreeKey, meta }
  */
 
 import { EventEmitter } from "node:events";
 import { request as httpRequest } from "node:http";
 import type { MetroManager } from "./metro.js";
 import type { MetroInstance } from "./types.js";
+import type { SessionId } from "./identifiers.js";
 import { CdpProxy } from "./devtools/proxy.js";
 import { NetworkTap } from "./devtools/network-tap.js";
 import type {
@@ -55,7 +56,14 @@ type ManagerState =
   | "RECONNECTING"
   | "STOPPING";
 
-interface WorktreeState {
+interface SessionState {
+  /** Identity dimension. Phase D3 Map key. */
+  sessionId: SessionId;
+  /**
+   * ArtifactStore-hashed worktree key. Metadata after Phase D3; carried
+   * forward so emitted events keep the worktreeKey routing dimension
+   * MetroLogsStore + downstream consumers rely on.
+   */
   worktreeKey: string;
   proxy: CdpProxy;
   /**
@@ -109,7 +117,7 @@ interface WorktreeState {
 export type TapFactory = (opts: DevToolsOpts) => AnyDomainTap;
 
 export class DevToolsManager extends EventEmitter {
-  private instances: Map<string, WorktreeState> = new Map();
+  private instances: Map<SessionId, SessionState> = new Map();
   /**
    * Tap factories, invoked in order for each worktree on `start()`. The
    * built-in NetworkTap factory is seeded first and is always present. Adding
@@ -122,6 +130,7 @@ export class DevToolsManager extends EventEmitter {
     (opts) => new NetworkTap(opts),
   ];
   private readonly metroStatusListener: (payload: {
+    sessionId: SessionId;
     worktreeKey: string;
     status: string;
   }) => void;
@@ -162,24 +171,30 @@ export class DevToolsManager extends EventEmitter {
   // -------------------------------------------------------------------------
 
   /**
-   * Start the DevTools proxy for a worktree. Throws if Metro isn't running
-   * for that worktree, if no ports can be bound, or if /json cannot be
+   * Start the DevTools proxy for a session. Throws if Metro isn't running
+   * for that session, if no ports can be bound, or if /json cannot be
    * fetched after retries.
+   *
+   * Phase D3 — keyed by `SessionId`; the metadata `worktreeKey` is
+   * lifted off the resolved `MetroInstance` (`instance.worktree`) so
+   * emitted devtools events keep the worktree routing dimension that
+   * MetroLogsStore + the supervisor's fan-out layer rely on.
    */
   async start(
-    worktreeKey: string
+    sessionId: SessionId
   ): Promise<{ proxyPort: number; sessionNonce: string }> {
-    if (this.instances.has(worktreeKey)) {
-      throw new Error(`DevToolsManager: already started for ${worktreeKey}`);
+    if (this.instances.has(sessionId)) {
+      throw new Error(`DevToolsManager: already started for session ${sessionId}`);
     }
-    const metroInstance = this.metro.getInstance?.(worktreeKey) as
+    const metroInstance = this.metro.getInstance?.(sessionId) as
       | MetroInstance
       | undefined;
     if (!metroInstance) {
       throw new Error(
-        `DevToolsManager: no Metro instance for worktree ${worktreeKey}`
+        `DevToolsManager: no Metro instance for session ${sessionId}`
       );
     }
+    const worktreeKey = metroInstance.worktree;
 
     const targets = await fetchTargets(metroInstance.port);
     const selected = pickTarget(targets);
@@ -187,7 +202,8 @@ export class DevToolsManager extends EventEmitter {
     const taps = this.tapFactories.map((f) => f(this.opts));
     const networkTap = findNetworkTap(taps);
 
-    const partial: Partial<WorktreeState> = {
+    const partial: Partial<SessionState> = {
+      sessionId,
       worktreeKey,
       taps,
       networkTap,
@@ -213,15 +229,15 @@ export class DevToolsManager extends EventEmitter {
         upstreamUrl: `ws://127.0.0.1:${metroInstance.port}/inspector/no-target`,
       });
       const { port, nonce } = await proxy.start();
-      const state: WorktreeState = {
-        ...(partial as WorktreeState),
+      const state: SessionState = {
+        ...(partial as SessionState),
         proxy,
         proxyPort: port,
         sessionNonce: nonce,
         proxyStatus: "no-target",
         state: "IDLE",
       };
-      this.instances.set(worktreeKey, state);
+      this.instances.set(sessionId, state);
       this.startDeltaTimer(state);
       this.startTargetPolling(state);
       this.emitStatus(state);
@@ -231,25 +247,25 @@ export class DevToolsManager extends EventEmitter {
     const proxy = new CdpProxy({
       upstreamUrl: selected.webSocketDebuggerUrl,
       eagerUpstream: true,
-      onEvent: (evt) => this.handleCdpEvent(worktreeKey, evt),
-      onUpstreamOpen: () => this.onUpstreamOpen(worktreeKey),
+      onEvent: (evt) => this.handleCdpEvent(sessionId, evt),
+      onUpstreamOpen: () => this.onUpstreamOpen(sessionId),
       onUpstreamClose: (code, reason) =>
-        this.onUpstreamClose(worktreeKey, code, reason),
+        this.onUpstreamClose(sessionId, code, reason),
       onError: () => {
         // Non-fatal errors are swallowed for MVP. Logged via onError in
         // future iterations.
       },
     });
     const { port, nonce } = await proxy.start();
-    const state: WorktreeState = {
-      ...(partial as WorktreeState),
+    const state: SessionState = {
+      ...(partial as SessionState),
       proxy,
       proxyPort: port,
       sessionNonce: nonce,
       state: "ATTACHING",
       proxyStatus: "starting",
     };
-    this.instances.set(worktreeKey, state);
+    this.instances.set(sessionId, state);
 
     // Attach every tap + flush their enable commands. Errors here are
     // non-fatal — the proxy remains up even if an enable fails.
@@ -274,8 +290,8 @@ export class DevToolsManager extends EventEmitter {
     return { proxyPort: port, sessionNonce: nonce };
   }
 
-  async stop(worktreeKey: string): Promise<void> {
-    const state = this.instances.get(worktreeKey);
+  async stop(sessionId: SessionId): Promise<void> {
+    const state = this.instances.get(sessionId);
     if (!state) return;
     state.state = "STOPPING";
     this.stopDeltaTimer(state);
@@ -288,7 +304,7 @@ export class DevToolsManager extends EventEmitter {
       }
     }
     await state.proxy.stop();
-    this.instances.delete(worktreeKey);
+    this.instances.delete(sessionId);
   }
 
   /**
@@ -304,10 +320,10 @@ export class DevToolsManager extends EventEmitter {
    * them. Architecture P1-2 on PR #26.
    */
   async restart(
-    worktreeKey: string,
+    sessionId: SessionId,
   ): Promise<{ proxyPort: number; sessionNonce: string }> {
-    await this.stop(worktreeKey);
-    return this.start(worktreeKey);
+    await this.stop(sessionId);
+    return this.start(sessionId);
   }
 
   async stopAll(): Promise<void> {
@@ -319,17 +335,17 @@ export class DevToolsManager extends EventEmitter {
   // Target control
   // -------------------------------------------------------------------------
 
-  listTargets(worktreeKey: string): TargetDescriptor[] {
-    return this.instances.get(worktreeKey)?.targets ?? [];
+  listTargets(sessionId: SessionId): TargetDescriptor[] {
+    return this.instances.get(sessionId)?.targets ?? [];
   }
 
-  async selectTarget(worktreeKey: string, targetId: string): Promise<void> {
-    const state = this.instances.get(worktreeKey);
-    if (!state) throw new Error(`DevToolsManager: unknown worktree ${worktreeKey}`);
+  async selectTarget(sessionId: SessionId, targetId: string): Promise<void> {
+    const state = this.instances.get(sessionId);
+    if (!state) throw new Error(`DevToolsManager: unknown session ${sessionId}`);
     const target = state.targets.find((t) => t.id === targetId);
     if (!target) {
       throw new Error(
-        `DevToolsManager: target ${targetId} not found for ${worktreeKey}`
+        `DevToolsManager: target ${targetId} not found for session ${sessionId}`
       );
     }
     if (state.selectedTargetId === targetId) return;
@@ -350,10 +366,10 @@ export class DevToolsManager extends EventEmitter {
     const newProxy = new CdpProxy({
       upstreamUrl: target.webSocketDebuggerUrl,
       eagerUpstream: true,
-      onEvent: (evt) => this.handleCdpEvent(worktreeKey, evt),
-      onUpstreamOpen: () => this.onUpstreamOpen(worktreeKey),
+      onEvent: (evt) => this.handleCdpEvent(sessionId, evt),
+      onUpstreamOpen: () => this.onUpstreamOpen(sessionId),
       onUpstreamClose: (code, reason) =>
-        this.onUpstreamClose(worktreeKey, code, reason),
+        this.onUpstreamClose(sessionId, code, reason),
     });
     const { port, nonce } = await newProxy.start();
     state.proxy = newProxy;
@@ -387,15 +403,15 @@ export class DevToolsManager extends EventEmitter {
   // -------------------------------------------------------------------------
 
   listNetwork(
-    worktreeKey: string,
+    sessionId: SessionId,
     filter?: NetworkFilter
   ): CaptureListResult<NetworkEntry> {
-    const state = this.instances.get(worktreeKey);
+    const state = this.instances.get(sessionId);
     if (!state) {
       return {
         entries: [],
         cursorDropped: false,
-        meta: emptyMeta(worktreeKey, "no-target", null, this.opts),
+        meta: emptyMeta("", "no-target", null, this.opts),
       };
     }
     const ring = state.networkTap.ring;
@@ -441,14 +457,14 @@ export class DevToolsManager extends EventEmitter {
     };
   }
 
-  getNetwork(worktreeKey: string, requestId: string): NetworkEntry | null {
-    const state = this.instances.get(worktreeKey);
+  getNetwork(sessionId: SessionId, requestId: string): NetworkEntry | null {
+    const state = this.instances.get(sessionId);
     if (!state) return null;
     return state.networkTap.ring.get(requestId) ?? null;
   }
 
-  clear(worktreeKey: string): void {
-    const state = this.instances.get(worktreeKey);
+  clear(sessionId: SessionId): void {
+    const state = this.instances.get(sessionId);
     if (!state) return;
     state.networkTap.ring.clear();
     state.lastSnapshot.clear();
@@ -456,11 +472,11 @@ export class DevToolsManager extends EventEmitter {
     this.emitStatus(state);
   }
 
-  status(worktreeKey: string): DevToolsStatus {
-    const state = this.instances.get(worktreeKey);
+  status(sessionId: SessionId): DevToolsStatus {
+    const state = this.instances.get(sessionId);
     if (!state) {
       return {
-        meta: emptyMeta(worktreeKey, "no-target", null, this.opts),
+        meta: emptyMeta("", "no-target", null, this.opts),
         targets: [],
         rnVersion: null,
         proxyPort: null,
@@ -478,9 +494,9 @@ export class DevToolsManager extends EventEmitter {
     };
   }
 
-  /** Build a cursor for the current end-of-buffer in a worktree. */
-  cursor(worktreeKey: string): NetworkCursor | null {
-    const state = this.instances.get(worktreeKey);
+  /** Build a cursor for the current end-of-buffer in a session. */
+  cursor(sessionId: SessionId): NetworkCursor | null {
+    const state = this.instances.get(sessionId);
     if (!state) return null;
     return makeNetworkCursor(
       state.networkTap.ring.state.bufferEpoch,
@@ -492,8 +508,8 @@ export class DevToolsManager extends EventEmitter {
   // Internal — CDP event dispatch to taps
   // -------------------------------------------------------------------------
 
-  private handleCdpEvent(worktreeKey: string, evt: CdpEvent): void {
-    const state = this.instances.get(worktreeKey);
+  private handleCdpEvent(sessionId: SessionId, evt: CdpEvent): void {
+    const state = this.instances.get(sessionId);
     if (!state) return;
     // Dispatch to every tap whose domain matches the event's prefix. One
     // event may match at most one tap (domains are disjoint) but we iterate
@@ -516,7 +532,7 @@ export class DevToolsManager extends EventEmitter {
     this.reconcileDirty(state, prevVersions);
   }
 
-  private captureVersions(state: WorktreeState): Map<string, number> {
+  private captureVersions(state: SessionState): Map<string, number> {
     const snap = state.networkTap.ring.snapshot();
     const out = new Map<string, number>();
     for (const entry of snap.entries) {
@@ -527,7 +543,7 @@ export class DevToolsManager extends EventEmitter {
   }
 
   private reconcileDirty(
-    state: WorktreeState,
+    state: SessionState,
     before: Map<string, number>
   ): void {
     const after = this.captureVersions(state);
@@ -554,23 +570,24 @@ export class DevToolsManager extends EventEmitter {
   // Delta flush
   // -------------------------------------------------------------------------
 
-  private startDeltaTimer(state: WorktreeState): void {
+  private startDeltaTimer(state: SessionState): void {
     const interval = this.opts.deltaFlushIntervalMs ?? DEFAULTS.deltaFlushIntervalMs;
     state.deltaTimer = setInterval(() => this.flushDelta(state), interval);
     state.deltaTimer.unref?.();
   }
 
-  private stopDeltaTimer(state: WorktreeState): void {
+  private stopDeltaTimer(state: SessionState): void {
     if (state.deltaTimer) {
       clearInterval(state.deltaTimer);
       state.deltaTimer = null;
     }
   }
 
-  private flushDelta(state: WorktreeState): void {
+  private flushDelta(state: SessionState): void {
     const { added, updated, evicted } = state.dirty;
     if (added.size === 0 && updated.size === 0 && evicted.size === 0) return;
     const payload = {
+      sessionId: state.sessionId,
       worktreeKey: state.worktreeKey,
       addedIds: Array.from(added),
       updatedIds: Array.from(updated),
@@ -585,8 +602,8 @@ export class DevToolsManager extends EventEmitter {
   // Status / upstream callbacks
   // -------------------------------------------------------------------------
 
-  private onUpstreamOpen(worktreeKey: string): void {
-    const state = this.instances.get(worktreeKey);
+  private onUpstreamOpen(sessionId: SessionId): void {
+    const state = this.instances.get(sessionId);
     if (!state) return;
     state.proxyStatus = "connected";
     state.state = "RUNNING";
@@ -594,12 +611,12 @@ export class DevToolsManager extends EventEmitter {
   }
 
   private onUpstreamClose(
-    worktreeKey: string,
+    sessionId: SessionId,
     code: number,
     reason: string
   ): void {
     void reason;
-    const state = this.instances.get(worktreeKey);
+    const state = this.instances.get(sessionId);
     if (!state) return;
     if (state.state === "STOPPING") return; // ours
     state.proxyStatus = "disconnected";
@@ -625,14 +642,14 @@ export class DevToolsManager extends EventEmitter {
    * Runs independently of the scheduled poll loop so the user sees a
    * useful status within ~2s instead of waiting for the next tick.
    */
-  private async checkPreemption(state: WorktreeState): Promise<void> {
-    const metroInstance = this.metro.getInstance?.(state.worktreeKey) as
+  private async checkPreemption(state: SessionState): Promise<void> {
+    const metroInstance = this.metro.getInstance?.(state.sessionId) as
       | MetroInstance
       | undefined;
     if (!metroInstance) return;
     const fresh = await fetchTargets(metroInstance.port);
     // State may have changed during the fetch — guard via manager registry.
-    if (!this.instances.has(state.worktreeKey)) return;
+    if (!this.instances.has(state.sessionId)) return;
     const stillListed = state.selectedTargetId
       ? fresh.some((t) => t.id === state.selectedTargetId)
       : false;
@@ -645,7 +662,7 @@ export class DevToolsManager extends EventEmitter {
   // `/json` polling — target discovery + Hermes reload detection
   // -------------------------------------------------------------------------
 
-  private startTargetPolling(state: WorktreeState): void {
+  private startTargetPolling(state: SessionState): void {
     const interval = this.opts.pollIntervalMs ?? DEFAULTS.pollIntervalMs;
     if (interval <= 0) return; // disabled (used by tests)
     state.pollTimer = setInterval(() => {
@@ -654,7 +671,7 @@ export class DevToolsManager extends EventEmitter {
     state.pollTimer.unref?.();
   }
 
-  private stopTargetPolling(state: WorktreeState): void {
+  private stopTargetPolling(state: SessionState): void {
     if (state.pollTimer) {
       clearInterval(state.pollTimer);
       state.pollTimer = null;
@@ -674,9 +691,9 @@ export class DevToolsManager extends EventEmitter {
    * to `'no-target'`. (Hermes reloads can break the websocket silently
    * in some RN versions — the `/json` poll is the authoritative check.)
    */
-  async pollTargets(state: WorktreeState): Promise<void> {
-    if (!this.instances.has(state.worktreeKey)) return;
-    const metroInstance = this.metro.getInstance?.(state.worktreeKey) as
+  async pollTargets(state: SessionState): Promise<void> {
+    if (!this.instances.has(state.sessionId)) return;
+    const metroInstance = this.metro.getInstance?.(state.sessionId) as
       | MetroInstance
       | undefined;
     if (!metroInstance) return;
@@ -685,7 +702,7 @@ export class DevToolsManager extends EventEmitter {
     // State may have changed during the async fetch. Guard via the
     // manager registry — the type system narrows `state.state` and would
     // otherwise complain that STOPPING is "impossible".
-    if (!this.instances.has(state.worktreeKey)) return;
+    if (!this.instances.has(state.sessionId)) return;
 
     const prevIds = state.targets.map((t) => t.id).sort().join(",");
     const nextIds = fresh.map((t) => t.id).sort().join(",");
@@ -715,10 +732,11 @@ export class DevToolsManager extends EventEmitter {
   }
 
   private onMetroStatus(payload: {
+    sessionId: SessionId;
     worktreeKey: string;
     status: string;
   }): void {
-    const state = this.instances.get(payload.worktreeKey);
+    const state = this.instances.get(payload.sessionId);
     if (!state) return;
     if (payload.status === "stopped" || payload.status === "error") {
       for (const tap of state.taps) {
@@ -730,8 +748,9 @@ export class DevToolsManager extends EventEmitter {
     }
   }
 
-  private emitStatus(state: WorktreeState): void {
+  private emitStatus(state: SessionState): void {
     this.emit("status", {
+      sessionId: state.sessionId,
       worktreeKey: state.worktreeKey,
       meta: this.composeMeta(state),
     });
@@ -741,7 +760,7 @@ export class DevToolsManager extends EventEmitter {
   // Meta composition
   // -------------------------------------------------------------------------
 
-  private composeMeta(state: WorktreeState): CaptureMeta {
+  private composeMeta(state: SessionState): CaptureMeta {
     const ringState = state.networkTap.ring.state;
     const bodyCapture: BodyCaptureMode = state.bodyCaptureEnabled
       ? "full"

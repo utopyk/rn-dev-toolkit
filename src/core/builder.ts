@@ -1,6 +1,7 @@
 import path from "path";
 import fs, { existsSync, rmSync } from "fs";
 import { EventEmitter } from "events";
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "child_process";
 import { parseXcodebuildErrors, parseGradleErrors, parseXcresultErrors } from "./build-parser.js";
 
@@ -93,6 +94,30 @@ export interface BuilderDoneEvent {
   success: boolean;
   errors: BuildError[];
   platform?: "ios" | "android";
+  /**
+   * Phase D3 — discriminator for the build that fired this event.
+   * Lets clients correlate `done` with the `BuildHandle` returned from
+   * `Builder.build()`, closing the cross-talk vector that the old
+   * single-shared-`once("done")` post-hook listener in
+   * `client-rpcs.ts` suffered from. Always non-empty; uuid v4.
+   */
+  buildId: string;
+}
+
+/**
+ * Returned by `Builder.build()` — replaces the old void-returning
+ * fire-and-forget API. The promise resolves exactly once per build
+ * (success OR failure OR concurrency-guard rejection), so consumers
+ * can `await` it instead of attaching a `.once("done")` listener that
+ * cross-talks across concurrent builds on the same Builder instance.
+ */
+export interface BuildHandle {
+  /** Discriminator threaded through the matching `done` event. */
+  buildId: string;
+  /** Resolves with the final BuildResult exactly once. */
+  promise: Promise<BuildResult>;
+  /** Cancel an in-flight build subprocess. No-op if already settled. */
+  cancel(): void;
 }
 
 /**
@@ -113,6 +138,17 @@ export class Builder extends EventEmitter {
   private rawOutput = "";
   private xcresultPath: string | null = null;
   private detectedXcresultPath: string | null = null;
+  /**
+   * Phase D3 — per-build promise plumbing. `activeBuildId` and the
+   * matching resolver are set when a build's subprocess spawns and
+   * cleared in the `exit` handler. The concurrency-guard path
+   * resolves synchronously and never sets these. Single-slot is
+   * enough because the guard enforces at-most-one-in-flight; if we
+   * ever lift that guard, this becomes a Map.
+   */
+  private activeBuildId: string | null = null;
+  private activeResolver: ((r: BuildResult) => void) | null = null;
+  private activePromise: Promise<BuildResult> | null = null;
 
   // Stamp `source: "builtin"` on every emit from this class so wrappers
   // (e.g. `BuildHostCapability` in H4) and downstream consumers can
@@ -128,7 +164,13 @@ export class Builder extends EventEmitter {
     this.emit(event, { source: "builtin" as const, ...payload });
   }
 
-  build(options: BuildOptions): void {
+  build(options: BuildOptions): BuildHandle {
+    const buildId = randomUUID();
+    let resolveResult!: (r: BuildResult) => void;
+    const promise = new Promise<BuildResult>((resolve) => {
+      resolveResult = resolve;
+    });
+
     // Concurrency guard: Phase 13.3 Security P1-2 — before this, every
     // call to build() overwrote `this.process` with a fresh subprocess
     // and orphaned the previous one. A client looping `builder/build`
@@ -137,19 +179,26 @@ export class Builder extends EventEmitter {
     // one is live; emit a `done` with a meaningful error so listeners
     // aren't left hanging.
     if (this.process && this.process.exitCode === null) {
+      const errors: BuildError[] = [
+        {
+          source: options.platform === "ios" ? "xcodebuild" : "gradle",
+          summary:
+            "build already in progress — refusing to start a second build on the same Builder",
+          rawOutput: "",
+        },
+      ];
       this.emitBuiltin("done", {
         success: false,
         platform: options.platform,
-        errors: [
-          {
-            source: options.platform === "ios" ? "xcodebuild" : "gradle",
-            summary:
-              "build already in progress — refusing to start a second build on the same Builder",
-            rawOutput: "",
-          },
-        ],
+        errors,
+        buildId,
       });
-      return;
+      // Resolve the rejected build's promise synchronously — the
+      // caller's `await handle.promise` sees the BuildResult exactly
+      // once and never cross-talks with the in-flight build whose own
+      // promise belongs to a different handle.
+      resolveResult({ success: false, errors, rawOutput: "" });
+      return { buildId, promise, cancel: () => {} };
     }
 
     const { projectRoot, platform, deviceId, port, variant, env, scheme, configuration } = options;
@@ -211,19 +260,25 @@ export class Builder extends EventEmitter {
         env: { ...process.env, ...env },
       });
     } catch (err: any) {
+      const errors: BuildError[] = [{
+        source: platform === "ios" ? "xcodebuild" : "gradle",
+        summary: `Failed to spawn build process: ${err.message}`,
+        rawOutput: err.message,
+      }];
       this.emitBuiltin("done", {
         success: false,
         platform,
-        errors: [{
-          source: platform === "ios" ? "xcodebuild" : "gradle",
-          summary: `Failed to spawn build process: ${err.message}`,
-          rawOutput: err.message,
-        }],
+        errors,
+        buildId,
       });
-      return;
+      resolveResult({ success: false, errors, rawOutput: err.message });
+      return { buildId, promise, cancel: () => {} };
     }
 
     this.process = proc;
+    this.activeBuildId = buildId;
+    this.activeResolver = resolveResult;
+    this.activePromise = promise;
 
     // Node stream reader — non-blocking, event-driven
     const attachStream = (stream: NodeJS.ReadableStream | null, streamName: "stdout" | "stderr") => {
@@ -362,9 +417,21 @@ export class Builder extends EventEmitter {
         }
       }
 
-      this.emitBuiltin("done", { success, errors, platform });
+      this.emitBuiltin("done", { success, errors, platform, buildId });
+      const resolver = this.activeResolver;
+      const result: BuildResult = { success, errors, rawOutput: this.rawOutput };
       this.process = null;
+      this.activeBuildId = null;
+      this.activeResolver = null;
+      this.activePromise = null;
+      resolver?.(result);
     });
+
+    return {
+      buildId,
+      promise,
+      cancel: () => this.cancel(),
+    };
   }
 
   cancel(): void {
@@ -377,7 +444,28 @@ export class Builder extends EventEmitter {
           this.process.kill("SIGKILL");
         } catch {}
       }
-      this.process = null;
+      // Don't null `this.process` here — the `exit` handler is what
+      // settles activeResolver/activePromise. Nulling it eagerly would
+      // race the resolver path and leak a hanging promise.
+    }
+  }
+
+  /**
+   * Phase D3 — per-session lifecycle hook. Cancels any in-flight
+   * build's subprocess and awaits the resolver chain so `await
+   * builder.dispose()` from `SessionServices.dispose()` doesn't leave
+   * an orphan resolver behind. Safe to call when idle (no-op).
+   */
+  async dispose(): Promise<void> {
+    const pending = this.activePromise;
+    if (pending && this.process) {
+      this.cancel();
+      try {
+        await pending;
+      } catch {
+        // Promise from build() never rejects — but `await` semantics
+        // forced the catch for the unsynchronised type case.
+      }
     }
   }
 

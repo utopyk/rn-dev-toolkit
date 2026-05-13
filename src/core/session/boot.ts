@@ -45,8 +45,16 @@ import { HookManager } from "../hooks/manager.js";
 import { getDefaultAuditLog } from "../audit-log.js";
 import { loadProjectHooks } from "../hooks/load-project-hooks.js";
 import { validateProfile } from "../../daemon/profile-guard.js";
+import type { SessionId } from "../identifiers.js";
 
 export interface BootSessionServicesOptions {
+  /**
+   * Phase D3 — supervisor-minted sessionId. Threaded into per-session
+   * services (MetroManager, DevToolsManager) so their Maps key off
+   * `SessionId` rather than `worktreeKey`. Required: the supervisor
+   * always has one; tests synthesise via `generateSessionId()`.
+   */
+  sessionId: SessionId;
   profile: Profile;
   projectRoot: string;
   artifactStore: ArtifactStore;
@@ -81,6 +89,13 @@ export interface BootSessionServicesOptions {
 }
 
 export interface SessionServices {
+  /**
+   * Phase D3 — supervisor-minted sessionId. Stored on the struct so
+   * `client-rpcs.ts` dispatchers can pass it to MetroManager /
+   * DevToolsManager / Builder without re-deriving from the
+   * supervisor.
+   */
+  sessionId: SessionId;
   metro: MetroManager;
   devtools: DevToolsManager;
   watcher: FileWatcher | null;
@@ -128,7 +143,7 @@ export interface SessionServices {
 export async function bootSessionServices(
   opts: BootSessionServicesOptions,
 ): Promise<SessionServices> {
-  const { profile, projectRoot, artifactStore, moduleRegistry, emit, hostVersion, ipc } = opts;
+  const { sessionId, profile, projectRoot, artifactStore, moduleRegistry, emit, hostVersion, ipc } = opts;
 
   // 1. Preflight checks (optional — profile-configured).
   if (profile.preflight.checks.length > 0) {
@@ -349,6 +364,7 @@ export async function bootSessionServices(
     metroLogsStore.setMetroStatus(event.worktreeKey, event.status);
   });
   metro.start({
+    sessionId,
     worktreeKey,
     projectRoot: effectiveRoot,
     port,
@@ -370,7 +386,7 @@ export async function bootSessionServices(
   // 9. DevTools.
   const devtools = new DevToolsManager(metro, {});
   try {
-    await devtools.start(worktreeKey);
+    await devtools.start(sessionId);
   } catch (err) {
     emit(
       `\u2139 DevTools: deferred (${err instanceof Error ? err.message : String(err)})`,
@@ -390,6 +406,7 @@ export async function bootSessionServices(
     devtools,
     metroLogsStore,
     worktreeKey,
+    sessionId,
   });
   const { moduleHost } = createModuleSystem({
     hostVersion,
@@ -513,6 +530,14 @@ export async function bootSessionServices(
       /* best-effort */
     }
     try {
+      // Phase D3 — kill any in-flight build subprocess before metro
+      // teardown. dispose() awaits the build's exit handler so the
+      // promise resolver chain settles cleanly.
+      await builder.dispose();
+    } catch {
+      /* best-effort */
+    }
+    try {
       metro.stopAll();
     } catch {
       /* best-effort */
@@ -525,6 +550,7 @@ export async function bootSessionServices(
   };
 
   return {
+    sessionId,
     metro,
     devtools,
     watcher,
@@ -557,6 +583,7 @@ interface HostCapabilityDeps {
   devtools: DevToolsManager;
   metroLogsStore: MetroLogsStore;
   worktreeKey: string;
+  sessionId: SessionId;
 }
 
 function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry {
@@ -569,7 +596,7 @@ function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry 
   });
   capabilities.register(
     DEVTOOLS_CAPABILITY_ID,
-    createDevtoolsHostCapability(deps.devtools, deps.worktreeKey),
+    createDevtoolsHostCapability(deps.devtools, deps.worktreeKey, deps.sessionId),
     {
       requiredPermission: DEVTOOLS_CAPABILITY_READ_PERMISSION,
       methodPermissions: DEVTOOLS_METHOD_PERMISSIONS,

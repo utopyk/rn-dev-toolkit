@@ -12,24 +12,34 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer } from "ws";
 import type { MetroManager } from "../metro.js";
 import type { MetroInstance } from "../types.js";
+import { asSessionId, type SessionId } from "../identifiers.js";
 import { DevToolsManager } from "../devtools.js";
+
+// Phase D3: DevToolsManager now keys per-session, so the fake's
+// getInstance lookup happens by SessionId, not worktreeKey. The
+// tests in this file use the same "w1" string for both dimensions
+// (single session per test) — the brand sugar keeps the typed
+// arguments clean without changing test semantics.
+function sid(s: string): SessionId {
+  return asSessionId(s);
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
 interface MetroFake extends EventEmitter {
-  getInstance(worktreeKey: string): MetroInstance | undefined;
-  setInstance(worktreeKey: string, instance: MetroInstance | undefined): void;
+  getInstance(sessionId: SessionId): MetroInstance | undefined;
+  setInstance(sessionId: SessionId, instance: MetroInstance | undefined): void;
 }
 
 function makeMetroFake(): MetroFake {
   const bus = new EventEmitter() as MetroFake;
   const instances = new Map<string, MetroInstance>();
-  bus.getInstance = (k) => instances.get(k);
+  bus.getInstance = (k) => instances.get(k as string);
   bus.setInstance = (k, i) => {
-    if (i) instances.set(k, i);
-    else instances.delete(k);
+    if (i) instances.set(k as string, i);
+    else instances.delete(k as string);
   };
   return bus;
 }
@@ -116,7 +126,8 @@ describe("DevToolsManager", () => {
       },
     ]);
     metro = makeMetroFake();
-    metro.setInstance("w1", {
+    metro.setInstance(sid("w1"), {
+      sessionId: sid("w1"),
       worktree: "w1",
       port: env.metroPort,
       pid: 1,
@@ -135,17 +146,17 @@ describe("DevToolsManager", () => {
   });
 
   it("start fetches /json, picks target, connects upstream", async () => {
-    const { proxyPort, sessionNonce } = await mgr.start("w1");
+    const { proxyPort, sessionNonce } = await mgr.start(sid("w1"));
     expect(proxyPort).toBeGreaterThan(0);
     expect(sessionNonce).toHaveLength(32);
-    const status = mgr.status("w1");
+    const status = mgr.status(sid("w1"));
     expect(status.meta.proxyStatus).toBe("connected");
     expect(status.meta.selectedTargetId).toBe("abc");
     expect(status.targets.map((t) => t.id)).toEqual(["abc"]);
   });
 
   it("dispatches Network events to the tap and populates ring", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     env.send(
       JSON.stringify({
@@ -162,14 +173,14 @@ describe("DevToolsManager", () => {
       })
     );
     await waitMs(30);
-    const list = mgr.listNetwork("w1");
+    const list = mgr.listNetwork(sid("w1"));
     expect(list.entries).toHaveLength(1);
     expect(list.entries[0]!.requestId).toBe("r1");
     expect(list.entries[0]!.requestHeaders.Authorization).toBe("[REDACTED]");
   });
 
   it("filter: urlRegex narrows results", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     for (const [id, url] of [
       ["r1", "https://api.example/a"],
@@ -188,7 +199,7 @@ describe("DevToolsManager", () => {
       );
     }
     await waitMs(30);
-    const list = mgr.listNetwork("w1", { urlRegex: "example" });
+    const list = mgr.listNetwork(sid("w1"), { urlRegex: "example" });
     expect(list.entries.map((e) => e.requestId).sort()).toEqual(["r1", "r2"]);
   });
 
@@ -197,7 +208,7 @@ describe("DevToolsManager", () => {
       ringCapacity: 2,
       deltaFlushIntervalMs: 30,
     });
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     for (const id of ["r1", "r2", "r3"]) {
       env.send(
@@ -213,7 +224,7 @@ describe("DevToolsManager", () => {
     }
     await waitMs(50);
     const cursor = { bufferEpoch: 1, sequence: 0, __brand: "NetworkCursor" } as const;
-    const list = mgr.listNetwork("w1", {
+    const list = mgr.listNetwork(sid("w1"), {
       since: cursor as never,
     });
     expect(list.cursorDropped).toBe(true);
@@ -221,7 +232,7 @@ describe("DevToolsManager", () => {
   });
 
   it("clear bumps bufferEpoch with reason 'clear'", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     env.send(
       JSON.stringify({
@@ -234,16 +245,16 @@ describe("DevToolsManager", () => {
       })
     );
     await waitMs(30);
-    const before = mgr.status("w1").meta.bufferEpoch;
-    mgr.clear("w1");
-    const after = mgr.status("w1");
+    const before = mgr.status(sid("w1")).meta.bufferEpoch;
+    mgr.clear(sid("w1"));
+    const after = mgr.status(sid("w1"));
     expect(after.meta.bufferEpoch).toBe(before + 1);
     expect(after.meta.sessionBoundary?.reason).toBe("clear");
-    expect(mgr.listNetwork("w1").entries).toHaveLength(0);
+    expect(mgr.listNetwork(sid("w1")).entries).toHaveLength(0);
   });
 
   it("emits delta events (coalesced)", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     const deltas: unknown[] = [];
     mgr.on("delta", (d) => deltas.push(d));
@@ -265,11 +276,11 @@ describe("DevToolsManager", () => {
   });
 
   it("metro 'stopped' status bumps session boundary with reason 'metro-restart'", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
-    const before = mgr.status("w1").meta.bufferEpoch;
-    metro.emit("status", { worktreeKey: "w1", status: "stopped" });
-    const after = mgr.status("w1");
+    const before = mgr.status(sid("w1")).meta.bufferEpoch;
+    metro.emit("status", { sessionId: sid("w1"), worktreeKey: "w1", status: "stopped" });
+    const after = mgr.status(sid("w1"));
     expect(after.meta.bufferEpoch).toBe(before + 1);
     expect(after.meta.sessionBoundary?.reason).toBe("metro-restart");
     expect(after.meta.proxyStatus).toBe("no-target");
@@ -282,25 +293,25 @@ describe("DevToolsManager", () => {
     // the upstream). The immediate `'disconnected'` flip happens first
     // but the preemption check races to replace it — accept either the
     // transient or the terminal.
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     for (const c of env.ws.clients) c.close();
     await waitMs(200);
-    expect(mgr.status("w1").meta.proxyStatus).toBe("preempted");
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("preempted");
   });
 
   it("stop tears down proxy and removes state", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
-    await mgr.stop("w1");
+    await mgr.stop(sid("w1"));
     // After stop, status returns an empty meta (no-target) — state was deleted.
-    const status = mgr.status("w1");
+    const status = mgr.status(sid("w1"));
     expect(status.proxyPort).toBeNull();
     expect(status.sessionNonce).toBeNull();
   });
 
   it("cursor() returns a branded cursor at end-of-buffer", async () => {
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
     env.send(
       JSON.stringify({
@@ -313,7 +324,7 @@ describe("DevToolsManager", () => {
       })
     );
     await waitMs(30);
-    const cursor = mgr.cursor("w1");
+    const cursor = mgr.cursor(sid("w1"));
     expect(cursor).toBeTruthy();
     expect(cursor!.bufferEpoch).toBe(1);
     expect(cursor!.sequence).toBe(1);
@@ -322,7 +333,8 @@ describe("DevToolsManager", () => {
   it("no targets → proxy in 'no-target' state", async () => {
     await env.teardown();
     env = await startMetroEnv(() => []); // empty target list
-    metro.setInstance("w1", {
+    metro.setInstance(sid("w1"), {
+      sessionId: sid("w1"),
       worktree: "w1",
       port: env.metroPort,
       pid: 1,
@@ -330,8 +342,8 @@ describe("DevToolsManager", () => {
       startedAt: new Date(),
       projectRoot: "/tmp",
     });
-    await mgr.start("w1");
-    const status = mgr.status("w1");
+    await mgr.start(sid("w1"));
+    const status = mgr.status(sid("w1"));
     expect(status.meta.proxyStatus).toBe("no-target");
     expect(status.targets).toEqual([]);
   });

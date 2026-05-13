@@ -22,6 +22,7 @@
  */
 
 import type { DevToolsManager } from "../devtools.js";
+import type { SessionId } from "../identifiers.js";
 import type {
   CaptureListResult,
   CaptureMeta,
@@ -106,43 +107,66 @@ export interface DevtoolsHostCapability {
  */
 export type AllowedWorktreeKeys = () => readonly string[];
 
+/**
+ * Phase D3 — the underlying DevToolsManager keys by SessionId; this
+ * capability shape is module-facing and stays `worktreeKey`-shaped for
+ * back-compat with already-shipped 3p modules. The factory translates
+ * the worktreeKey check to a SessionId at the manager boundary via the
+ * required `sessionId` argument: the host (bootSessionServices)
+ * already knows which sessionId owns the manager registration, so the
+ * translation is a single inject at construction time, not a
+ * lookup-by-worktree at request time.
+ */
 export function createDevtoolsHostCapability(
   manager: DevToolsManager,
   defaultWorktreeKey: string,
+  sessionId: SessionId,
   allowedWorktreeKeys?: AllowedWorktreeKeys
 ): DevtoolsHostCapability {
   const allowedSet = (): Set<string> => {
     const arr = allowedWorktreeKeys?.() ?? [defaultWorktreeKey];
     return new Set(arr.length > 0 ? arr : [defaultWorktreeKey]);
   };
-  const resolve = (wk?: string): string => {
-    if (typeof wk !== "string" || wk.length === 0) return defaultWorktreeKey;
-    return allowedSet().has(wk) ? wk : defaultWorktreeKey;
+  // The capability accepts a worktreeKey from the module subprocess
+  // for back-compat. After the cross-worktree guard, the value is
+  // discarded — the manager is per-session, so we route every call to
+  // the session this capability instance was constructed for.
+  const validateWorktreeKey = (wk?: string): void => {
+    if (typeof wk !== "string" || wk.length === 0) return;
+    if (!allowedSet().has(wk)) {
+      // Silently route to the default — preserve the cross-worktree
+      // guard semantics tested in
+      // `__tests__/host-capability.test.ts`.
+      return;
+    }
   };
 
   return {
     async status(wk) {
-      return manager.status(resolve(wk));
+      validateWorktreeKey(wk);
+      return manager.status(sessionId);
     },
     async list({ worktreeKey, filter }) {
-      return manager.listNetwork(resolve(worktreeKey), filter);
+      validateWorktreeKey(worktreeKey);
+      return manager.listNetwork(sessionId, filter);
     },
     async get({ worktreeKey, requestId }) {
+      validateWorktreeKey(worktreeKey);
       if (typeof requestId !== "string" || requestId.length === 0) return null;
-      return manager.getNetwork(resolve(worktreeKey), requestId);
+      return manager.getNetwork(sessionId, requestId);
     },
     async selectTarget({ worktreeKey, targetId }) {
+      validateWorktreeKey(worktreeKey);
       if (typeof targetId !== "string" || targetId.length === 0) {
         throw new Error("devtools.selectTarget: targetId is required");
       }
-      const wk = resolve(worktreeKey);
-      await manager.selectTarget(wk, targetId);
-      return { status: "switched", meta: manager.status(wk).meta };
+      await manager.selectTarget(sessionId, targetId);
+      return { status: "switched", meta: manager.status(sessionId).meta };
     },
     async clear({ worktreeKey }) {
-      const wk = resolve(worktreeKey);
-      manager.clear(wk);
-      return { status: "cleared", meta: manager.status(wk).meta };
+      validateWorktreeKey(worktreeKey);
+      manager.clear(sessionId);
+      return { status: "cleared", meta: manager.status(sessionId).meta };
     },
   };
 }

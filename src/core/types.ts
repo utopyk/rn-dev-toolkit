@@ -51,6 +51,18 @@ export interface OnSaveAction {
 }
 
 export interface MetroInstance {
+  /**
+   * Owning sessionId — Phase D3 made this the identity field. Two
+   * sessions for the same worktree on different Metro ports are
+   * distinct MetroInstance values keyed by this.
+   */
+  sessionId: string;
+  /**
+   * ArtifactStore-hashed worktree key. Phase D3 demoted this from
+   * Map-key (identity) to instance metadata — port persistence and
+   * MetroLogsStore routing still need it, but two MetroInstance values
+   * can legitimately share a worktree.
+   */
   worktree: string;
   port: number;
   pid: number;

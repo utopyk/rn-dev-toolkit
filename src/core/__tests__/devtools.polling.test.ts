@@ -21,7 +21,12 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import type { MetroManager } from "../metro.js";
 import type { MetroInstance } from "../types.js";
+import { asSessionId, type SessionId } from "../identifiers.js";
 import { DevToolsManager } from "../devtools.js";
+
+function sid(s: string): SessionId {
+  return asSessionId(s);
+}
 
 // ---------------------------------------------------------------------------
 // Fixture — mutable target list so tests can simulate Hermes reloads,
@@ -29,17 +34,17 @@ import { DevToolsManager } from "../devtools.js";
 // ---------------------------------------------------------------------------
 
 interface MetroFake extends EventEmitter {
-  getInstance(worktreeKey: string): MetroInstance | undefined;
-  setInstance(worktreeKey: string, instance: MetroInstance | undefined): void;
+  getInstance(sessionId: SessionId): MetroInstance | undefined;
+  setInstance(sessionId: SessionId, instance: MetroInstance | undefined): void;
 }
 
 function makeMetroFake(): MetroFake {
   const bus = new EventEmitter() as MetroFake;
   const instances = new Map<string, MetroInstance>();
-  bus.getInstance = (k) => instances.get(k);
+  bus.getInstance = (k) => instances.get(k as string);
   bus.setInstance = (k, i) => {
-    if (i) instances.set(k, i);
-    else instances.delete(k);
+    if (i) instances.set(k as string, i);
+    else instances.delete(k as string);
   };
   return bus;
 }
@@ -116,11 +121,11 @@ function waitMs(ms: number): Promise<void> {
 // WorktreeState isn't exported. Tests reach into the manager via a small
 // cast so they can trigger polls deterministically without waiting on
 // the interval timer.
-function pollNow(mgr: DevToolsManager, worktreeKey: string): Promise<void> {
+function pollNow(mgr: DevToolsManager, sessionId: SessionId): Promise<void> {
   const state = (mgr as unknown as {
-    instances: Map<string, unknown>;
-  }).instances.get(worktreeKey);
-  if (!state) throw new Error(`no state for ${worktreeKey}`);
+    instances: Map<SessionId, unknown>;
+  }).instances.get(sessionId);
+  if (!state) throw new Error(`no state for session ${sessionId}`);
   return (mgr as unknown as {
     pollTargets: (s: unknown) => Promise<void>;
   }).pollTargets(state);
@@ -140,7 +145,8 @@ describe("DevToolsManager `/json` polling + preemption", () => {
       { id: "abc", type: "node", title: "App" },
     ]);
     metro = makeMetroFake();
-    metro.setInstance("w1", {
+    metro.setInstance(sid("w1"), {
+      sessionId: sid("w1"),
       worktree: "w1",
       port: env.metroPort,
       pid: 1,
@@ -153,7 +159,7 @@ describe("DevToolsManager `/json` polling + preemption", () => {
       deltaFlushIntervalMs: 30,
       pollIntervalMs: 0,
     });
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
   });
 
@@ -167,12 +173,12 @@ describe("DevToolsManager `/json` polling + preemption", () => {
       { id: "abc", type: "node", title: "App" },
       { id: "def", type: "node", title: "AppNew" },
     ]);
-    const before = mgr.status("w1").targets.length;
+    const before = mgr.status(sid("w1")).targets.length;
     expect(before).toBe(1);
 
-    await pollNow(mgr, "w1");
+    await pollNow(mgr, sid("w1"));
 
-    const after = mgr.status("w1").targets.map((t) => t.id).sort();
+    const after = mgr.status(sid("w1")).targets.map((t) => t.id).sort();
     expect(after).toEqual(["abc", "def"]);
   });
 
@@ -180,9 +186,9 @@ describe("DevToolsManager `/json` polling + preemption", () => {
     // Selected target goes away — simulate Hermes reload from our POV.
     env.setTargets([{ id: "other", type: "node", title: "Different" }]);
 
-    await pollNow(mgr, "w1");
+    await pollNow(mgr, sid("w1"));
 
-    const status = mgr.status("w1");
+    const status = mgr.status(sid("w1"));
     // `'connected'` was downgraded to `'no-target'` because our selected
     // target vanished from /json.
     expect(status.meta.proxyStatus).toBe("no-target");
@@ -193,14 +199,14 @@ describe("DevToolsManager `/json` polling + preemption", () => {
     // Force preempted state first.
     env.closeUpstream();
     await waitMs(200);
-    expect(mgr.status("w1").meta.proxyStatus).toBe("preempted");
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("preempted");
 
     // Polling shouldn't revert preemption to no-target or connected — the
     // preemption signal means the target is there but held by someone
     // else. The user (or a reconnect action) decides when to try again.
-    await pollNow(mgr, "w1");
+    await pollNow(mgr, sid("w1"));
 
-    expect(mgr.status("w1").meta.proxyStatus).toBe("preempted");
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("preempted");
   });
 
   it("pollTargets emits a 'status' event when targets change", async () => {
@@ -212,7 +218,7 @@ describe("DevToolsManager `/json` polling + preemption", () => {
       { id: "def", type: "node", title: "NewOne" },
     ]);
 
-    await pollNow(mgr, "w1");
+    await pollNow(mgr, sid("w1"));
 
     expect(events.length).toBeGreaterThan(0);
   });
@@ -221,7 +227,7 @@ describe("DevToolsManager `/json` polling + preemption", () => {
     const events: unknown[] = [];
     mgr.on("status", (p) => events.push(p));
 
-    await pollNow(mgr, "w1");
+    await pollNow(mgr, sid("w1"));
 
     // Targets unchanged, selected target still listed → nothing to emit.
     expect(events).toHaveLength(0);
@@ -238,7 +244,8 @@ describe("DevToolsManager preemption detection (immediate /json re-poll)", () =>
       { id: "abc", type: "node", title: "App" },
     ]);
     metro = makeMetroFake();
-    metro.setInstance("w1", {
+    metro.setInstance(sid("w1"), {
+      sessionId: sid("w1"),
       worktree: "w1",
       port: env.metroPort,
       pid: 1,
@@ -250,7 +257,7 @@ describe("DevToolsManager preemption detection (immediate /json re-poll)", () =>
       deltaFlushIntervalMs: 30,
       pollIntervalMs: 0,
     });
-    await mgr.start("w1");
+    await mgr.start(sid("w1"));
     await waitMs(30);
   });
 
@@ -264,7 +271,7 @@ describe("DevToolsManager preemption detection (immediate /json re-poll)", () =>
     // kicked us off — classic shared-device contention.
     env.closeUpstream();
     await waitMs(200);
-    expect(mgr.status("w1").meta.proxyStatus).toBe("preempted");
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("preempted");
   });
 
   it("upstream close with target gone from /json → 'no-target'", async () => {
@@ -273,6 +280,6 @@ describe("DevToolsManager preemption detection (immediate /json re-poll)", () =>
     env.setTargets([]);
     env.closeUpstream();
     await waitMs(200);
-    expect(mgr.status("w1").meta.proxyStatus).toBe("no-target");
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("no-target");
   });
 });

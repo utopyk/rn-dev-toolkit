@@ -31,9 +31,9 @@ import { instances, send } from './state.js';
 let devtoolsClient: DevToolsClient | null = null;
 let detachClient: (() => void) | null = null;
 
-serviceBus.on('devtools', (client: DevToolsClient) => {
+serviceBus.on('devtools', ({ devtools }: { devtools: DevToolsClient }) => {
   if (detachClient) detachClient();
-  devtoolsClient = client;
+  devtoolsClient = devtools;
 
   const onDelta = (payload: unknown) => fanChange('delta', payload);
   const onStatus = (payload: unknown) => fanChange('status', payload);
@@ -47,15 +47,15 @@ serviceBus.on('devtools', (client: DevToolsClient) => {
   // (renderer still shows error UI, but at least the IPC handler
   // doesn't drag a corpse through every retry).
   const onDisconnected = (): void => {
-    if (devtoolsClient === client) devtoolsClient = null;
+    if (devtoolsClient === devtools) devtoolsClient = null;
   };
-  client.on('delta', onDelta);
-  client.on('status', onStatus);
-  client.on('disconnected', onDisconnected);
+  devtools.on('delta', onDelta);
+  devtools.on('status', onStatus);
+  devtools.on('disconnected', onDisconnected);
   detachClient = () => {
-    client.off('delta', onDelta);
-    client.off('status', onStatus);
-    client.off('disconnected', onDisconnected);
+    devtools.off('delta', onDelta);
+    devtools.off('status', onStatus);
+    devtools.off('disconnected', onDisconnected);
   };
 });
 

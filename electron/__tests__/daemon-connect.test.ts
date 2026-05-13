@@ -62,18 +62,23 @@ describe("connectElectronToDaemon", () => {
     // Attach listeners BEFORE calling connectElectronToDaemon so we
     // catch the synchronous emit that happens after `connectToDaemonSession`
     // resolves. The listeners attach once each.
-    const published: Record<string, unknown> = {};
+    //
+    // Phase D5 — payloads are now `{ sessionId, <adapter-field> }`; the
+    // field name varies by topic (metro→`metro`, devtools→`devtools`, ...).
+    // Keep the raw payload around so the assertions below can also pin
+    // the sessionId carried by each emit.
+    const published: Record<string, { sessionId: unknown; value: unknown }> = {};
     const topics = [
-      "metro",
-      "devtools",
-      "builder",
-      "watcher",
-      "modulesClient",
-      "worktreeKey",
+      { topic: "metro", field: "metro" },
+      { topic: "devtools", field: "devtools" },
+      { topic: "builder", field: "builder" },
+      { topic: "watcher", field: "watcher" },
+      { topic: "modulesClient", field: "client" },
+      { topic: "worktreeKey", field: "worktreeKey" },
     ] as const;
-    for (const topic of topics) {
-      serviceBus.once(topic, (value: unknown) => {
-        published[topic] = value;
+    for (const { topic, field } of topics) {
+      serviceBus.once(topic, (payload: Record<string, unknown>) => {
+        published[topic] = { sessionId: payload.sessionId, value: payload[field] };
       });
     }
 
@@ -87,19 +92,20 @@ describe("connectElectronToDaemon", () => {
     });
 
     try {
-      for (const topic of topics) {
+      for (const { topic } of topics) {
         expect(published[topic]).toBeDefined();
+        expect(published[topic]?.sessionId).toBe(session.sessionId);
       }
       // Same references — serviceBus hands through the session adapters
       // verbatim. Electron handlers resolve deps through these refs, so a
       // divergence here is a silent "handlers fire against a stale adapter"
       // hazard.
-      expect(published.metro).toBe(session.metro);
-      expect(published.devtools).toBe(session.devtools);
-      expect(published.builder).toBe(session.builder);
-      expect(published.watcher).toBe(session.watcher);
-      expect(published.modulesClient).toBe(session.modules);
-      expect(published.worktreeKey).toBe(session.worktreeKey);
+      expect(published.metro?.value).toBe(session.metro);
+      expect(published.devtools?.value).toBe(session.devtools);
+      expect(published.builder?.value).toBe(session.builder);
+      expect(published.watcher?.value).toBe(session.watcher);
+      expect(published.modulesClient?.value).toBe(session.modules);
+      expect(published.worktreeKey?.value).toBe(session.worktreeKey);
     } finally {
       session.disconnect();
     }

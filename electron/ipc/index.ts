@@ -61,7 +61,7 @@ let pendingClientPromise: Promise<import('../../src/app/client/module-host-adapt
 // the in-flight handlers got. Cleared whenever a real `setModulesClient`
 // arrives so a subsequent successful boot resets the failure mode.
 let currentAbortReason: string | null = null;
-serviceBus.on('modulesClientAborted', (reason: string) => {
+serviceBus.on('modulesClientAborted', ({ reason }: { reason: string }) => {
   currentAbortReason = reason;
 });
 
@@ -86,12 +86,12 @@ export function awaitModulesClient(): Promise<import('../../src/app/client/modul
         ),
       );
     }, MODULES_CLIENT_TIMEOUT_MS);
-    const onClient = (client: import('../../src/app/client/module-host-adapter.js').ModuleHostClient | null): void => {
+    const onClient = ({ client }: { client: import('../../src/app/client/module-host-adapter.js').ModuleHostClient | null }): void => {
       if (!client) return;
       cleanup();
       resolve(client);
     };
-    const onAborted = (reason: string): void => {
+    const onAborted = ({ reason }: { reason: string }): void => {
       cleanup();
       reject(new Error(reason));
     };
@@ -101,7 +101,7 @@ export function awaitModulesClient(): Promise<import('../../src/app/client/modul
   return pendingClientPromise;
 }
 
-serviceBus.on('modulesClient', (client) => {
+serviceBus.on('modulesClient', ({ client }) => {
   currentModulesClient = client ?? null;
   // A successful publish clears any previous abort — the next renderer
   // mount of a modules-bound panel re-fetches successfully without an
@@ -133,7 +133,7 @@ export function setupIpcBridge(window: BrowserWindow, initialProjectRoot?: strin
   senderRegistry.allowHostWrite('settings');
 
   // Forward service bus events to renderer (legacy, for global logs)
-  serviceBus.on('log', (text: string) => send('service:log', text));
+  serviceBus.on('log', ({ text }: { text: string }) => send('service:log', text));
 
   // Phase 8 — every privileged host action funnels through the
   // HMAC-chained AuditLog. The service-log pane UX is preserved via a
@@ -168,7 +168,7 @@ export function setupIpcBridge(window: BrowserWindow, initialProjectRoot?: strin
   // full breadth (install/uninstall/enabled/disabled/restarted/
   // config-changed) that the renderer's Marketplace + Settings panels
   // rely on. Kieran P0-2.
-  serviceBus.on('modulesClient', (client: ModuleHostClient | null) => {
+  serviceBus.on('modulesClient', ({ client }: { client: ModuleHostClient | null }) => {
     if (!client) return;
     client.on('modules-event', (event) => send('modules:event', event));
     void client.subscribeToEvents().catch((err: unknown) => {
@@ -228,7 +228,7 @@ function registerModulePanelsHandlers(window: BrowserWindow): void {
     () => senderRegistry,
   );
 
-  serviceBus.on('modulesClient', (client) => {
+  serviceBus.on('modulesClient', ({ client }) => {
     if (!client) {
       // Daemon dropped — invalidate. The panel-bridge stays installed
       // (its BrowserWindow hook owns the lifecycle); a fresh `deps` will
@@ -284,7 +284,7 @@ function registerModulePanelsHandlers(window: BrowserWindow): void {
       moduleRoots.delete(event.moduleId);
     }
   };
-  serviceBus.on('modulesClient', (client) => {
+  serviceBus.on('modulesClient', ({ client }) => {
     if (!client) return;
     client.on('modules-event', moduleRootsInvalidator);
   });
@@ -317,7 +317,7 @@ function registerModulesConfigHandlers(): void {
     () => senderRegistry,
   );
 
-  serviceBus.on('modulesClient', (client) => {
+  serviceBus.on('modulesClient', ({ client }) => {
     if (!client) {
       deps = null;
       return;
@@ -365,7 +365,7 @@ function registerModulesInstallHandlers(): void {
     () => senderRegistry,
   );
 
-  serviceBus.on('modulesClient', (client) => {
+  serviceBus.on('modulesClient', ({ client }) => {
     if (!client) {
       deps = null;
       return;

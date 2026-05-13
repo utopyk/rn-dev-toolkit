@@ -9,8 +9,8 @@ import { instances, state, appendLog, send } from './state.js';
 // collapses; `serviceBus.watcher` is the daemon adapter published by
 // `connectElectronToDaemon`.
 let watcherClient: WatcherClient | null = null;
-serviceBus.on('watcher', (client: WatcherClient) => {
-  watcherClient = client;
+serviceBus.on('watcher', ({ watcher }: { watcher: WatcherClient }) => {
+  watcherClient = watcher;
 });
 
 export function registerToolsHandlers() {

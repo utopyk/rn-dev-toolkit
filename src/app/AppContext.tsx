@@ -104,16 +104,21 @@ export function AppProvider({
   const [devtoolsTargets, setDevtoolsTargets] = useState<TargetDescriptor[]>([]);
   const [devtoolsSelectedTargetId, setDevtoolsSelectedTargetId] = useState<string | null>(null);
 
-  // Subscribe to service bus — bridges start-flow → React state
+  // Subscribe to service bus — bridges start-flow → React state.
+  // Phase D5 — payloads now carry `sessionId`; v1 TUI is still
+  // single-session so we destructure and ignore it (D6/D7 light up the
+  // multi-session path).
   useEffect(() => {
-    const onLog = (text: string) => {
+    const onLog = ({ text }: { text: string }) => {
       setToolOutputLines((prev) => [...prev, text].slice(-500));
     };
-    const onMetro = (m: MetroClient) => setLiveMetro(m);
-    const onBuilder = (b: BuilderClient) => setLiveBuilder(b);
-    const onWatcher = (w: WatcherClient) => setLiveWatcher(w);
-    const onWorktreeKey = (k: string) => setLiveWorktreeKey(k);
-    const onDevTools = (m: DevToolsClient) => setLiveDevTools(m);
+    const onMetro = ({ metro }: { metro: MetroClient }) => setLiveMetro(metro);
+    const onBuilder = ({ builder }: { builder: BuilderClient }) => setLiveBuilder(builder);
+    const onWatcher = ({ watcher }: { watcher: WatcherClient }) => setLiveWatcher(watcher);
+    const onWorktreeKey = ({ worktreeKey }: { worktreeKey: string }) =>
+      setLiveWorktreeKey(worktreeKey);
+    const onDevTools = ({ devtools }: { devtools: DevToolsClient }) =>
+      setLiveDevTools(devtools);
 
     serviceBus.on("log", onLog);
     serviceBus.on("metro", onMetro);

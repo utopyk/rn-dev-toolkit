@@ -288,6 +288,10 @@ export async function fakeBootSessionServices(
       ? fakeValidated.profile
       : (opts.profile as unknown as ValidatedProfile),
     bootTrace,
+    // Phase D4 — fake-boot has no real acquires, so the array stays
+    // empty. The supervisor's `stopEntry` release walk still reads
+    // this field; an empty list is the no-op case.
+    acquiredModules: [],
     dispose,
   };
 }

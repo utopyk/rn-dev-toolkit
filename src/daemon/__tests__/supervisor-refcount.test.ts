@@ -88,6 +88,7 @@ function makeFakeBoot(): { boot: SessionBootFn; lastServices: { current: Session
       // brand integrity isn't load-bearing here.
       validatedProfile: opts.profile as never,
       bootTrace: [],
+      acquiredModules: [],
       dispose: async () => {
         /* no-op */
       },

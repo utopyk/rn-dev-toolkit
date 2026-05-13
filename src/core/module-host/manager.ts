@@ -50,6 +50,22 @@ export interface ModuleHostManagerOptions {
    * their own store to isolate filesystem state.
    */
   configStore?: ModuleConfigStore;
+  /**
+   * Phase D4 — fired exactly once per (consumerId, moduleId, scopeUnit)
+   * triple, immediately after the consumer is first added to a live
+   * entry's holder set. Same-consumerId re-acquires of the same key
+   * skip the callback so the supervisor's `acquiredModules` array never
+   * accrues duplicates that would leak release calls on stopEntry.
+   *
+   * Default: undefined (no recording). Production wiring lives in
+   * `bootSessionServices`, which closes over the per-session
+   * `acquiredModules` array.
+   */
+  recordAcquire?: (
+    moduleId: string,
+    scopeUnit: string,
+    consumerId: string,
+  ) => void;
 }
 
 export interface ManagedModule {
@@ -210,6 +226,9 @@ export class ModuleHostManager extends EventEmitter {
   private readonly hostVersion: string;
   private readonly initializeTimeoutMs: number;
   private readonly idleShutdownMs: number;
+  private readonly recordAcquireFn:
+    | ((moduleId: string, scopeUnit: string, consumerId: string) => void)
+    | undefined;
   private shuttingDown = false;
 
   // Retained so shutdownAll() can de-register them.
@@ -231,6 +250,7 @@ export class ModuleHostManager extends EventEmitter {
     this.hostVersion = options.hostVersion;
     this.initializeTimeoutMs = options.initializeTimeoutMs ?? 3000;
     this.idleShutdownMs = options.idleShutdownMs ?? 60_000;
+    this.recordAcquireFn = options.recordAcquire;
 
     process.on("exit", this.processExitHandler);
     process.on("SIGINT", this.processSignalHandler);
@@ -254,14 +274,32 @@ export class ModuleHostManager extends EventEmitter {
     const key = ModuleHostManager.keyFor(registered);
     const existing = this.entries.get(key);
     if (existing) {
+      // Phase D4 — idempotence guard. `Set.add()` is a no-op when the
+      // consumerId is already present, but recordAcquireFn would still
+      // fire and append a stale entry to the supervisor's
+      // `acquiredModules` array. Check membership BEFORE adding so the
+      // hook fires only on the absent→present transition.
+      const wasNew = !existing.consumers.has(consumerId);
       existing.consumers.add(consumerId);
       this.cancelIdleTimer(existing);
+      if (wasNew) {
+        this.recordAcquireFn?.(
+          registered.manifest.id,
+          registered.scopeUnit,
+          consumerId,
+        );
+      }
       return existing.managed;
     }
 
     const entry = await this.spawnEntry(registered);
     entry.consumers.add(consumerId);
     this.entries.set(key, entry);
+    this.recordAcquireFn?.(
+      registered.manifest.id,
+      registered.scopeUnit,
+      consumerId,
+    );
     return entry.managed;
   }
 

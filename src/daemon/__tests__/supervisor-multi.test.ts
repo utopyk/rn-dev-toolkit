@@ -76,6 +76,7 @@ function makeFakeBoot(): SessionBootFn {
       }),
       validatedProfile: opts.profile as never,
       bootTrace: [],
+      acquiredModules: [],
       dispose: async () => {
         /* no-op */
       },

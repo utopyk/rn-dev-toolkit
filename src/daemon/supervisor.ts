@@ -135,7 +135,15 @@ export interface SessionEntry {
   /** ArtifactStore-hashed worktree key. Stable for the entry's lifetime. */
   sessionWorktreeKey: string;
   attachedConnections: Set<string>;
-  /** D4 placeholder — populated by ModuleHost refcount work. */
+  /**
+   * Phase D4 — every `(moduleId, scopeUnit, consumerId)` triple this
+   * session has acquired through `services.moduleHost.acquire()`.
+   * After `bootAsync` wires services, the reference is reassigned to
+   * `services.acquiredModules` so the manager-side `recordAcquire`
+   * hook appends to the same array the supervisor walks on teardown.
+   * Allocated empty in `startSession` so crash-cleanup paths
+   * (`stopEntry` running before `wired` is set) read a stable shape.
+   */
   acquiredModules: Array<{ moduleId: string; scopeUnit: string; consumerId: string }>;
 }
 
@@ -499,6 +507,29 @@ export class DaemonSupervisor extends EventEmitter {
     entry.wired = null;
 
     if (wired) {
+      // Phase D4 — cross-session ModuleHost refcount. Walk every
+      // (moduleId, scopeUnit, consumerId) this session acquired and
+      // release on the manager BEFORE `services.dispose()` runs. Order
+      // matters: dispose() tears down the capability registry the
+      // module subprocess's `host/call` RPC lands on, so releases must
+      // settle while the host wiring is still live. Releases are
+      // best-effort — a manager that's already shed the entry returns
+      // a no-op, and a release that throws (e.g. a module's shutdown
+      // hook crashing) must NOT block subsequent releases or dispose.
+      const acquired = [...entry.acquiredModules];
+      entry.acquiredModules = [];
+      for (const acq of acquired) {
+        try {
+          await wired.services.moduleHost.release(
+            acq.moduleId,
+            acq.scopeUnit,
+            acq.consumerId,
+          );
+        } catch {
+          /* best-effort — refcount cleanup errors are non-fatal */
+        }
+      }
+
       // Dispose first so teardown-time emits (metro stopped, module
       // crashed-on-exit, etc.) propagate to events/subscribe listeners
       // who need them. Detach only after the last event fires; otherwise
@@ -561,6 +592,13 @@ export class DaemonSupervisor extends EventEmitter {
 
     const detach = this.wireServiceEvents(current, services);
     current.wired = { services, detach, epoch: myEpoch };
+    // Phase D4 — share the array reference so the manager's
+    // `recordAcquire` hook (which closes over `services.acquiredModules`)
+    // and the supervisor's `stopEntry` release walk read/write the
+    // same list. Pre-D4 the entry held its own empty array allocated
+    // at `startSession`; that array becomes garbage now and is replaced
+    // by the services-side one for the rest of the entry's lifetime.
+    current.acquiredModules = services.acquiredModules;
     current.state = {
       status: "running",
       services: this.snapshotServices(services),

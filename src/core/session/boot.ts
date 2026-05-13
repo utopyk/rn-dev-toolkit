@@ -136,6 +136,20 @@ export interface SessionServices {
    * (Phase 3). Production callers should ignore.
    */
   bootTrace: ReadonlyArray<{ phase: 1 | 2 | 3; ts: number }>;
+  /**
+   * Phase D4 — every `(moduleId, scopeUnit, consumerId)` triple this
+   * session has acquired through `moduleHost.acquire()`. Populated by
+   * the manager's `recordAcquire` hook; walked by the supervisor's
+   * `stopEntry` release pass BEFORE `dispose()` so the cross-session
+   * refcount drops cleanly even when an in-flight `modules/call`
+   * never reached its `finally`-release. The supervisor reads this
+   * array via `entry.acquiredModules` (reference-shared post-boot).
+   */
+  acquiredModules: Array<{
+    moduleId: string;
+    scopeUnit: string;
+    consumerId: string;
+  }>;
   /** Release resources. Daemon calls this on session/stop. */
   dispose: () => Promise<void>;
 }
@@ -408,12 +422,25 @@ export async function bootSessionServices(
     worktreeKey,
     sessionId,
   });
+  // Phase D4 — surfaced on SessionServices and read by the supervisor's
+  // `stopEntry` release walk. The array reference flows into both the
+  // manager (via `recordAcquire`) and the supervisor's
+  // `entry.acquiredModules` (assigned after services wire up), so the
+  // three sites share one source of truth.
+  const acquiredModules: Array<{
+    moduleId: string;
+    scopeUnit: string;
+    consumerId: string;
+  }> = [];
   const { moduleHost } = createModuleSystem({
     hostVersion,
     worktreeKey,
     capabilities,
     moduleRegistry,
     logger: createScopedLogger(emit),
+    recordAcquire: (moduleId, scopeUnit, consumerId) => {
+      acquiredModules.push({ moduleId, scopeUnit, consumerId });
+    },
   });
 
   // Phase H2f — register the build built-in module with the live
@@ -573,6 +600,7 @@ export async function bootSessionServices(
     // hook fires see the latest config.
     validatedProfile,
     bootTrace,
+    acquiredModules,
     dispose,
   };
 }

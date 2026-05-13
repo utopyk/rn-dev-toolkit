@@ -82,6 +82,7 @@ function makeServices(
     hookManager,
     validatedProfile: profile,
     bootTrace: [],
+    acquiredModules: [],
     dispose: async () => undefined,
   };
 }

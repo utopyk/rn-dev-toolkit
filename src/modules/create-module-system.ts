@@ -67,6 +67,18 @@ export interface CreateModuleSystemOptions {
    * so there is no collision.
    */
   moduleRegistry?: ModuleRegistry;
+  /**
+   * Phase D4 — forwarded to the constructed `ModuleHostManager`. Fired
+   * exactly once per (consumerId, moduleId, scopeUnit) triple so the
+   * supervisor's per-session `acquiredModules` array survives the
+   * release walk on `stopEntry`. No-op for fake-boot / Electron paths
+   * that don't carry a session.
+   */
+  recordAcquire?: (
+    moduleId: string,
+    scopeUnit: string,
+    consumerId: string,
+  ) => void;
 }
 
 export interface ModuleSystem {
@@ -94,6 +106,7 @@ export function createModuleSystem(opts: CreateModuleSystemOptions): ModuleSyste
   const moduleHost = new ModuleHostManager({
     hostVersion: opts.hostVersion,
     capabilities,
+    recordAcquire: opts.recordAcquire,
   });
 
   const moduleRegistry = opts.moduleRegistry ?? new ModuleRegistry();

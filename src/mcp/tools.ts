@@ -443,23 +443,40 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     {
       name: "rn-dev/list-sessions",
       description:
-        "Return the active session as a single-element array, or an empty array if no session is running. Wraps session/status for parity with multi-session-aware clients. Phase M2 will upgrade this to query the daemon's `sessions/list` RPC and return every attached session.",
+        "Return every session the daemon knows about (running, starting, stopped). Wraps the daemon's `sessions/list` RPC. Each entry carries `{ sessionId, profileName, worktreeKey, status, services }` — pass `sessionId` into any session-scoped tool (`rn-dev/build`, `rn-dev/build-status`, `rn-dev/devtools-network__*`, …) to target it. Returns an empty array when no daemon is attached or when the daemon has no sessions.",
       inputSchema: { type: "object", properties: {} },
+      outputSchema: {
+        type: "object",
+        required: ["sessions"],
+        properties: {
+          sessions: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["sessionId", "status"],
+              properties: {
+                sessionId: { type: "string" },
+                profileName: { type: "string" },
+                worktreeKey: { type: "string" },
+                status: { type: "string" },
+                services: { type: "object" },
+              },
+            },
+          },
+        },
+      },
       handler: async () => {
+        // Phase M2 — sessions/list is daemon-global. Any attached
+        // session's subscribe socket works; resolveAnySession picks the
+        // default (or any first entry as fallback).
         const anySession = resolveAnySession(ctx);
         if (!anySession) return { sessions: [] };
         const resp = await anySession.session.client.send(
-          makeIpcMessage("session/status", {
-            sessionId: anySession.session.sessionId,
-          }),
+          makeIpcMessage("sessions/list"),
         );
-        const payload = resp.payload as
-          | { status?: string }
-          | undefined;
-        if (!payload || payload.status === "stopped" || !payload.status) {
-          return { sessions: [] };
-        }
-        return { sessions: [payload] };
+        const payload = resp.payload as { sessions?: unknown } | undefined;
+        const raw = Array.isArray(payload?.sessions) ? payload.sessions : [];
+        return { sessions: raw };
       },
     },
     {

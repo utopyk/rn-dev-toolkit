@@ -18,7 +18,14 @@
 //   6. rn-dev/list-sessions                 — confirm teardown
 
 import { afterEach, describe, expect, it } from "vitest";
-import { readFileSync, rmSync } from "node:fs";
+import { execSync } from "node:child_process";
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import {
   spawnMcpServer,
@@ -50,6 +57,95 @@ function parseToolJson<T>(result: unknown): T {
 
 describe("Probe — MCP cold-start discovery flow (acme fixture)", () => {
   const liveMcp: McpHarnessHandle[] = [];
+  const cleanups: Array<() => void> = [];
+
+  /**
+   * Write a throwaway probe profile so the cold-start flow has something
+   * to discover. The probe writes its own profile (rather than relying
+   * on the user's defaults) so a fresh acme checkout — or one whose
+   * profiles were wiped — still exercises the discovery loop. Mirrors
+   * the throwaway-profile pattern from the build-multi + devtools-multi
+   * probes; cleanup restores any pre-existing isDefault flags we flipped.
+   */
+  function setupProbeProfile(): { name: string } {
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: ACME,
+    })
+      .toString()
+      .trim();
+    const profileDir = join(ACME, ".rn-dev", "profiles");
+    mkdirSync(profileDir, { recursive: true });
+
+    // Flip any existing default off so our throwaway is unambiguously
+    // the auto-picked one; restore on cleanup.
+    const flippedProfiles: Array<{ path: string; original: string }> = [];
+    try {
+      const existing = readdirSync(profileDir).filter((f) =>
+        f.endsWith(".json"),
+      );
+      for (const file of existing) {
+        const fp = join(profileDir, file);
+        const original = readFileSync(fp, "utf-8");
+        try {
+          const parsed = JSON.parse(original) as { isDefault?: boolean };
+          if (parsed.isDefault === true) {
+            parsed.isDefault = false;
+            writeFileSync(fp, JSON.stringify(parsed, null, 2));
+            flippedProfiles.push({ path: fp, original });
+          }
+        } catch {
+          // malformed — skip
+        }
+      }
+    } catch {
+      // no profiles dir yet — fine
+    }
+    cleanups.push(() => {
+      for (const { path, original } of flippedProfiles) {
+        try {
+          writeFileSync(path, original);
+        } catch {
+          // best-effort
+        }
+      }
+    });
+
+    const profileName = "rn-dev-probe-mcp-cold-start";
+    const profilePath = join(profileDir, `${profileName}.json`);
+    writeFileSync(
+      profilePath,
+      JSON.stringify(
+        {
+          name: profileName,
+          isDefault: true,
+          worktree: null,
+          branch,
+          platform: "ios",
+          mode: "dirty",
+          metroPort: 8099,
+          devices: { ios: "00008130-001A653A3E11001C", android: null },
+          buildVariant: "debug",
+          scheme: "Acme",
+          configuration: "Debug",
+          preflight: { checks: [], frequency: "once" },
+          onSave: [],
+          env: {},
+          projectRoot: ACME,
+          packageManager: "pnpm",
+        },
+        null,
+        2,
+      ),
+    );
+    cleanups.push(() => {
+      try {
+        rmSync(profilePath, { force: true });
+      } catch {
+        // best-effort
+      }
+    });
+    return { name: profileName };
+  }
 
   afterEach(async () => {
     for (const m of liveMcp.splice(0)) await m.stop();
@@ -96,11 +192,14 @@ describe("Probe — MCP cold-start discovery flow (acme fixture)", () => {
     } catch {
       // best-effort
     }
+
+    for (const c of cleanups.splice(0)) c();
   });
 
   it.skipIf(!ENABLED)(
     "agent can discover → start → list → stop without prior session context",
     async () => {
+      setupProbeProfile();
       const mcp = await spawnMcpServer({ cwd: ACME });
       liveMcp.push(mcp);
 
@@ -191,6 +290,7 @@ describe("Probe — MCP cold-start discovery flow (acme fixture)", () => {
   it.skipIf(!ENABLED)(
     "stop-session refuses without permissionsAccepted (destructive gating)",
     async () => {
+      setupProbeProfile();
       const mcp = await spawnMcpServer({ cwd: ACME });
       liveMcp.push(mcp);
 

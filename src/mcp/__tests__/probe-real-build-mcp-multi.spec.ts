@@ -260,10 +260,26 @@ describe("Probe — MCP multi-session parallel builds (acme fixture)", () => {
           arguments: { sessionId: sidB, platform: "ios" },
         }),
       ]);
-      const buildAPayload = parseToolJson<{ ok?: boolean }>(buildA);
-      const buildBPayload = parseToolJson<{ ok?: boolean }>(buildB);
-      expect(buildAPayload.ok).toBe(true);
-      expect(buildBPayload.ok).toBe(true);
+      const buildAPayload = parseToolJson<{
+        ok?: boolean;
+        code?: string;
+        message?: string;
+      }>(buildA);
+      const buildBPayload = parseToolJson<{
+        ok?: boolean;
+        code?: string;
+        message?: string;
+      }>(buildB);
+      console.log(`Build A response: ${JSON.stringify(buildAPayload)}`);
+      console.log(`Build B response: ${JSON.stringify(buildBPayload)}`);
+      expect(
+        buildAPayload.ok,
+        `Build A failed to ack: ${JSON.stringify(buildAPayload)}`,
+      ).toBe(true);
+      expect(
+        buildBPayload.ok,
+        `Build B failed to ack: ${JSON.stringify(buildBPayload)}`,
+      ).toBe(true);
 
       // Poll build-status on both. Each session's BuilderClient has its
       // own ring, so events for A must not appear in B's output. 12-minute

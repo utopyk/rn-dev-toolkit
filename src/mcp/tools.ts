@@ -677,6 +677,15 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       },
     },
     // Metro control
+    //
+    // Wire-contract note (M1 follow-up surfaced by M6 PROBE):
+    // the daemon's `resolveSessionServices` (src/daemon/client-rpcs.ts:113)
+    // routes session-scoped RPCs by `payload.sessionId`, NOT by socket
+    // affinity. So even though MCP sends each call through the resolved
+    // session's per-session subscribe socket, the daemon still needs
+    // `sessionId` in the payload — otherwise its back-compat fallback
+    // sees N > 1 active sessions and returns E_SESSION_AMBIGUOUS.
+    // Every send below threads `resolved.sessionId` accordingly.
     {
       name: "rn-dev/reload",
       description:
@@ -692,7 +701,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const resolved = resolveSession(ctx, args);
         if (!resolved.ok) return resolved.result;
         const resp = await resolved.record.session.client.send(
-          makeIpcMessage("reload"),
+          makeIpcMessage("reload", { sessionId: resolved.sessionId }),
         );
         return resp.payload ?? { status: "reloaded" };
       },
@@ -710,7 +719,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const resolved = resolveSession(ctx, args);
         if (!resolved.ok) return resolved.result;
         const resp = await resolved.record.session.client.send(
-          makeIpcMessage("dev-menu"),
+          makeIpcMessage("dev-menu", { sessionId: resolved.sessionId }),
         );
         return resp.payload ?? { status: "opened" };
       },
@@ -724,7 +733,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const resolved = resolveSession(ctx, args);
         if (!resolved.ok) return resolved.result;
         const resp = await resolved.record.session.client.send(
-          makeIpcMessage("metro-status"),
+          makeIpcMessage("metro-status", { sessionId: resolved.sessionId }),
         );
         return resp.payload ?? { status: "unknown" };
       },
@@ -806,6 +815,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const port = profile.metroPort;
 
         const payload: Record<string, unknown> = {
+          sessionId: resolved.sessionId,
           projectRoot: ctx.projectRoot,
           platform,
           variant,

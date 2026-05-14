@@ -145,9 +145,13 @@ describe("MCP session lifecycle e2e (M2-prereq)", () => {
     async () => {
       const { mcp } = await setup();
 
+      // Phase M4 — stop-session is destructive (terminates in-flight
+      // builds + capture sessions). Production agents must either pass
+      // permissionsAccepted or launch MCP with --allow-destructive-tools.
+      // The lifecycle test models the per-call consent path.
       const stopResult = await mcp.client.callTool({
         name: "rn-dev/stop-session",
-        arguments: {},
+        arguments: { permissionsAccepted: ["rn-dev/stop-session"] },
       });
       const stopPayload = parseToolJson<{ status?: string }>(stopResult);
       // stop returns { status: "stopped" } on success — not an "error"

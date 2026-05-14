@@ -544,15 +544,70 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     {
       name: "rn-dev/stop-session",
       description:
-        "Stop a development session via session/stop. Tears down Metro, the module host, and any active services for the resolved session. Pass `sessionId` to target a specific session; required when more than one session is attached.",
-      inputSchema: withSessionIdProp({ type: "object", properties: {} }),
+        "Stop a development session via session/stop. Tears down Metro, the module host, and any active services for the resolved session. Pass `sessionId` to target a specific session; required when more than one session is attached. [destructive] Stopping a session terminates in-flight builds and any agent capture sessions (DevTools, Metro logs) for that session — re-call with `{ permissionsAccepted: [\"rn-dev/stop-session\"] }` or start the MCP server with --allow-destructive-tools to confirm.",
+      inputSchema: withSessionIdProp({
+        type: "object",
+        properties: {
+          permissionsAccepted: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Pass [\"rn-dev/stop-session\"] to confirm the destructive stop.",
+          },
+        },
+      }),
+      outputSchema: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          status: { type: "string" },
+          stoppedSession: { type: "boolean" },
+          code: { type: "string" },
+          message: { type: "string" },
+        },
+      },
       handler: async (args) => {
+        // Phase M4 — destructive gating mirrors `rn-dev/modules-config-set`
+        // (tools.ts:1101-1123). Two ways to bypass the confirm:
+        //   1. Per-call: pass `permissionsAccepted: ["rn-dev/stop-session"]`
+        //   2. Global:   start MCP with `--allow-destructive-tools`
+        //
+        // Phase M4 explicitly requires sessionId in multi-session shells —
+        // E_SESSION_AMBIGUOUS surfaces here via `resolveSession`. The
+        // ambiguous-error payload already carries `availableSessions`
+        // so an agent can retry with one of the listed ids.
+        if (!flags.allowDestructiveTools) {
+          const accepted = Array.isArray(args.permissionsAccepted)
+            ? args.permissionsAccepted.filter((v): v is string => typeof v === "string")
+            : [];
+          if (!accepted.includes("rn-dev/stop-session")) {
+            return {
+              isError: true,
+              structuredContent: {
+                code: "E_DESTRUCTIVE_REQUIRES_CONFIRM",
+                message:
+                  'rn-dev/stop-session is destructive: re-call with { permissionsAccepted: ["rn-dev/stop-session"] } or start MCP with --allow-destructive-tools.',
+              },
+              content: [
+                {
+                  type: "text" as const,
+                  text: 'rn-dev/stop-session requires { permissionsAccepted: ["rn-dev/stop-session"] } or --allow-destructive-tools.',
+                },
+              ],
+            } satisfies ToolResult;
+          }
+        }
+
         const resolved = resolveSession(ctx, args);
         if (!resolved.ok) return resolved.result;
         const resp = await resolved.record.session.client.send(
           makeIpcMessage("session/stop", { sessionId: resolved.sessionId }),
         );
-        return resp.payload ?? { status: "stopped" };
+        const payload = (resp.payload as Record<string, unknown>) ?? {};
+        return {
+          sessionId: resolved.sessionId,
+          ...payload,
+        };
       },
     },
     {

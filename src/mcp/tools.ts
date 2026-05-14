@@ -1,5 +1,6 @@
 import { execSync } from "child_process";
-import { existsSync } from "fs";
+import { existsSync, readFileSync } from "fs";
+import { homedir } from "os";
 import { join } from "path";
 import type { ProfileStore } from "../core/profile.js";
 import type { ArtifactStore } from "../core/artifact.js";
@@ -1117,7 +1118,143 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         }
       },
     },
+    {
+      // Phase M5 — agent-native readback of the host audit log
+      // (~/.rn-dev/audit.log). The TUI / Electron renderer do not (yet)
+      // surface a log viewer, so the MCP tool is the parity surface for
+      // agents that need to audit `install`, `host-call`, `config-set`,
+      // `panel-bridge`, and `hook` outcomes. Read-only; no destructive
+      // gating required.
+      name: "rn-dev/audit-tail",
+      description:
+        "Return recent entries from the HMAC-chained host audit log at `~/.rn-dev/audit.log`. Use after a destructive call (e.g. rn-dev/modules-config-set, rn-dev/stop-session) to confirm the audit-side record landed. Entries carry `{ kind, ts, seq, outcome, ... }`; the per-kind shape is documented in src/core/audit-log.ts (AuditEntryInput). Filters: `since` (epoch ms; entries strictly after this), `kind` (exact match — e.g. \"hook\", \"install\", \"config-set\"), `sessionId` (forward-compat — v1 audit entries do not carry sessionId so passing this returns no rows until session-scoped audit kinds land). `limit` defaults to 50; max 200.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          limit: {
+            type: "number",
+            description:
+              "Maximum entries to return. Default: 50. Max: 200.",
+          },
+          since: {
+            type: "number",
+            description:
+              "Epoch ms; entries with `ts > since` are returned. Omit for the full tail.",
+          },
+          kind: {
+            type: "string",
+            description:
+              "Exact audit kind to filter by (install / uninstall / host-call / config-set / panel-bridge / hook).",
+          },
+          sessionId: {
+            type: "string",
+            description:
+              "Forward-compat sessionId filter — v1 audit entries do not include sessionId so passing this returns no rows. Will become useful once session-scoped audit kinds (e.g. session-start / session-stop) are added.",
+          },
+        },
+      },
+      outputSchema: {
+        type: "object",
+        required: ["entries"],
+        properties: {
+          entries: {
+            type: "array",
+            items: {
+              type: "object",
+              required: ["kind", "ts", "seq"],
+              properties: {
+                kind: { type: "string" },
+                ts: { type: "number" },
+                seq: { type: "number" },
+                outcome: { type: "string" },
+              },
+            },
+          },
+          path: { type: "string" },
+        },
+      },
+      handler: async (args) => {
+        const limit = (() => {
+          const v = args["limit"];
+          if (typeof v === "number" && v > 0) return Math.min(v, 200);
+          return 50;
+        })();
+        const since =
+          typeof args["since"] === "number" ? (args["since"] as number) : null;
+        const kindFilter =
+          typeof args["kind"] === "string" ? (args["kind"] as string) : null;
+        const sessionIdFilter =
+          typeof args["sessionId"] === "string" && args["sessionId"].length > 0
+            ? (args["sessionId"] as string)
+            : null;
+        const entries = readAuditTail({
+          limit,
+          since,
+          kind: kindFilter,
+          sessionId: sessionIdFilter,
+        });
+        return { structuredContent: { entries, path: defaultAuditLogPath() } };
+      },
+    },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// Phase M5 — audit-log tail helper
+//
+// Reads `~/.rn-dev/audit.log` (NDJSON, HMAC-chained — chain verification is
+// out of scope here; that's `AuditLog.verify()`). Returns the most-recent
+// `limit` entries in chronological order (oldest → newest after reverse).
+// Missing file → empty array (a fresh install has never written audit).
+//
+// Mirrors `readHookAuditTail` in tools-hooks.ts; lifted here because
+// audit-tail is generic across all kinds (not hook-specific).
+// ---------------------------------------------------------------------------
+
+function defaultAuditLogPath(): string {
+  return join(homedir(), ".rn-dev", "audit.log");
+}
+
+interface ReadAuditTailOpts {
+  limit: number;
+  since: number | null;
+  kind: string | null;
+  sessionId: string | null;
+  auditLogPath?: string;
+}
+
+export function readAuditTail(opts: ReadAuditTailOpts): Record<string, unknown>[] {
+  const path = opts.auditLogPath ?? defaultAuditLogPath();
+  if (!existsSync(path)) return [];
+
+  const raw = readFileSync(path, "utf-8");
+  const lines = raw.split("\n");
+  const matches: Record<string, unknown>[] = [];
+
+  // Walk lines newest → oldest so we can stop as soon as we've gathered
+  // `limit` matches. Reverse at the end so the agent sees chronological
+  // order, matching readHookAuditTail.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (line === "") continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof entry !== "object" || entry === null) continue;
+    const e = entry as Record<string, unknown>;
+    if (opts.kind && e["kind"] !== opts.kind) continue;
+    if (opts.sessionId && e["sessionId"] !== opts.sessionId) continue;
+    if (opts.since !== null) {
+      const ts = typeof e["ts"] === "number" ? (e["ts"] as number) : 0;
+      if (ts <= opts.since) continue;
+    }
+    matches.push(e);
+    if (matches.length >= opts.limit) break;
+  }
+  return matches.reverse();
 }
 
 // ---------------------------------------------------------------------------

@@ -126,9 +126,9 @@ function makeMockSession(
 // ---------------------------------------------------------------------------
 
 describe("createToolDefinitions()", () => {
-  it("returns 34 tool definitions (22 legacy + 5 modules/* lifecycle + 2 modules/config/* + modules-available + session-logs + build-status + 2 hooks/* added in Phase H2j+H2k; Phase M2a added build-status; Phase 11 retired legacy `rn-dev/metro-logs`)", () => {
+  it("returns 35 tool definitions (Phase M5 adds rn-dev/audit-tail on top of the prior 34)", () => {
     const tools = createToolDefinitions(makeMockContext());
-    expect(tools).toHaveLength(34);
+    expect(tools).toHaveLength(35);
   });
 
   it("each tool has name, description, inputSchema, and handler", () => {

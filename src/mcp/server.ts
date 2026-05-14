@@ -165,6 +165,8 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
     defaultSessionId,
     flags,
     bootProfile: profile,
+    // attachSession is wired below after `refreshModuleTools` is defined
+    // so the new session immediately participates in tools/listChanged.
   };
 
   const builtInTools = createToolDefinitions(ctx);
@@ -239,10 +241,30 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
       // Transport may be closed (client already disconnected).
     }
   };
-  for (const record of ctx.sessions.values()) {
+
+  const wireSessionEvents = (record: { session: { modules: { on: (kind: "modules-event", listener: () => void) => void } } }): void => {
     record.session.modules.on("modules-event", () => {
       void refreshModuleTools();
     });
+  };
+
+  // Phase M3 — when `rn-dev/start-session { profileName }` opens a new
+  // session, attach it to the multi-session shell here so the
+  // tools/listChanged stream picks up the new session's modules and
+  // the new entry surfaces in `rn-dev/list-sessions`.
+  ctx.attachSession = (record) => {
+    ctx.sessions.set(record.session.sessionId, record);
+    if (!ctx.defaultSessionId) {
+      ctx.defaultSessionId = record.session.sessionId;
+    }
+    wireSessionEvents(record);
+    // Pick up any module the new session contributes that wasn't
+    // present in the previous snapshot, and notify connected clients.
+    void refreshModuleTools();
+  };
+
+  for (const record of ctx.sessions.values()) {
+    wireSessionEvents(record);
   }
 }
 

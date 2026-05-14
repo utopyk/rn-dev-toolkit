@@ -7,6 +7,7 @@ import type { MetroManager } from "../core/metro.js";
 import type { PreflightEngine } from "../core/preflight.js";
 import type { IpcMessage } from "../core/ipc.js";
 import type { DaemonSession } from "../app/client/session.js";
+import { connectToDaemonSession } from "../app/client/session.js";
 import type { Platform, Profile } from "../core/types.js";
 import { asSessionId, type SessionId } from "../core/identifiers.js";
 import { listDevices, bootDevice } from "../core/device.js";
@@ -95,6 +96,16 @@ export interface McpContext {
    * Per-session profiles live inside `sessions.get(sid).profile`.
    */
   bootProfile?: Profile | null;
+  /**
+   * Phase M3 — callback that registers a freshly-attached daemon session
+   * with the multi-session shell. Wired by `server.ts` at boot; it adds
+   * the record to `ctx.sessions`, points `defaultSessionId` at it if no
+   * default is set, and subscribes the modules-event listener so a
+   * tools/listChanged notification fires after install/crash. Optional
+   * because unit-test contexts that never call `rn-dev/start-session
+   * { profileName }` don't need to provide it.
+   */
+  attachSession?: (record: McpSessionRecord) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -368,18 +379,119 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     {
       name: "rn-dev/start-session",
       description:
-        "Ensure a development session is running. The session is automatically started when MCP boots; this tool is idempotent — it returns the current session/status of the resolved session when running, or re-issues session/start with MCP's boot profile when stopped (e.g. after a prior stop-session). Pass `sessionId` to target a specific attached session; omit for auto-resolve when exactly one session is running. Phase M3 will extend this with a `profileName` arg for cold-start.",
+        "Ensure a development session is running and return its `{ sessionId, status }`. Three modes:\n" +
+        "  - `profileName` given → boot a session for that named profile (loaded from `.rn-dev/profiles`). If a session for that profile is already attached, the existing sessionId is returned; otherwise a new subscribe socket is opened (boot-or-join via events/subscribe { profile }) and the new session is registered for follow-up RPCs.\n" +
+        "  - `sessionId` given → idempotent restart for the named session: returns its current status, or re-issues session/start with the session's profile when stopped.\n" +
+        "  - Neither → behaves as the idempotent restart against the resolved session (auto-resolves when exactly one session is attached; falls back to MCP's boot profile when zero sessions are attached).\n" +
+        "Discover profile names via `rn-dev/list-profiles`; discover sessionIds via `rn-dev/list-sessions`.",
       inputSchema: withSessionIdProp({
         type: "object",
-        properties: {},
+        properties: {
+          profileName: {
+            type: "string",
+            description:
+              "Name of a profile in `.rn-dev/profiles` to boot a session for. Use this for cold-start (zero attached sessions and you want to pick which profile to start) or to open an additional session alongside the existing default.",
+          },
+        },
       }),
+      outputSchema: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string" },
+          status: { type: "string" },
+          alreadyAttached: { type: "boolean" },
+          error: { type: "string" },
+        },
+      },
       handler: async (args) => {
-        // M1 — when at least one session is attached, behave as the
-        // idempotent restart path against the resolved session. When
-        // none are attached (cold-start path), fall through to the
-        // bootProfile-based daemon connection — M3 will introduce a
-        // `profileName` arg so an agent can pick which profile to
-        // boot from a multi-profile project.
+        const profileName =
+          typeof args["profileName"] === "string" && args["profileName"].length > 0
+            ? (args["profileName"] as string)
+            : null;
+
+        // Path A — profileName provided. Either reuse an already-attached
+        // session for that profile, or call connectToDaemonSession to
+        // boot-or-join and register the new session.
+        if (profileName) {
+          const existing = [...ctx.sessions.entries()].find(
+            ([, record]) => record.profile.name === profileName,
+          );
+          if (existing) {
+            const [sid, record] = existing;
+            const statusResp = await record.session.client.send(
+              makeIpcMessage("session/status", { sessionId: sid }),
+            );
+            const payload = statusResp.payload as
+              | { status?: string }
+              | undefined;
+            return {
+              sessionId: sid,
+              status: payload?.status ?? "running",
+              alreadyAttached: true,
+            };
+          }
+
+          // Profile not already attached — load from disk + attach.
+          const profile = ctx.profileStore
+            .list()
+            .find((p) => p.name === profileName);
+          if (!profile) {
+            return sessionResolutionError(
+              "E_UNKNOWN_PROFILE",
+              `No profile named "${profileName}" in .rn-dev/profiles. Run \`rn-dev/list-profiles\` to discover available names.`,
+            );
+          }
+          if (!ctx.attachSession) {
+            // Defensive — server.ts wires this. Unit-test contexts that
+            // call this code path must provide attachSession.
+            return sessionResolutionError(
+              "E_NOT_WIRED",
+              "MCP server has no attachSession callback wired — this build cannot open additional sessions.",
+            );
+          }
+
+          let newSession: DaemonSession;
+          try {
+            newSession = await connectToDaemonSession(ctx.projectRoot, profile, {
+              kinds: ["modules/*", "session/log", "session/status", "builder/*"],
+            });
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            return sessionResolutionError(
+              "E_SESSION_ATTACH_FAILED",
+              `Failed to attach a session for profile "${profileName}": ${message}`,
+            );
+          }
+
+          // boot-or-join may have returned an already-attached session
+          // (a separate client booted it). Guard against duplicating
+          // the entry: keep the first DaemonSession, release the new
+          // duplicate's subscribe socket so the daemon's refcount
+          // doesn't grow unboundedly.
+          const alreadyAttached = ctx.sessions.has(newSession.sessionId);
+          if (alreadyAttached) {
+            try {
+              newSession.disconnect();
+            } catch {
+              // best-effort
+            }
+            return {
+              sessionId: newSession.sessionId,
+              status: "running",
+              alreadyAttached: true,
+            };
+          }
+
+          ctx.attachSession({ session: newSession, profile });
+          return {
+            sessionId: newSession.sessionId,
+            status: "starting",
+            alreadyAttached: false,
+          };
+        }
+
+        // Path B — no profileName, at least one session attached. M1
+        // idempotent restart path against the resolved session.
         if (ctx.sessions.size > 0) {
           const resolved = resolveSession(ctx, args);
           if (!resolved.ok) return resolved.result;
@@ -392,33 +504,36 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
           );
           const status = (statusResp.payload as { status?: string } | undefined)?.status;
           if (status && status !== "stopped") {
-            return statusResp.payload ?? { status, sessionId: resolved.sessionId };
+            return {
+              sessionId: resolved.sessionId,
+              status,
+              alreadyAttached: true,
+            };
           }
 
           // Stopped — restart with the profile this session was booted with.
           const startResp = await record.session.client.send(
             makeIpcMessage("session/start", { profile: record.profile }),
           );
-          return startResp.payload ?? { status: "started" };
+          return startResp.payload ?? {
+            sessionId: resolved.sessionId,
+            status: "started",
+          };
         }
 
-        // Cold-start path — no sessions attached. Phase M1 keeps the
-        // bootProfile fallback so existing single-session bootstrap
-        // still works after a prior `rn-dev/stop-session`. M3 will
-        // replace this with the `profileName` flow.
+        // Path C — no profileName, zero sessions. Fall back to bootProfile.
         if (!ctx.bootProfile) {
-          return {
-            error:
-              "No daemon session is attached and MCP has no boot profile to restart with. Recreate the MCP server inside a project that has a default profile.",
-          };
+          return sessionResolutionError(
+            "E_NO_SESSION",
+            "No daemon session is attached and no `profileName` was provided. Either pass `profileName` (discoverable via rn-dev/list-profiles) or restart MCP inside a project that has a default profile.",
+          );
         }
         const anySession = resolveAnySession(ctx);
         if (!anySession) {
-          // Truly no daemon at all (boot raced or never connected).
-          return {
-            error:
-              "No daemon connection. Recreate the MCP server inside a project with a running daemon (or a default profile that will auto-start one).",
-          };
+          return sessionResolutionError(
+            "E_NO_DAEMON",
+            "No daemon connection. Restart MCP inside a project with a default profile to auto-spawn the daemon.",
+          );
         }
         const startResp = await anySession.session.client.send(
           makeIpcMessage("session/start", { profile: ctx.bootProfile }),

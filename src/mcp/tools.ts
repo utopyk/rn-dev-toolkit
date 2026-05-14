@@ -8,6 +8,7 @@ import type { PreflightEngine } from "../core/preflight.js";
 import type { IpcMessage } from "../core/ipc.js";
 import type { DaemonSession } from "../app/client/session.js";
 import type { Platform, Profile } from "../core/types.js";
+import { asSessionId, type SessionId } from "../core/identifiers.js";
 import { listDevices, bootDevice } from "../core/device.js";
 import { getWorktrees } from "../core/project.js";
 import { CleanManager } from "../core/clean.js";
@@ -44,6 +45,19 @@ export interface McpFlags {
   allowDestructiveTools: boolean;
 }
 
+/**
+ * Phase M1 — one entry per attached daemon session. Each session carries
+ * the multiplexed `DaemonSession` (subscribe socket + per-adapter clients)
+ * alongside the profile it was booted with. `profile` powers per-session
+ * defaults in `rn-dev/build` (platform / variant / scheme / configuration /
+ * port) and lets `rn-dev/start-session` restart a stopped session without
+ * re-reading profiles from disk.
+ */
+export interface McpSessionRecord {
+  session: DaemonSession;
+  profile: Profile;
+}
+
 export interface McpContext {
   projectRoot: string;
   profileStore: ProfileStore;
@@ -51,28 +65,36 @@ export interface McpContext {
   metro: MetroManager | null;
   preflightEngine: PreflightEngine;
   /**
-   * Phase 13.6 PR-C — replaced raw `IpcClient` with the multiplexed
-   * DaemonSession. `session.client.send` rides the long-lived
-   * subscribe socket, preserving connectionId for bind-sender +
-   * host-call. `null` when MCP starts before a daemon exists or after
-   * the daemon connection drops.
+   * Phase M1 — replaces the single `session: DaemonSession | null`. Every
+   * attached daemon session keys into this map by its server-minted
+   * `SessionId`. Empty when MCP starts before a daemon exists or after
+   * every session has been torn down.
    *
-   * Bug 6 — `session.lifecycle` (the `SessionClient` adapter) is now
-   * the canonical source of recent `session/log` lines for the
-   * `rn-dev/session-logs` tool. No MCP-side ring needed; the adapter
-   * already maintains one (200 entries by default) so a poll-style
-   * tool just reads it on demand.
+   * Phase 13.6 PR-C — each entry's `.session.client.send` still rides the
+   * long-lived subscribe socket so `modules/bind-sender` and
+   * `modules/host-call` share the same `connectionId`.
    */
-  session: DaemonSession | null;
+  sessions: Map<SessionId, McpSessionRecord>;
+  /**
+   * Phase M1 — session resolved when an agent omits `sessionId` from a
+   * session-scoped tool call. Per DR-2: when exactly one session is
+   * attached, this is that session; when more than one is attached, the
+   * tool returns `E_SESSION_AMBIGUOUS` and the agent must pass an
+   * explicit id (discoverable via `rn-dev/list-sessions`).
+   */
+  defaultSessionId: SessionId | null;
   /** Optional — older call sites pre-date the flag system; default OFF. */
   flags?: McpFlags;
   /**
-   * Profile MCP booted the session with — surfaced to lifecycle tools
-   * (rn-dev/start-session) so they can re-issue session/start with the
-   * same profile rather than re-reading it from disk on every call.
-   * Null when MCP started without a profile (no session running).
+   * Phase M1 — profile MCP discovered at boot (the one that auto-started
+   * session #1). `rn-dev/start-session` falls back to this when no
+   * `profileName` is supplied AND there are zero attached sessions,
+   * mirroring the pre-M1 idempotent restart path. Null when MCP started
+   * without a default profile (headless mode).
+   *
+   * Per-session profiles live inside `sessions.get(sid).profile`.
    */
-  profile?: Profile | null;
+  bootProfile?: Profile | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +137,140 @@ function makeIpcMessage(action: string, payload?: unknown): IpcMessage {
     payload,
     id: `mcp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase M1 — session resolution helpers
+//
+// `resolveSession` is the entry point for every session-scoped tool. It
+// implements DR-2:
+//   - sessions.size === 0  → E_NO_SESSION
+//   - explicit sessionId, not in map → E_UNKNOWN_SESSION
+//   - sessions.size === 1, no sessionId in args → auto-resolve to that one
+//   - sessions.size > 1,  no sessionId in args → E_SESSION_AMBIGUOUS
+//
+// The returned `ToolResult` on error matches the shape used elsewhere
+// in this file (structuredContent + content array + isError), so handlers
+// can `return resolved.result` directly.
+//
+// `resolveAnySession` is the looser variant used by tools whose payload
+// is daemon-global (modules-config-*, modules-available, …). They need
+// any open daemon channel — the default if present, else any first
+// entry — but do NOT add `sessionId` to their input schema.
+// ---------------------------------------------------------------------------
+
+export const SESSION_ID_PROP: Readonly<Record<string, unknown>> = {
+  type: "string",
+  description:
+    "Session identifier. Optional when exactly one session is running (auto-resolves); required when multiple sessions are running (per DR-2). Discover ids via `rn-dev/list-sessions`.",
+};
+
+/**
+ * Inject `sessionId` into a session-scoped tool's input schema without
+ * mutating the caller's literal. Properties are ordered with sessionId
+ * first so the rendered schema lists it ahead of tool-specific args.
+ */
+export function withSessionIdProp(
+  base: Record<string, unknown>,
+): Record<string, unknown> {
+  const props = (base.properties as Record<string, unknown> | undefined) ?? {};
+  return {
+    ...base,
+    type: typeof base.type === "string" ? base.type : "object",
+    properties: { sessionId: SESSION_ID_PROP, ...props },
+  };
+}
+
+export type SessionResolved =
+  | { ok: true; record: McpSessionRecord; sessionId: SessionId }
+  | { ok: false; result: ToolResult };
+
+function sessionResolutionError(
+  code: string,
+  message: string,
+  extra?: Record<string, unknown>,
+): ToolResult {
+  const structuredContent: Record<string, unknown> = {
+    code,
+    message,
+    ...(extra ?? {}),
+  };
+  return {
+    isError: true,
+    structuredContent,
+    content: [
+      { type: "text" as const, text: `${code}: ${message}` },
+    ],
+  };
+}
+
+export function resolveSession(
+  ctx: McpContext,
+  args: Record<string, unknown>,
+): SessionResolved {
+  if (ctx.sessions.size === 0) {
+    return {
+      ok: false,
+      result: sessionResolutionError(
+        "E_NO_SESSION",
+        "No daemon session is attached. Call `rn-dev/start-session` to boot one.",
+      ),
+    };
+  }
+
+  const rawId =
+    typeof args["sessionId"] === "string" && args["sessionId"].length > 0
+      ? (args["sessionId"] as string)
+      : null;
+
+  if (rawId) {
+    const sid = asSessionId(rawId);
+    const record = ctx.sessions.get(sid);
+    if (!record) {
+      return {
+        ok: false,
+        result: sessionResolutionError(
+          "E_UNKNOWN_SESSION",
+          `No session with id "${rawId}". Available: ${[...ctx.sessions.keys()].join(", ")}`,
+          { availableSessions: [...ctx.sessions.keys()] },
+        ),
+      };
+    }
+    return { ok: true, record, sessionId: sid };
+  }
+
+  if (ctx.sessions.size === 1) {
+    const [sessionId, record] = ctx.sessions.entries().next().value as [
+      SessionId,
+      McpSessionRecord,
+    ];
+    return { ok: true, record, sessionId };
+  }
+
+  return {
+    ok: false,
+    result: sessionResolutionError(
+      "E_SESSION_AMBIGUOUS",
+      `Multiple sessions running (${ctx.sessions.size}); pass an explicit \`sessionId\`.`,
+      { availableSessions: [...ctx.sessions.keys()] },
+    ),
+  };
+}
+
+/**
+ * Loose variant for daemon-global tools (modules-config-*, modules-list,
+ * modules-available, …). These don't take a `sessionId` arg — they need
+ * any open daemon channel to send their IPC through. Returns the
+ * default session if set, otherwise an arbitrary attached session,
+ * otherwise null (caller falls back to `noSessionError`).
+ */
+export function resolveAnySession(ctx: McpContext): McpSessionRecord | null {
+  if (ctx.defaultSessionId) {
+    const r = ctx.sessions.get(ctx.defaultSessionId);
+    if (r) return r;
+  }
+  const first = ctx.sessions.values().next();
+  return first.done ? null : first.value;
 }
 
 // ---------------------------------------------------------------------------
@@ -212,45 +368,74 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     {
       name: "rn-dev/start-session",
       description:
-        "Ensure a development session is running. The session is automatically started when MCP boots; this tool is idempotent — it returns the current session/status when running, or re-issues session/start with MCP's loaded profile when stopped (e.g. after a prior stop-session).",
-      inputSchema: {
+        "Ensure a development session is running. The session is automatically started when MCP boots; this tool is idempotent — it returns the current session/status of the resolved session when running, or re-issues session/start with MCP's boot profile when stopped (e.g. after a prior stop-session). Pass `sessionId` to target a specific attached session; omit for auto-resolve when exactly one session is running. Phase M3 will extend this with a `profileName` arg for cold-start.",
+      inputSchema: withSessionIdProp({
         type: "object",
         properties: {},
-      },
-      handler: async () => {
-        if (!ctx.session) return { error: "No daemon connection. MCP must be started inside a project with a default profile." };
+      }),
+      handler: async (args) => {
+        // M1 — when at least one session is attached, behave as the
+        // idempotent restart path against the resolved session. When
+        // none are attached (cold-start path), fall through to the
+        // bootProfile-based daemon connection — M3 will introduce a
+        // `profileName` arg so an agent can pick which profile to
+        // boot from a multi-profile project.
+        if (ctx.sessions.size > 0) {
+          const resolved = resolveSession(ctx, args);
+          if (!resolved.ok) return resolved.result;
+          const { record } = resolved;
 
-        const statusResp = await ctx.session.client.send(
-          makeIpcMessage("session/status"),
-        );
-        const status = (statusResp.payload as { status?: string } | undefined)?.status;
-        if (status && status !== "stopped") {
-          return statusResp.payload ?? { status };
+          const statusResp = await record.session.client.send(
+            makeIpcMessage("session/status", {
+              sessionId: resolved.sessionId,
+            }),
+          );
+          const status = (statusResp.payload as { status?: string } | undefined)?.status;
+          if (status && status !== "stopped") {
+            return statusResp.payload ?? { status, sessionId: resolved.sessionId };
+          }
+
+          // Stopped — restart with the profile this session was booted with.
+          const startResp = await record.session.client.send(
+            makeIpcMessage("session/start", { profile: record.profile }),
+          );
+          return startResp.payload ?? { status: "started" };
         }
 
-        // Stopped — try to boot via session/start with the profile MCP
-        // was launched with. If MCP has no profile we can't restart,
-        // so surface the actual cause rather than masking it.
-        if (!ctx.profile) {
+        // Cold-start path — no sessions attached. Phase M1 keeps the
+        // bootProfile fallback so existing single-session bootstrap
+        // still works after a prior `rn-dev/stop-session`. M3 will
+        // replace this with the `profileName` flow.
+        if (!ctx.bootProfile) {
           return {
             error:
-              "Session is stopped and MCP has no profile to restart with. Recreate the MCP server inside a project that has a default profile.",
+              "No daemon session is attached and MCP has no boot profile to restart with. Recreate the MCP server inside a project that has a default profile.",
           };
         }
-        const startResp = await ctx.session.client.send(
-          makeIpcMessage("session/start", { profile: ctx.profile }),
+        const anySession = resolveAnySession(ctx);
+        if (!anySession) {
+          // Truly no daemon at all (boot raced or never connected).
+          return {
+            error:
+              "No daemon connection. Recreate the MCP server inside a project with a running daemon (or a default profile that will auto-start one).",
+          };
+        }
+        const startResp = await anySession.session.client.send(
+          makeIpcMessage("session/start", { profile: ctx.bootProfile }),
         );
         return startResp.payload ?? { status: "started" };
       },
     },
     {
       name: "rn-dev/stop-session",
-      description: "Stop the running development session via session/stop. Tears down Metro, the module host, and any active services.",
-      inputSchema: { type: "object", properties: {} },
-      handler: async () => {
-        if (!ctx.session) return { error: "No daemon connection." };
-        const resp = await ctx.session.client.send(
-          makeIpcMessage("session/stop"),
+      description:
+        "Stop a development session via session/stop. Tears down Metro, the module host, and any active services for the resolved session. Pass `sessionId` to target a specific session; required when more than one session is attached.",
+      inputSchema: withSessionIdProp({ type: "object", properties: {} }),
+      handler: async (args) => {
+        const resolved = resolveSession(ctx, args);
+        if (!resolved.ok) return resolved.result;
+        const resp = await resolved.record.session.client.send(
+          makeIpcMessage("session/stop", { sessionId: resolved.sessionId }),
         );
         return resp.payload ?? { status: "stopped" };
       },
@@ -258,12 +443,15 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     {
       name: "rn-dev/list-sessions",
       description:
-        "Return the active session as a single-element array, or an empty array if no session is running. Wraps session/status for parity with multi-session-aware clients.",
+        "Return the active session as a single-element array, or an empty array if no session is running. Wraps session/status for parity with multi-session-aware clients. Phase M2 will upgrade this to query the daemon's `sessions/list` RPC and return every attached session.",
       inputSchema: { type: "object", properties: {} },
       handler: async () => {
-        if (!ctx.session) return { sessions: [] };
-        const resp = await ctx.session.client.send(
-          makeIpcMessage("session/status"),
+        const anySession = resolveAnySession(ctx);
+        if (!anySession) return { sessions: [] };
+        const resp = await anySession.session.client.send(
+          makeIpcMessage("session/status", {
+            sessionId: anySession.session.sessionId,
+          }),
         );
         const payload = resp.payload as
           | { status?: string }
@@ -277,8 +465,8 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     {
       name: "rn-dev/session-logs",
       description:
-        "Return recent daemon-emitted session log lines. Surfaces boot progress (preflight, install, watchman setup, port-kill, simulator boot) and other session-level state changes that the daemon emits while a session is running. Useful immediately after `rn-dev/start-session` to observe what the daemon is doing.",
-      inputSchema: {
+        "Return recent daemon-emitted session log lines for the resolved session. Surfaces boot progress (preflight, install, watchman setup, port-kill, simulator boot) and other session-level state changes. Useful immediately after `rn-dev/start-session` to observe what the daemon is doing. Pass `sessionId` to target a specific session.",
+      inputSchema: withSessionIdProp({
         type: "object",
         properties: {
           limit: {
@@ -287,13 +475,15 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
               "Maximum number of most-recent lines to return. Default: 50. Max: 200 (the SessionClient ring size).",
           },
         },
-      },
+      }),
       handler: async (args) => {
+        const resolved = resolveSession(ctx, args);
+        if (!resolved.ok) return resolved.result;
         const limit =
           typeof args.limit === "number" && args.limit > 0
             ? Math.min(args.limit, 200)
             : 50;
-        const all = ctx.session?.lifecycle.recentLogs() ?? [];
+        const all = resolved.record.session.lifecycle.recentLogs();
         const lines = all.slice(-limit);
         return { structuredContent: { lines } };
       },
@@ -301,101 +491,54 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     // Metro control
     {
       name: "rn-dev/reload",
-      description: "Reload the running app",
-      inputSchema: { type: "object", properties: {} },
-      handler: async () => {
-        if (ctx.session) {
-          try {
-            const resp = await ctx.session.client.send(
-              makeIpcMessage("reload")
-            );
-            return resp.payload ?? { status: "reloaded" };
-          } catch {
-            // fall through
-          }
-        }
-        // Try direct approach: adb for Android
-        try {
-          execSync("adb shell input keyevent 82", {
-            stdio: ["pipe", "pipe", "pipe"],
-          });
-          return { status: "reloaded", method: "adb" };
-        } catch {
-          // fall through
-        }
-        // Try HTTP to Metro
-        if (ctx.metro) {
-          const instances = ctx.metro.getAll();
-          if (instances.length > 0) {
-            try {
-              execSync(
-                `curl -s http://localhost:${instances[0].port}/reload`,
-                { stdio: ["pipe", "pipe", "pipe"] }
-              );
-              return { status: "reloaded", method: "metro-http" };
-            } catch {
-              // fall through
-            }
-          }
-        }
-        return { error: "No running session" };
+      description:
+        "Reload the running app for the resolved session. Pass `sessionId` to target a specific session.",
+      inputSchema: withSessionIdProp({ type: "object", properties: {} }),
+      handler: async (args) => {
+        // Phase M1 — only the daemon-routed path remains session-aware.
+        // The legacy adb / metro-HTTP fallbacks were untargeted (they
+        // would reload whichever app the device was showing, ignoring
+        // sessionId entirely); keeping them under multi-session would
+        // silently reload the wrong app, so the multi-session contract
+        // makes the daemon RPC the single source of truth.
+        const resolved = resolveSession(ctx, args);
+        if (!resolved.ok) return resolved.result;
+        const resp = await resolved.record.session.client.send(
+          makeIpcMessage("reload"),
+        );
+        return resp.payload ?? { status: "reloaded" };
       },
     },
     {
       name: "rn-dev/dev-menu",
-      description: "Open device developer menu",
-      inputSchema: { type: "object", properties: {} },
-      handler: async () => {
-        if (ctx.session) {
-          try {
-            const resp = await ctx.session.client.send(
-              makeIpcMessage("dev-menu")
-            );
-            return resp.payload ?? { status: "opened" };
-          } catch {
-            // fall through
-          }
-        }
-        // Try direct adb command
-        try {
-          execSync("adb shell input keyevent 82", {
-            stdio: ["pipe", "pipe", "pipe"],
-          });
-          return { status: "opened", method: "adb" };
-        } catch {
-          // fall through
-        }
-        return { error: "No running session" };
+      description:
+        "Open the device developer menu for the resolved session. Pass `sessionId` to target a specific session.",
+      inputSchema: withSessionIdProp({ type: "object", properties: {} }),
+      handler: async (args) => {
+        // Phase M1 — see rn-dev/reload for the same daemon-routed-only
+        // rationale. The pre-M1 fallback `adb shell input keyevent 82`
+        // is device-global; under multi-session it would open the dev
+        // menu on the wrong target.
+        const resolved = resolveSession(ctx, args);
+        if (!resolved.ok) return resolved.result;
+        const resp = await resolved.record.session.client.send(
+          makeIpcMessage("dev-menu"),
+        );
+        return resp.payload ?? { status: "opened" };
       },
     },
     {
       name: "rn-dev/metro-status",
-      description: "Get Metro bundler status",
-      inputSchema: { type: "object", properties: {} },
-      handler: async () => {
-        if (ctx.metro) {
-          const instances = ctx.metro.getAll();
-          if (instances.length > 0) {
-            return instances.map((inst) => ({
-              worktree: inst.worktree,
-              port: inst.port,
-              pid: inst.pid,
-              status: inst.status,
-              startedAt: inst.startedAt.toISOString(),
-            }));
-          }
-        }
-        if (ctx.session) {
-          try {
-            const resp = await ctx.session.client.send(
-              makeIpcMessage("metro-status")
-            );
-            return resp.payload ?? { status: "unknown" };
-          } catch {
-            // fall through
-          }
-        }
-        return { status: "not-running" };
+      description:
+        "Get Metro bundler status for the resolved session. Pass `sessionId` to target a specific session.",
+      inputSchema: withSessionIdProp({ type: "object", properties: {} }),
+      handler: async (args) => {
+        const resolved = resolveSession(ctx, args);
+        if (!resolved.ok) return resolved.result;
+        const resp = await resolved.record.session.client.send(
+          makeIpcMessage("metro-status"),
+        );
+        return resp.payload ?? { status: "unknown" };
       },
     },
     // Build & Clean
@@ -421,8 +564,8 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     {
       name: "rn-dev/build-status",
       description:
-        "Return recent builder events (line/progress/done) buffered since the daemon last booted. Pair with rn-dev/build to observe progress: kick off the build, then poll this tool every 1-2s and look for a `done` event whose `success` field tells you whether the build passed. Build progress also surfaces here as line events whose `stream` is 'stdout' (xcodebuild/gradle output) or 'stderr' (build warnings/errors).",
-      inputSchema: {
+        "Return recent builder events (line/progress/done) buffered for the resolved session since the daemon last booted. Pair with rn-dev/build to observe progress: kick off the build, then poll this tool every 1-2s and look for a `done` event whose `success` field tells you whether the build passed. Build progress also surfaces here as line events whose `stream` is 'stdout' (xcodebuild/gradle output) or 'stderr' (build warnings/errors). Pass `sessionId` to target a specific session.",
+      inputSchema: withSessionIdProp({
         type: "object",
         properties: {
           limit: {
@@ -431,13 +574,15 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
               "Maximum number of most-recent events to return. Default: 100. Max: 500 (matches the BuilderClient ring size).",
           },
         },
-      },
+      }),
       handler: async (args) => {
+        const resolved = resolveSession(ctx, args);
+        if (!resolved.ok) return resolved.result;
         const limit =
           typeof args.limit === "number" && args.limit > 0
             ? Math.min(args.limit, 500)
             : 100;
-        const all = ctx.session?.builder.recentEvents() ?? [];
+        const all = resolved.record.session.builder.recentEvents();
         const events = all.slice(-limit);
         return { structuredContent: { events } };
       },
@@ -445,38 +590,32 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     {
       name: "rn-dev/build",
       description:
-        "Trigger a build via the daemon's builder/build RPC. Returns immediately; observe progress + completion via rn-dev/session-logs (the daemon emits builder/line, builder/progress, and builder/done events as session/log lines). Defaults pull from MCP's loaded profile when `platform`, `variant`, etc. are omitted.",
-      inputSchema: {
+        "Trigger a build via the daemon's builder/build RPC for the resolved session. Returns immediately; observe progress + completion via rn-dev/build-status. Defaults pull from the session's profile when `platform`, `variant`, etc. are omitted. Pass `sessionId` to target a specific session.",
+      inputSchema: withSessionIdProp({
         type: "object",
         properties: {
           platform: { type: "string", enum: ["ios", "android"] },
           variant: { type: "string", enum: ["debug", "release"] },
-          deviceId: { type: "string", description: "iOS UDID or Android device id; defaults to the profile's selected device." },
-          scheme: { type: "string", description: "iOS scheme; falls back to the profile's value." },
+          deviceId: { type: "string", description: "iOS UDID or Android device id; defaults to the session profile's selected device." },
+          scheme: { type: "string", description: "iOS scheme; falls back to the session profile's value." },
           configuration: { type: "string", description: "iOS configuration (e.g. Debug/Release); falls back to variant default." },
         },
-      },
+      }),
       handler: async (args) => {
-        if (!ctx.session) {
-          return { error: "No daemon connection." };
-        }
-        if (!ctx.profile) {
-          return {
-            error:
-              "No profile available — rn-dev/build needs a default profile in .rn-dev/profiles to fall back on for projectRoot, port, etc.",
-          };
-        }
+        const resolved = resolveSession(ctx, args);
+        if (!resolved.ok) return resolved.result;
+        const profile = resolved.record.profile;
         // Platform fallback: caller args win; otherwise pick from the
-        // profile (which can be "both" — default to ios since the
-        // daemon's builder/build only accepts ios|android, not both).
+        // session's profile (which can be "both" — default to ios since
+        // the daemon's builder/build only accepts ios|android).
         const platform: "ios" | "android" =
           (args.platform as "ios" | "android" | undefined) ??
-          (ctx.profile.platform === "android" ? "android" : "ios");
-        const variant = (args.variant as "debug" | "release" | undefined) ?? ctx.profile.buildVariant ?? "debug";
-        const deviceId = (args.deviceId as string | undefined) ?? ctx.profile.devices?.[platform] ?? undefined;
-        const scheme = (args.scheme as string | undefined) ?? ctx.profile.scheme ?? undefined;
-        const configuration = (args.configuration as string | undefined) ?? ctx.profile.configuration ?? undefined;
-        const port = ctx.profile.metroPort;
+          (profile.platform === "android" ? "android" : "ios");
+        const variant = (args.variant as "debug" | "release" | undefined) ?? profile.buildVariant ?? "debug";
+        const deviceId = (args.deviceId as string | undefined) ?? profile.devices?.[platform] ?? undefined;
+        const scheme = (args.scheme as string | undefined) ?? profile.scheme ?? undefined;
+        const configuration = (args.configuration as string | undefined) ?? profile.configuration ?? undefined;
+        const port = profile.metroPort;
 
         const payload: Record<string, unknown> = {
           projectRoot: ctx.projectRoot,
@@ -488,7 +627,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         if (scheme) payload.scheme = scheme;
         if (configuration) payload.configuration = configuration;
 
-        const resp = await ctx.session.client.send(
+        const resp = await resolved.record.session.client.send(
           makeIpcMessage("builder/build", payload),
         );
         return resp.payload ?? { ok: true };
@@ -805,8 +944,12 @@ function ipcAction(
   action: string,
   payload?: unknown
 ): Promise<IpcMessage | null> {
-  if (!ctx.session) return Promise.resolve(null);
-  return ctx.session.client
+  // Phase M1 — `modules/*` + `marketplace/*` are daemon-global; any
+  // attached session's subscribe socket works. resolveAnySession picks
+  // the default session if set, otherwise an arbitrary first entry.
+  const anySession = resolveAnySession(ctx);
+  if (!anySession) return Promise.resolve(null);
+  return anySession.session.client
     .send({
       type: "command",
       action,

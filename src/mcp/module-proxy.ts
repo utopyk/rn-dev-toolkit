@@ -1,5 +1,15 @@
 import type { IpcMessage } from "../core/ipc.js";
-import type { McpContext, McpFlags, ToolDefinition, ToolResult } from "./tools.js";
+import type {
+  McpContext,
+  McpFlags,
+  ToolDefinition,
+  ToolResult,
+} from "./tools.js";
+import {
+  resolveAnySession,
+  resolveSession,
+  withSessionIdProp,
+} from "./tools.js";
 import type { RegisteredModuleRow } from "../app/modules-ipc.js";
 import { splitNamespacedToolName } from "./tool-namespacer.js";
 
@@ -28,11 +38,18 @@ export async function discoverModuleContributedTools(
   ctx: McpContext,
   flags: McpFlags,
 ): Promise<ToolDefinition[]> {
-  if (!ctx.session) return [];
+  // Phase M1 — module discovery uses whichever session is the default
+  // (or any attached session as fallback). Each session sees the same
+  // set of installed modules at the host level, so picking one and
+  // querying its `modules/list` covers the multi-session case.
+  const discoverySession = resolveAnySession(ctx);
+  if (!discoverySession) return [];
 
   let rows: RegisteredModuleRow[];
   try {
-    const resp = await ctx.session.client.send(makeIpcMessage("modules/list", {}));
+    const resp = await discoverySession.session.client.send(
+      makeIpcMessage("modules/list", {}),
+    );
     rows = extractRows(resp.payload);
   } catch {
     return [];
@@ -75,7 +92,7 @@ function buildProxyToolDefinition(
   return {
     name: tool.name,
     description,
-    inputSchema: tool.inputSchema,
+    inputSchema: withSessionIdProp(tool.inputSchema),
     handler: async (args) => {
       const permissionsAccepted = extractPermissionsAccepted(args);
 
@@ -85,11 +102,15 @@ function buildProxyToolDefinition(
         }
       }
 
-      if (!ctx.session) {
-        return moduleUnavailableError(row.id, "no daemon running");
-      }
+      // Phase M1 — module-proxied tools are session-scoped. Resolve the
+      // target session before sending modules/call: the daemon's
+      // dispatcher routes the call to whichever session's
+      // ModuleHostManager owns the tool's subprocess, so the choice of
+      // socket here matters.
+      const resolved = resolveSession(ctx, args);
+      if (!resolved.ok) return resolved.result;
 
-      const resp = await ctx.session.client.send(
+      const resp = await resolved.record.session.client.send(
         makeIpcMessage("modules/call", {
           moduleId: row.id,
           scopeUnit: row.scopeUnit,
@@ -173,23 +194,6 @@ function destructiveError(toolName: string): ToolResult {
       {
         type: "text" as const,
         text: `Tool "${toolName}" is marked destructiveHint: true. Re-call with { permissionsAccepted: ["${toolName}"] } or start the MCP server with --allow-destructive-tools.`,
-      },
-    ],
-  };
-}
-
-function moduleUnavailableError(moduleId: string, why: string): ToolResult {
-  return {
-    isError: true,
-    structuredContent: {
-      code: "MODULE_UNAVAILABLE",
-      moduleId,
-      reason: why,
-    },
-    content: [
-      {
-        type: "text" as const,
-        text: `Module "${moduleId}" is unavailable: ${why}.`,
       },
     ],
   };

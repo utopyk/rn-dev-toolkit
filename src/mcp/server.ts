@@ -6,12 +6,19 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createToolDefinitions } from "./tools.js";
-import type { McpContext, McpFlags, ToolDefinition, ToolResult } from "./tools.js";
+import type {
+  McpContext,
+  McpFlags,
+  McpSessionRecord,
+  ToolDefinition,
+  ToolResult,
+} from "./tools.js";
 import { discoverModuleContributedTools } from "./module-proxy.js";
 import { ProfileStore } from "../core/profile.js";
 import { ArtifactStore } from "../core/artifact.js";
 import { createDefaultPreflightEngine } from "../core/preflight.js";
-import { connectToDaemonSession, type DaemonSession } from "../app/client/session.js";
+import { connectToDaemonSession } from "../app/client/session.js";
+import { type SessionId } from "../core/identifiers.js";
 import { detectProjectRoot } from "../core/project.js";
 
 /**
@@ -115,10 +122,16 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
   const profiles = profileStore.list();
   const profile = profiles.find((p) => p.isDefault) ?? profiles[0] ?? null;
 
-  let session: DaemonSession | null = null;
+  // Phase M1 — multi-session shell. The boot path attaches at most one
+  // session today (the profile MCP discovered at startup); M3 will let
+  // an agent open additional sessions via `rn-dev/start-session
+  // { profileName }`. Each entry's `.session.sessionId` carries the
+  // server-minted SessionId that keys this map.
+  const sessions = new Map<SessionId, McpSessionRecord>();
+  let defaultSessionId: SessionId | null = null;
   if (profile) {
     try {
-      session = await connectToDaemonSession(projectRoot, profile, {
+      const session = await connectToDaemonSession(projectRoot, profile, {
         // Bug 6 — explicit allowlist (not `session/*` glob) so a
         // future `session/error` event with a sensitive payload
         // doesn't auto-leak into MCP's process address space.
@@ -134,10 +147,11 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
         // allowlist expansion is bounded.
         kinds: ["modules/*", "session/log", "session/status", "builder/*"],
       });
+      sessions.set(session.sessionId, { session, profile });
+      defaultSessionId = session.sessionId;
     } catch {
       // Daemon unreachable at startup — degrade to built-ins-only mode
       // (mirrors the old IpcClient-null fallback).
-      session = null;
     }
   }
 
@@ -147,9 +161,10 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
     artifactStore: new ArtifactStore(path.join(rnDevDir, "artifacts")),
     metro: null, // MCP server runs standalone, no metro manager
     preflightEngine: createDefaultPreflightEngine(projectRoot),
-    session,
+    sessions,
+    defaultSessionId,
     flags,
-    profile,
+    bootProfile: profile,
   };
 
   const builtInTools = createToolDefinitions(ctx);
@@ -200,26 +215,33 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  // Phase 13.6 PR-C: subscribe to the daemon's module-event stream via the
-  // session's ModuleHostClient (which receives modules/* events from the
-  // events/subscribe channel opened by connectToDaemonSession). When modules
-  // change state we refresh the tool snapshot and notify connected clients.
-  // Silent best-effort: if no session is running we stay on the startup
-  // snapshot. Callers can always re-handshake.
-  if (ctx.session) {
-    ctx.session.modules.on("modules-event", async () => {
-      try {
-        const next = await discoverModuleContributedTools(ctx, flags);
-        moduleTools = next;
-      } catch {
-        // If the refetch fails (daemon flaky), keep the old snapshot and
-        // still notify — a re-handshake by the agent will retry.
-      }
-      try {
-        await server.sendToolListChanged();
-      } catch {
-        // Transport may be closed (client already disconnected).
-      }
+  // Phase 13.6 PR-C: subscribe to the daemon's module-event stream via
+  // each session's ModuleHostClient (which receives modules/* events
+  // from the events/subscribe channel opened by connectToDaemonSession).
+  // When modules change state we refresh the tool snapshot and notify
+  // connected clients. Silent best-effort: if no session is running we
+  // stay on the startup snapshot. Callers can always re-handshake.
+  //
+  // Phase M1 — wire every attached session, not just a singleton. M3
+  // will call back into this same loop (factored to `wireSessionEvents`
+  // when needed) to attach the listener to newly-created sessions.
+  const refreshModuleTools = async (): Promise<void> => {
+    try {
+      const next = await discoverModuleContributedTools(ctx, flags);
+      moduleTools = next;
+    } catch {
+      // If the refetch fails (daemon flaky), keep the old snapshot and
+      // still notify — a re-handshake by the agent will retry.
+    }
+    try {
+      await server.sendToolListChanged();
+    } catch {
+      // Transport may be closed (client already disconnected).
+    }
+  };
+  for (const record of ctx.sessions.values()) {
+    record.session.modules.on("modules-event", () => {
+      void refreshModuleTools();
     });
   }
 }

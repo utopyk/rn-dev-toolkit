@@ -1,8 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { discoverModuleContributedTools } from "../module-proxy.js";
-import type { McpContext, McpFlags, ToolResult } from "../tools.js";
+import type {
+  McpContext,
+  McpFlags,
+  McpSessionRecord,
+  ToolResult,
+} from "../tools.js";
 import type { IpcMessage } from "../../core/ipc.js";
 import type { DaemonSession } from "../../app/client/session.js";
+import { asSessionId, type SessionId } from "../../core/identifiers.js";
+import type { Profile } from "../../core/types.js";
 
 // ---------------------------------------------------------------------------
 // Fake session client — controllable per-test
@@ -44,6 +51,7 @@ function makeSession(options: {
     modules: {} as DaemonSession["modules"],
     lifecycle: {} as DaemonSession["lifecycle"],
     worktreeKey: "root",
+    sessionId: asSessionId("mock-session-id"),
     disconnect: vi.fn(),
     release: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
@@ -54,16 +62,44 @@ function makeSession(options: {
 // Fixtures
 // ---------------------------------------------------------------------------
 
+function makeFakeProfile(): Profile {
+  return {
+    name: "fake",
+    isDefault: false,
+    worktree: null,
+    branch: "main",
+    platform: "ios",
+    mode: "dirty",
+    metroPort: 8081,
+    devices: {},
+    buildVariant: "debug",
+    preflight: { checks: [], frequency: "once" },
+    onSave: [],
+    env: {},
+    projectRoot: "/tmp/fake",
+  } as Profile;
+}
+
 function makeCtx(
   session: DaemonSession | null,
 ): McpContext {
+  const sessions = new Map<SessionId, McpSessionRecord>();
+  let defaultSessionId: SessionId | null = null;
+  if (session) {
+    const sid =
+      (session as { sessionId?: SessionId }).sessionId ??
+      asSessionId("mock-session-id");
+    sessions.set(sid, { session, profile: makeFakeProfile() });
+    defaultSessionId = sid;
+  }
   return {
     projectRoot: "/tmp/fake",
     profileStore: {} as McpContext["profileStore"],
     artifactStore: {} as McpContext["artifactStore"],
     metro: null,
     preflightEngine: {} as McpContext["preflightEngine"],
-    session,
+    sessions,
+    defaultSessionId,
   };
 }
 

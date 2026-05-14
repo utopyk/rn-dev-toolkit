@@ -1,14 +1,64 @@
 import { describe, it, expect, vi } from "vitest";
 import { createToolDefinitions } from "../tools.js";
-import type { McpContext, ToolResult } from "../tools.js";
+import type {
+  McpContext,
+  McpSessionRecord,
+  ToolResult,
+} from "../tools.js";
 import type { IpcMessage } from "../../core/ipc.js";
 import type { DaemonSession } from "../../app/client/session.js";
+import { asSessionId, type SessionId } from "../../core/identifiers.js";
+import type { Profile } from "../../core/types.js";
 
 // ---------------------------------------------------------------------------
 // Mock context factory
+//
+// Phase M1 — the helper accepts a convenience `session` override that
+// pre-dates the multi-session shell; it populates the `sessions` Map
+// with one entry keyed by the mock session's id so existing call sites
+// keep working unchanged. Tests that need multi-session shapes can
+// override `sessions` + `defaultSessionId` directly.
 // ---------------------------------------------------------------------------
 
-function makeMockContext(overrides: Partial<McpContext> = {}): McpContext {
+type MockContextOverrides = Partial<McpContext> & {
+  /** Convenience — translates to a single-entry `sessions` Map. */
+  session?: DaemonSession | null;
+  /** Convenience — the profile attached to the synthetic session. */
+  profile?: Profile;
+};
+
+function makeMockProfile(): Profile {
+  return {
+    name: "mock",
+    isDefault: false,
+    worktree: null,
+    branch: "main",
+    platform: "ios",
+    mode: "dirty",
+    metroPort: 8081,
+    devices: {},
+    buildVariant: "debug",
+    preflight: { checks: [], frequency: "once" },
+    onSave: [],
+    env: {},
+    projectRoot: "/tmp/mock-project",
+  } as Profile;
+}
+
+function makeMockContext(overrides: MockContextOverrides = {}): McpContext {
+  const sessions = new Map<SessionId, McpSessionRecord>();
+  let defaultSessionId: SessionId | null = null;
+  if (overrides.session) {
+    const sid =
+      (overrides.session as { sessionId?: SessionId }).sessionId ??
+      asSessionId("mock-session-id");
+    sessions.set(sid, {
+      session: overrides.session,
+      profile: overrides.profile ?? makeMockProfile(),
+    });
+    defaultSessionId = sid;
+  }
+  const { session: _ignored, profile: _ignored2, ...rest } = overrides;
   return {
     projectRoot: "/tmp/mock-project",
     profileStore: {
@@ -36,8 +86,9 @@ function makeMockContext(overrides: Partial<McpContext> = {}): McpContext {
       runAll: vi.fn(async () => new Map()),
       fix: vi.fn(async () => false),
     } as unknown as McpContext["preflightEngine"],
-    session: null,
-    ...overrides,
+    sessions,
+    defaultSessionId,
+    ...rest,
   };
 }
 
@@ -63,6 +114,7 @@ function makeMockSession(
     modules: {} as DaemonSession["modules"],
     lifecycle: {} as DaemonSession["lifecycle"],
     worktreeKey: "root",
+    sessionId: asSessionId("mock-session-id"),
     disconnect: vi.fn(),
     release: vi.fn(async () => {}),
     stop: vi.fn(async () => {}),
@@ -248,13 +300,18 @@ describe("createToolDefinitions()", () => {
     expect(ctx.preflightEngine.fix).toHaveBeenCalledWith("node-version");
   });
 
-  it("rn-dev/metro-status returns not-running when no metro or ipc", async () => {
+  it("rn-dev/metro-status returns E_NO_SESSION when no session is attached", async () => {
+    // Phase M1 — pre-M1 the tool silently returned `{ status: "not-running" }`
+    // by falling through to a no-op branch. The multi-session contract
+    // makes "no session attached" a first-class error so agents get a
+    // useful diagnostic instead of a misleading status string.
     const ctx = makeMockContext();
     const tools = createToolDefinitions(ctx);
     const tool = tools.find((t) => t.name === "rn-dev/metro-status")!;
 
-    const result = await tool.handler({});
-    expect(result).toEqual({ status: "not-running" });
+    const result = (await tool.handler({})) as ToolResult;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent).toMatchObject({ code: "E_NO_SESSION" });
   });
 
   // -------------------------------------------------------------------------

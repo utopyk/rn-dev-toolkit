@@ -3,6 +3,7 @@ import type { ArtifactStore } from '../../src/core/artifact.js';
 import type { FileWatcher } from '../../src/core/watcher.js';
 import type { RunMode } from '../../src/core/types.js';
 import type { DaemonSession } from '../../src/app/client/session.js';
+import type { SessionId } from '../../src/core/identifiers.js';
 
 export interface InstanceState {
   id: string;
@@ -31,6 +32,36 @@ export interface InstanceSummary {
   metroStatus: string;
 }
 
+/**
+ * Phase E1 — multi-session record. Each tab in the renderer corresponds
+ * to exactly one SessionRecord; the daemon owns N concurrent sessions
+ * each with its own Metro/DevTools/Builder/Watcher/ModuleHost subprocess
+ * tree. The renderer keeps its `instances` concept (one per session,
+ * 1:1) — `instanceId` here is the cross-reference that lets renderer
+ * IPCs that take an instanceId argument resolve back to a session.
+ *
+ * `disconnectLogged` was previously a single module-scope flag in
+ * services.ts (per § Deepening A7 in the multi-session plan); singleton-
+ * by-coincidence under one session. Per-record now so a second session's
+ * disconnect logs cleanly without being suppressed by the first.
+ */
+export interface SessionRecord {
+  sessionId: SessionId;
+  daemonSession: DaemonSession;
+  instanceId: string;
+  profileName: string | null;
+  attachedAt: number;
+  disconnectLogged: boolean;
+}
+
+/**
+ * Cap on concurrent sessions per Electron process. v1 supports 2 visible
+ * tabs (the user-facing iPhone+Android story); the data model + IPC
+ * handlers tolerate up to 4 (matches `feedback_parallel_instance_requirement`).
+ * `instances:create` surfaces `E_SESSION_LIMIT_REACHED` past this point.
+ */
+export const MAX_SESSIONS = 4;
+
 export const MAX_LOG_LINES = 1000;
 
 export const instances = new Map<string, InstanceState>();
@@ -41,17 +72,58 @@ export const state = {
   watcher: null as FileWatcher | null,
   projectRoot: null as string | null,
   artifactStore: null as ArtifactStore | null,
-  // The live daemon-client session for the active profile. Populated
-  // by the first attach (either `startRealServices` on boot or
-  // `instances:create` when the user runs the wizard from a no-default-
-  // profile state). Phase 13.5 — we also track the profile name the
-  // session is bound to so `instances:create` can detect a same-profile
-  // join (the new instance just shares the live session) vs a
-  // cross-profile attach attempt (the daemon's E_PROFILE_MISMATCH gate
-  // would reject; we surface that directly).
-  daemonSession: null as DaemonSession | null,
-  daemonSessionProfileName: null as string | null,
+  /**
+   * Phase E1 — per-session daemon sessions, keyed by SessionId. One entry
+   * per renderer tab. `attachSession` writes here on every successful
+   * `connectElectronToDaemon`; teardown (`instances:remove`, daemon
+   * disconnect) deletes the entry. The legacy single-session fields
+   * below are derived views over this Map for back-compat with code paths
+   * that haven't yet been multi-session-aware (main.ts shutdown, etc.).
+   */
+  sessions: new Map<SessionId, SessionRecord>(),
+  /**
+   * SessionId of the tab currently in focus. Distinct from `activeInstanceId`
+   * because the renderer addresses tabs by instanceId; this is the
+   * server-side reverse-lookup target for IPCs that haven't yet been
+   * threaded with an explicit sessionId. Mirrors `activeInstanceId` on
+   * every `instances:setActive` — `activeInstanceId === sessions.get(activeSessionId)?.instanceId`.
+   */
+  activeSessionId: null as SessionId | null,
 };
+
+/**
+ * Phase E1 — resolve the SessionRecord backing a renderer instance.
+ * Renderer IPCs pass `instanceId`; handlers route via this lookup.
+ * Returns `null` when the instance has no live daemon session (rare —
+ * surfaces during the daemon-disconnect → reconnect window).
+ */
+export function getSessionRecordForInstance(
+  instanceId: string,
+): SessionRecord | null {
+  for (const record of state.sessions.values()) {
+    if (record.instanceId === instanceId) return record;
+  }
+  return null;
+}
+
+/**
+ * Phase E1 — resolve the active SessionRecord. Used by handlers that
+ * don't yet take an `instanceId` argument; they fall back to "whichever
+ * tab the user is looking at." Single-session callers (TUI, smoke
+ * fixtures with one profile) get the only session.
+ */
+export function getActiveSessionRecord(): SessionRecord | null {
+  if (state.activeSessionId) {
+    const record = state.sessions.get(state.activeSessionId);
+    if (record) return record;
+  }
+  // Single-session back-compat: when nothing is explicitly active but
+  // exactly one session exists, treat it as active.
+  if (state.sessions.size === 1) {
+    return state.sessions.values().next().value ?? null;
+  }
+  return null;
+}
 
 export function send(channel: string, ...args: any[]) {
   if (state.mainWindow && !state.mainWindow.isDestroyed()) {

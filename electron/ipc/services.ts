@@ -38,7 +38,16 @@ import { serviceBus } from '../../src/app/service-bus.js';
 import { triggerBuildsIfNeeded } from '../../src/app/auto-build.js';
 import type { DaemonSession } from '../../src/app/client/session.js';
 import type { Profile } from '../../src/core/types.js';
-import { instances, state, send, appendLog, toSummary, findFreePort, type InstanceState } from './state.js';
+import {
+  instances,
+  state,
+  send,
+  appendLog,
+  toSummary,
+  findFreePort,
+  type InstanceState,
+  type SessionRecord,
+} from './state.js';
 
 /**
  * Settle the profile's package manager choice. When multiple lockfiles
@@ -220,11 +229,11 @@ async function settleCodeSigning(
   }
 }
 
-// Single-flight guard for the disconnect log. The daemon's five
-// adapters each fire their own `disconnected` event when the socket
-// drops; we want one user-visible log line, not five. Reset whenever
-// a fresh session attaches.
-let disconnectLoggedFor: DaemonSession | null = null;
+// Per-session single-flight is on SessionRecord.disconnectLogged
+// (electron/ipc/state.ts). Pre-Phase-E this was a module-scope variable
+// that was a singleton-by-coincidence — fine under one session,
+// suppresses the second session's disconnect log under N (§ Deepening
+// A7 in 2026-05-12-feat-multi-session-daemon-and-electron-plan.md).
 let electronQuittingFlag = false;
 
 /**
@@ -239,28 +248,45 @@ export function setElectronQuitting(flag: boolean): void {
 }
 
 /**
- * Connect to (or cold-spawn) the per-worktree daemon for `profile`,
- * publish every adapter on the serviceBus, wire the disconnect-listener
- * dance, and remember the session in `state.daemonSession`. Used by
- * `startRealServices` on boot AND by `instances:create` when the user
- * completes the setup wizard from a no-default-profile launch — the
- * latter previously surfaced the misleading "restart required"
- * message even though attaching a session post-mount is mechanically
- * straightforward.
+ * Phase E1 — connect to (or cold-spawn) the per-worktree daemon for
+ * `profile`, publish every adapter on the serviceBus, wire per-session
+ * disconnect listeners, and register a SessionRecord in `state.sessions`.
+ * Used by `startRealServices` on boot AND by `instances:create` when
+ * the user runs the setup wizard or asks for a new tab. Each call mints
+ * a fresh daemon session — cross-profile or same-profile, the daemon
+ * supports N concurrent sessions per worktree.
+ *
+ * Returns the SessionRecord so the caller can drive event wiring without
+ * re-deriving the sessionId. The legacy `attachDaemonSession` name is
+ * preserved (callers grep for it) but the body now multiplexes per session.
  */
 export async function attachDaemonSession(
   profile: Profile,
   projectRoot: string,
-): Promise<DaemonSession> {
+  instanceId: string,
+): Promise<SessionRecord> {
   const session = await connectElectronToDaemon({ projectRoot, profile });
-  state.daemonSession = session;
-  state.daemonSessionProfileName = profile.name ?? null;
-  // Reset the single-flight guard so the next disconnect actually logs.
-  disconnectLoggedFor = session;
+  const record: SessionRecord = {
+    sessionId: session.sessionId,
+    daemonSession: session,
+    instanceId,
+    profileName: profile.name ?? null,
+    attachedAt: Date.now(),
+    disconnectLogged: false,
+  };
+  state.sessions.set(session.sessionId, record);
+  // First session also becomes the active one — `instances:setActive`
+  // updates this when the user clicks a different tab.
+  if (!state.activeSessionId) {
+    state.activeSessionId = session.sessionId;
+  }
   const surfaceDisconnect = (surface: string, err?: Error): void => {
     if (electronQuittingFlag) return;
-    if (disconnectLoggedFor !== session) return;
-    disconnectLoggedFor = null;
+    // Per-session single-flight: log once per session across the five
+    // adapters, but a SECOND session's disconnect still logs cleanly.
+    const current = state.sessions.get(session.sessionId);
+    if (!current || current.disconnectLogged) return;
+    current.disconnectLogged = true;
     const message = err instanceof Error ? err.message : 'unknown';
     if (state.mainWindow && !state.mainWindow.isDestroyed()) {
       state.mainWindow.webContents.send(
@@ -268,16 +294,27 @@ export async function attachDaemonSession(
         `⚠ Daemon disconnected (${surface}): ${message}`,
       );
     }
-    serviceBus.clearModulesClient();
-    state.daemonSession = null;
-    state.daemonSessionProfileName = null;
+    // Phase E1 — only clear the modules client when the LAST session
+    // disconnects; per-session clients are tracked by sessionId on the
+    // serviceBus consumer side. Pre-multi-session, a single disconnect
+    // emptied the cache for everyone; under N, the surviving sessions
+    // keep their clients live.
+    state.sessions.delete(session.sessionId);
+    if (state.activeSessionId === session.sessionId) {
+      // Promote any surviving session; null when this was the last.
+      const next = state.sessions.keys().next().value ?? null;
+      state.activeSessionId = next;
+    }
+    if (state.sessions.size === 0) {
+      serviceBus.clearModulesClient();
+    }
   };
   session.metro.on('disconnected', (err) => surfaceDisconnect('metro', err));
   session.devtools.on('disconnected', (err) => surfaceDisconnect('devtools', err));
   session.builder.on('disconnected', (err) => surfaceDisconnect('builder', err));
   session.watcher.on('disconnected', (err) => surfaceDisconnect('watcher', err));
   session.modules.on('disconnected', (err) => surfaceDisconnect('modules', err));
-  return session;
+  return record;
 }
 
 /**
@@ -411,7 +448,8 @@ export async function startRealServices(
   // starts its session, and publishes every adapter on the serviceBus.
   // The modules ipcMain handlers hanging off `serviceBus.modulesClient`
   // become live as soon as this resolves.
-  const session = await attachDaemonSession(defaultProfile, targetProjectRoot);
+  const record = await attachDaemonSession(defaultProfile, targetProjectRoot, instance.id);
+  const session = record.daemonSession;
 
   wireInstanceEvents(instance, session);
 

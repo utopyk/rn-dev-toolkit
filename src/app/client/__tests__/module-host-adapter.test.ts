@@ -463,3 +463,146 @@ describe("ModuleHostClient — RPC methods", () => {
     );
   });
 });
+
+// Phase E (renderer multi-session, follow-on to Phase M `48fde5b`).
+// When the daemon hosts N concurrent sessions, every `modules/*` RPC
+// MUST carry payload.sessionId so the daemon's per-session listener
+// filter (src/app/modules-ipc.ts: registerModulesIpc) routes to the
+// correct ModuleHostManager. Pre-fix the renderer's second tab would
+// have hit the same dual-listener race the MCP path just exited.
+describe("ModuleHostClient — sessionId wire-contract parity (Phase E)", () => {
+  it("call(): payload includes sessionId when getSessionId returns one", async () => {
+    const { client, send } = makeStubClient();
+    send.mockResolvedValueOnce({
+      type: "response",
+      action: "modules/call",
+      id: "id-100",
+      payload: { kind: "ok", result: { pong: true } },
+    });
+    const host = new ModuleHostClient(
+      client,
+      client,
+      () => "id-100",
+      () => "sess-A" as never,
+    );
+    await host.call({ moduleId: "m", tool: "ping", args: { x: 1 } });
+    expect(send).toHaveBeenCalledWith({
+      type: "command",
+      action: "modules/call",
+      id: "id-100",
+      payload: { moduleId: "m", tool: "ping", args: { x: 1 }, sessionId: "sess-A" },
+    });
+  });
+
+  it("hostCall(): payload includes sessionId when getSessionId returns one", async () => {
+    const { client, send } = makeStubClient();
+    send.mockResolvedValueOnce({
+      type: "response",
+      action: "modules/host-call",
+      id: "id-101",
+      payload: { kind: "ok", result: "echoed" },
+    });
+    const host = new ModuleHostClient(
+      client,
+      client,
+      () => "id-101",
+      () => "sess-B" as never,
+    );
+    await host.hostCall({
+      moduleId: "m",
+      capabilityId: "log",
+      method: "info",
+      args: ["hello"],
+    });
+    expect(send).toHaveBeenCalledWith({
+      type: "command",
+      action: "modules/host-call",
+      id: "id-101",
+      payload: {
+        moduleId: "m",
+        capabilityId: "log",
+        method: "info",
+        args: ["hello"],
+        sessionId: "sess-B",
+      },
+    });
+  });
+
+  it("bindSender(): payload includes sessionId when getSessionId returns one", async () => {
+    const { client, send } = makeStubClient();
+    send.mockResolvedValueOnce({
+      type: "response",
+      action: "modules/bind-sender",
+      id: "id-102",
+      payload: { kind: "ok" },
+    });
+    const host = new ModuleHostClient(
+      client,
+      client,
+      () => "id-102",
+      () => "sess-C" as never,
+    );
+    await host.bindSender("m");
+    expect(send).toHaveBeenCalledWith({
+      type: "command",
+      action: "modules/bind-sender",
+      id: "id-102",
+      payload: { moduleId: "m", sessionId: "sess-C" },
+    });
+  });
+
+  it("call(): payload omits sessionId when getSessionId returns null (pre-ack window)", async () => {
+    // Pre-events/subscribe-ack the adapter has been constructed but
+    // `sessionId` in session.ts is still null. Adapter must fall through
+    // gracefully — no RPC should fire during this window in practice,
+    // but the back-compat path matters for unit-test ergonomics + the
+    // daemon's single-session legacy fallback still being supported.
+    const { client, send } = makeStubClient();
+    send.mockResolvedValueOnce({
+      type: "response",
+      action: "modules/call",
+      id: "id-103",
+      payload: { kind: "ok", result: {} },
+    });
+    const host = new ModuleHostClient(
+      client,
+      client,
+      () => "id-103",
+      () => null,
+    );
+    await host.call({ moduleId: "m", tool: "ping", args: {} });
+    expect(send).toHaveBeenCalledWith({
+      type: "command",
+      action: "modules/call",
+      id: "id-103",
+      payload: { moduleId: "m", tool: "ping", args: {} },
+    });
+  });
+
+  it("non-session-scoped RPCs (list, listPanels, configGet, install) do NOT include sessionId", async () => {
+    // The daemon routes these by global state (registry, install
+    // directory, marketplace JSON), not by session. Adding a sessionId
+    // would be confusing surface area for the dispatcher. Asserted here
+    // so a future overzealous "thread sessionId everywhere" refactor
+    // doesn't regress this.
+    const { client, send } = makeStubClient();
+    send.mockResolvedValue({
+      type: "response",
+      action: "modules/list",
+      id: "id-x",
+      payload: { modules: [] },
+    });
+    const host = new ModuleHostClient(
+      client,
+      client,
+      () => "id-x",
+      () => "sess-Z" as never,
+    );
+    await host.list();
+    expect(send).toHaveBeenLastCalledWith({
+      type: "command",
+      action: "modules/list",
+      id: "id-x",
+    });
+  });
+});

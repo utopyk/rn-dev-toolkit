@@ -18,9 +18,10 @@ let mainWindow: BrowserWindow | null = null;
 // gone — the in-process duplicate it guarded against (services.ts
 // double-Metro) went away with the services.ts collapse.
 //
-// The active session lives at `state.daemonSession` (electron/ipc/state.ts);
-// `attachDaemonSession` populates it. Main reads it on window-quit
-// to drive `disconnect()`.
+// Phase E1 — active sessions live in `state.sessions` (Map keyed by
+// SessionId in electron/ipc/state.ts). `attachDaemonSession` registers
+// one record per connect. Main iterates the Map on window-quit to
+// `disconnect()` all of them.
 
 /** Wait for Vite dev server to be ready, trying ports 5173-5180, with retries */
 async function waitForVite(maxRetries = 30): Promise<number> {
@@ -149,21 +150,20 @@ app.on('window-all-closed', () => {
   // disconnected" warning at a window that's about to tear down.
   setElectronQuitting(true);
 
-  // Phase 13.5 — close the subscribe socket; the daemon's socket-close
-  // auto-release decrements its session refcount and tears the session
-  // down if Electron was the last attacher. Any other clients (CLI,
-  // MCP) attached to the same daemon stay running. `stop()` here would
-  // be wrong: it's the kill-for-everyone path regardless of refcount.
-  if (state.daemonSession) {
-    const session = state.daemonSession;
-    state.daemonSession = null;
-    state.daemonSessionProfileName = null;
+  // Phase E1 — close every session's subscribe socket. The daemon's
+  // per-socket auto-release decrements each session's refcount and
+  // tears it down if Electron was the last attacher. Any other clients
+  // (CLI, MCP) attached to the same daemon stay running. `stop()` here
+  // would be wrong: it's the kill-for-everyone path regardless of refcount.
+  for (const record of state.sessions.values()) {
     try {
-      session.disconnect();
+      record.daemonSession.disconnect();
     } catch {
       /* best-effort on shutdown */
     }
   }
+  state.sessions.clear();
+  state.activeSessionId = null;
   app.quit();
 });
 

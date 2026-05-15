@@ -27,6 +27,7 @@
 
 import { EventEmitter } from "node:events";
 import type { IpcClient } from "../../core/ipc.js";
+import type { SessionId } from "../../core/identifiers.js";
 import type { AdapterSink, ModuleHostEventKind } from "./adapter-sink.js";
 import type { IpcSender } from "./session.js";
 import type {
@@ -94,13 +95,32 @@ export class ModuleHostClient
    *                   Electron's Marketplace + Settings panels. This
    *                   subscription is a distinct long-lived channel and
    *                   intentionally does NOT share the session socket.
+   *
+   * Phase E (wire-contract parity follow-on to Phase M `48fde5b`):
+   *   - `getSessionId` : returns the SessionId once the daemon has
+   *                       minted it (after events/subscribe ack), or
+   *                       `null` during the brief window between
+   *                       construction and ack. Threaded into the
+   *                       payload of every per-session RPC (`modules/call`,
+   *                       `modules/host-call`, `modules/bind-sender`) so
+   *                       the daemon's per-session listener filter routes
+   *                       to the correct ModuleHostManager. Without this,
+   *                       a renderer with two open tabs hits the same
+   *                       dual-listener race the MCP path exited.
    */
   constructor(
     private client: IpcSender,
     private rawClient: IpcClient,
     private nextId: () => string,
+    private getSessionId: () => SessionId | null = () => null,
   ) {
     super();
+  }
+
+  private withSessionId<T extends object>(payload: T): T & { sessionId?: SessionId } {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) return payload;
+    return { ...payload, sessionId };
   }
 
   /**
@@ -208,7 +228,7 @@ export class ModuleHostClient
       type: "command",
       action: "modules/call",
       id: this.nextId(),
-      payload,
+      payload: this.withSessionId(payload),
     });
     return resp.payload as ModuleCallSuccess | ModuleCallError;
   }
@@ -218,7 +238,7 @@ export class ModuleHostClient
       type: "command",
       action: "modules/host-call",
       id: this.nextId(),
-      payload,
+      payload: this.withSessionId(payload),
     });
     // Runtime narrowing — host-call's reply drives audit outcomes + the
     // consumer panel's error path. Drop malformed payloads into a
@@ -245,7 +265,7 @@ export class ModuleHostClient
       type: "command",
       action: "modules/bind-sender",
       id: this.nextId(),
-      payload: { moduleId },
+      payload: this.withSessionId({ moduleId }),
     });
     const p = resp.payload as BindSenderReply | null | undefined;
     if (!p || p.kind !== "ok") {

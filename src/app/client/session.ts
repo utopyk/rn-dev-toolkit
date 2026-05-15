@@ -205,7 +205,15 @@ export async function connectToDaemonSession(
   const devtools = new DevToolsClient(channelClient, idGen);
   const builder = new BuilderClient(channelClient, idGen);
   const watcher = new WatcherClient(channelClient, idGen);
-  const modules = new ModuleHostClient(channelClient, client, idGen);
+  // Phase E (wire-contract parity, follow-on to Phase M `48fde5b`).
+  // The closure reads the outer `sessionId` variable so the adapter
+  // can stamp every per-session RPC payload (`modules/call`,
+  // `modules/host-call`, `modules/bind-sender`) with the daemon-minted
+  // SessionId. Pre-ack it returns `null` and the adapter falls back to
+  // a payload without sessionId — fine because no RPC call site fires
+  // before the events/subscribe ack populates `sessionId` (adapters
+  // are constructed eagerly but only callable after `await runningPromise`).
+  const modules = new ModuleHostClient(channelClient, client, idGen, () => sessionId);
   const lifecycle = new SessionClient();
 
   let worktreeKey: string | null = null;

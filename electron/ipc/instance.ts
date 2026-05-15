@@ -13,19 +13,22 @@ import {
   appendLog,
   toSummary,
   findFreePort,
+  getSessionRecordForInstance,
+  MAX_SESSIONS,
   type InstanceState,
 } from './state.js';
 
-// Phase 13.5 — `MULTI_INSTANCE_NOT_SUPPORTED` retired. The daemon now
-// supports multiple ref-counted attachers via session/release; what
-// Electron rejects below is specifically the "same Electron process,
-// second instance with a *different* profile" case, because Electron
-// only carries one DaemonSession in main-process state. The
-// daemon-side gate is `E_PROFILE_MISMATCH` from supervisor.attach() —
-// we surface that directly rather than the old "restart the app"
-// guidance, which masked the real reason. Cross-profile multi-attach
-// in the same Electron is Phase 13.6+ work (it needs main-process
-// state to hold N sessions).
+// Phase E1 — every instances:create call mints a fresh daemon session.
+// The pre-E1 same-profile-sharing path AND the cross-profile rejection
+// are both gone: the daemon's supervisor.attach() supports N concurrent
+// sessions per worktree, so the renderer's `+ tab` flow is now a
+// straight "open a new session." The cap is `MAX_SESSIONS` (4 per
+// memory `feedback_parallel_instance_requirement`).
+//
+// Phase A8 of the plan (Deepening insights) called out a race: concurrent
+// instances:create invocations could double-allocate ports + double-
+// attach. Serialized below via `pendingCreate`.
+let pendingCreate: Promise<unknown> | null = null;
 
 export function registerInstanceHandlers() {
   ipcMain.handle('instances:list', async () => {
@@ -33,162 +36,17 @@ export function registerInstanceHandlers() {
   });
 
   ipcMain.handle('instances:create', async (_, data) => {
-    if (!state.projectRoot) return { ok: false, error: 'No project root' };
-
-    let profileData;
-    if (typeof data === 'string') {
-      // data is a profile name — load it from disk
-      const profileStore = new ProfileStore(path.join(state.projectRoot, '.rn-dev', 'profiles'));
-      profileData = profileStore.load(data);
-      if (!profileData) return { ok: false, error: `Profile "${data}" not found` };
-    } else {
-      // data is raw profile object (from wizard)
-      profileData = data;
+    if (pendingCreate) {
+      // Chain after any in-flight create so port allocation + session
+      // attach don't interleave. The previous create's outcome doesn't
+      // gate this one — we await its promise to settle, then run.
+      try { await pendingCreate; } catch { /* prior create's error is its own to surface */ }
     }
-
-    const worktreePath = profileData.worktree ?? null;
-    const worktreeName = worktreePath ? path.basename(worktreePath) : 'main';
-    // Always auto-allocate a free port to avoid conflicts between instances
-    const port = findFreePort();
-    const id = `${worktreeName}-${port}`;
-
-    // Don't create duplicates
-    if (instances.has(id)) {
-      return { ok: false, error: `Instance ${id} already exists` };
-    }
-
-    const branch = profileData.branch ?? await getCurrentBranch(state.projectRoot) ?? 'main';
-
-    // Determine device info
-    let deviceName = 'No device';
-    let deviceIcon = '💻';
-    let deviceId: string | null = null;
-
-    if (profileData.devices) {
-      const iosDeviceId = profileData.devices.ios;
-      const androidDeviceId = profileData.devices.android;
-      deviceId = iosDeviceId ?? androidDeviceId ?? null;
-
-      if (deviceId) {
-        try {
-          const platform = profileData.platform ?? 'ios';
-          const deviceList = await listDevices(platform);
-          const foundDevice = deviceList.find(d => d.id === deviceId);
-          if (foundDevice) {
-            deviceName = foundDevice.name;
-            deviceIcon = foundDevice.isPhysical ? '📱' : '💻';
-          }
-        } catch {
-          // Keep defaults
-        }
-      }
-    }
-
-    const instance: InstanceState = {
-      id,
-      worktree: worktreePath,
-      worktreeName,
-      branch,
-      port,
-      deviceId,
-      deviceName,
-      deviceIcon,
-      platform: profileData.platform ?? 'ios',
-      mode: profileData.mode ?? 'dirty',
-      serviceLog: [],
-      metroLog: [],
-      metroStatus: 'starting',
-    };
-
-    instances.set(id, instance);
-    state.activeInstanceId = id;
-
-    // Notify renderer of the new instance
-    send('instance:created', toSummary(instance));
-
-    // No active daemon session yet (e.g. wizard from a fresh launch
-    // with no matching default profile)? Attach one for THIS profile so
-    // Settings/Marketplace/etc. work without an app restart. The
-    // attached session publishes on serviceBus.modulesClient, which
-    // wakes any in-flight `awaitModulesClient` rejection caused by an
-    // earlier `abortModulesClient` call.
-    if (!state.daemonSession) {
-      try {
-        // The wizard doesn't include `projectRoot` in its profile
-        // payload (it's the same one for every profile in this
-        // launch); fill it in from state so the daemon's profile-
-        // guard doesn't reject with `E_PROFILE_PATH_NOT_STRING`.
-        const sessionProfile: Profile = {
-          ...profileData,
-          projectRoot: state.projectRoot,
-        };
-        const session = await attachDaemonSession(sessionProfile, state.projectRoot);
-        // Mirror startRealServices's wiring step (services.ts:373-375).
-        // Without this, Metro starts but its log lines never reach the
-        // renderer's `instance:metro` channel — the user sees "Daemon
-        // session attached" and then silence.
-        wireInstanceEvents(instance, session);
-        // Auto-build for non-quick modes — same parity with the TUI
-        // start-flow as `startRealServices` enforces. The wizard-path
-        // attach (this branch) hits this when the user creates the
-        // first instance from the wizard; without it, dirty/clean/
-        // ultra-clean profiles silently skip the build.
-        triggerBuildsIfNeeded(session, sessionProfile, state.projectRoot);
-        const msg = `Daemon session attached for profile "${profileData.name ?? id}".`;
-        appendLog(instance, 'service', msg);
-        send('instance:log', { instanceId: id, text: msg });
-        return { ok: true, instance: toSummary(instance) };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        const msg = `Failed to attach daemon session: ${message}`;
-        appendLog(instance, 'service', msg);
-        send('instance:log', { instanceId: id, text: msg });
-        return {
-          ok: false,
-          code: 'DAEMON_ATTACH_FAILED' as const,
-          error: msg,
-          instance: toSummary(instance),
-        };
-      }
-    }
-
-    // Same-profile second instance: the daemon already has a live
-    // session for this profile, so we just track the new Electron-side
-    // instance record without opening a second daemon session. The
-    // existing `state.daemonSession` keeps publishing events that the
-    // renderer can route to either instance.
-    const activeProfileName = state.daemonSessionProfileName;
-    const incomingProfileName = profileData.name;
-    if (
-      activeProfileName !== null &&
-      incomingProfileName !== undefined &&
-      activeProfileName === incomingProfileName
-    ) {
-      const msg = `Sharing daemon session "${activeProfileName}" with new instance.`;
-      appendLog(instance, 'service', msg);
-      send('instance:log', { instanceId: id, text: msg });
-      return { ok: true, instance: toSummary(instance) };
-    }
-
-    // Different-profile second instance: the daemon would reject the
-    // attach with E_PROFILE_MISMATCH; we surface that directly. Single-
-    // Electron-process multi-profile is a Phase 13.6+ story.
-    const mismatchMsg =
-      `Daemon already running a different profile in this project. ` +
-      `Cross-profile multi-attach in one Electron app isn't supported yet — ` +
-      `restart the app to switch profiles.`;
-    appendLog(instance, 'service', mismatchMsg);
-    send('instance:log', {
-      instanceId: id,
-      text: mismatchMsg,
+    const work = doCreate(data);
+    pendingCreate = work.finally(() => {
+      if (pendingCreate === work) pendingCreate = null;
     });
-
-    return {
-      ok: false,
-      code: 'PROFILE_MISMATCH' as const,
-      error: mismatchMsg,
-      instance: toSummary(instance),
-    };
+    return work;
   });
 
   ipcMain.handle('instances:remove', async (_, instanceId: string) => {
@@ -203,38 +61,34 @@ export function registerInstanceHandlers() {
     // froze the kill — second user report: "killing the tab still does
     // nothing in the ultra clean profile".
     //
-    // Two-phase teardown now:
+    // Two-phase teardown:
     //   1. UI-side: remove the tab immediately so the user sees their
     //      action take effect, no matter how long the daemon takes.
-    //   2. Daemon-side: fire session/stop without awaiting the response.
-    //      `supervisor.stop()` will run as soon as the current boot
-    //      finishes its in-flight phase (or immediately if it's already
-    //      `running`). Resources tear down in the background.
+    //   2. Daemon-side: fire session/stop (scoped to THIS session's id)
+    //      without awaiting the response. `supervisor.stop()` will run
+    //      as soon as the current boot finishes its in-flight phase
+    //      (or immediately if it's already `running`).
     //
-    // Trade-off: if the daemon is mid-clean, Metro doesn't stop until
-    // that clean phase ends. That's better than freezing the UI for
-    // ten minutes — and far better than the pre-fix behavior of leaking
-    // Metro entirely. A future refactor can make clean cancelable
-    // (AbortSignal through CleanManager) so stop is truly immediate.
-    if (state.daemonSession && state.activeInstanceId === instanceId) {
-      const session = state.daemonSession;
-      // Clear the references first so a follow-up `instances:create`
-      // doesn't try to share a session that's tearing down.
-      state.daemonSession = null;
-      state.daemonSessionProfileName = null;
-      // Fire-and-forget. Errors land in the audit / daemon log but
-      // don't block the UI.
-      void session.client
+    // Phase E1: scoped to one session — other sessions keep running.
+    const record = getSessionRecordForInstance(instanceId);
+    if (record) {
+      const { sessionId, daemonSession } = record;
+      // Clear before firing the (async) stop so a follow-up
+      // instances:create doesn't see a tearing-down record.
+      state.sessions.delete(sessionId);
+      if (state.activeSessionId === sessionId) {
+        const next = state.sessions.keys().next().value ?? null;
+        state.activeSessionId = next;
+      }
+      void daemonSession.client
         .send({
           type: 'command',
           action: 'session/stop',
           id: `electron-close-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          payload: { sessionId },
         })
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
-          // Best-effort log via send() — the instance might already be
-          // deleted from the renderer at this point, which is fine; the
-          // log line is for the daemon stderr trail.
           send('instance:log', { instanceId, text: `⚠ Background session/stop failed: ${message}` });
         });
     }
@@ -253,6 +107,8 @@ export function registerInstanceHandlers() {
   ipcMain.handle('instances:setActive', async (_, instanceId: string) => {
     if (instances.has(instanceId)) {
       state.activeInstanceId = instanceId;
+      const record = getSessionRecordForInstance(instanceId);
+      if (record) state.activeSessionId = record.sessionId;
       return { ok: true };
     }
     return { ok: false, error: 'Instance not found' };
@@ -288,4 +144,114 @@ export function registerInstanceHandlers() {
     send('instance:log', { instanceId: instance.id, text: msg });
     return { ok: false, error: msg };
   });
+}
+
+async function doCreate(data: unknown): Promise<unknown> {
+  if (!state.projectRoot) return { ok: false, error: 'No project root' };
+
+  if (state.sessions.size >= MAX_SESSIONS) {
+    return {
+      ok: false,
+      code: 'E_SESSION_LIMIT_REACHED' as const,
+      error: `Cannot create more than ${MAX_SESSIONS} concurrent sessions. Close an existing tab first.`,
+    };
+  }
+
+  let profileData;
+  if (typeof data === 'string') {
+    const profileStore = new ProfileStore(path.join(state.projectRoot, '.rn-dev', 'profiles'));
+    profileData = profileStore.load(data);
+    if (!profileData) return { ok: false, error: `Profile "${data}" not found` };
+  } else {
+    profileData = data as { worktree?: string; branch?: string; platform?: 'ios' | 'android' | 'both'; mode?: 'quick' | 'dirty' | 'clean' | 'ultra-clean'; devices?: { ios?: string; android?: string }; name?: string };
+  }
+
+  const worktreePath = profileData.worktree ?? null;
+  const worktreeName = worktreePath ? path.basename(worktreePath) : 'main';
+  const port = findFreePort();
+  const id = `${worktreeName}-${port}`;
+
+  if (instances.has(id)) {
+    return { ok: false, error: `Instance ${id} already exists` };
+  }
+
+  const branch = profileData.branch ?? await getCurrentBranch(state.projectRoot) ?? 'main';
+
+  let deviceName = 'No device';
+  let deviceIcon = '💻';
+  let deviceId: string | null = null;
+
+  if (profileData.devices) {
+    const iosDeviceId = profileData.devices.ios;
+    const androidDeviceId = profileData.devices.android;
+    deviceId = iosDeviceId ?? androidDeviceId ?? null;
+
+    if (deviceId) {
+      try {
+        const platform = profileData.platform ?? 'ios';
+        const deviceList = await listDevices(platform);
+        const foundDevice = deviceList.find(d => d.id === deviceId);
+        if (foundDevice) {
+          deviceName = foundDevice.name;
+          deviceIcon = foundDevice.isPhysical ? '📱' : '💻';
+        }
+      } catch {
+        // Keep defaults
+      }
+    }
+  }
+
+  const instance: InstanceState = {
+    id,
+    worktree: worktreePath,
+    worktreeName,
+    branch,
+    port,
+    deviceId,
+    deviceName,
+    deviceIcon,
+    platform: profileData.platform ?? 'ios',
+    mode: profileData.mode ?? 'dirty',
+    serviceLog: [],
+    metroLog: [],
+    metroStatus: 'starting',
+  };
+
+  instances.set(id, instance);
+  state.activeInstanceId = id;
+
+  send('instance:created', toSummary(instance));
+
+  try {
+    // The wizard doesn't include `projectRoot` in its profile payload
+    // (it's the same one for every profile in this launch); fill it in
+    // from state so the daemon's profile-guard doesn't reject with
+    // `E_PROFILE_PATH_NOT_STRING`.
+    const sessionProfile: Profile = {
+      ...profileData,
+      projectRoot: state.projectRoot,
+    } as Profile;
+    const record = await attachDaemonSession(sessionProfile, state.projectRoot, id);
+    const session = record.daemonSession;
+    // Mirror startRealServices's wiring step (services.ts). Without
+    // this, Metro starts but its log lines never reach the renderer's
+    // `instance:metro` channel.
+    wireInstanceEvents(instance, session);
+    triggerBuildsIfNeeded(session, sessionProfile, state.projectRoot);
+    const msg = `Daemon session attached for profile "${profileData.name ?? id}".`;
+    appendLog(instance, 'service', msg);
+    send('instance:log', { instanceId: id, text: msg });
+    return { ok: true, instance: toSummary(instance) };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const msg = `Failed to attach daemon session: ${message}`;
+    appendLog(instance, 'service', msg);
+    send('instance:log', { instanceId: id, text: msg });
+    return {
+      ok: false,
+      code: 'DAEMON_ATTACH_FAILED' as const,
+      error: msg,
+      instance: toSummary(instance),
+    };
+  }
 }

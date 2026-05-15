@@ -99,8 +99,15 @@ test.describe("Real-boot multi-session daemon (D7)", () => {
 
     const socketPath = join(PROJECT_ROOT, ".rn-dev", "sock");
     const pidPath = join(PROJECT_ROOT, ".rn-dev", "pid");
-    expect(existsSync(socketPath), "daemon socket should exist after Electron mount").toBe(true);
-    expect(existsSync(pidPath), "daemon pid lockfile should exist after Electron mount").toBe(true);
+    // The daemon spawn is async — main.ts schedules startRealServices
+    // on a 1s setTimeout after did-finish-load. Wait for sock + pid to
+    // materialize before asserting on them; sidebar-visible is a UI
+    // event, not a daemon-ready signal.
+    await waitFor(
+      () => Promise.resolve(existsSync(socketPath) && existsSync(pidPath)),
+      30_000,
+      `daemon socket/pid did not appear at ${PROJECT_ROOT}/.rn-dev/ after sidebar mount`,
+    );
 
     const daemonPid = readPidFromLockfile(pidPath);
     expect(typeof daemonPid).toBe("number");
@@ -261,6 +268,11 @@ test.describe("Real-boot multi-session daemon (D7)", () => {
 
     // Capture the daemon pid we expect to disappear post-teardown.
     const pidPath = join(PROJECT_ROOT, ".rn-dev", "pid");
+    await waitFor(
+      () => Promise.resolve(existsSync(pidPath)),
+      30_000,
+      `daemon pid lockfile did not appear at ${pidPath}`,
+    );
     const daemonPid = readPidFromLockfile(pidPath);
     expect(typeof daemonPid).toBe("number");
 

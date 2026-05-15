@@ -2,8 +2,14 @@ import { BrowserWindow } from 'electron';
 import path from 'node:path';
 import { serviceBus } from '../../src/app/service-bus.js';
 import type { ModuleHostClient } from '../../src/app/client/module-host-adapter.js';
+import type { SessionId } from '../../src/core/identifiers.js';
 import { getDefaultAuditLog, type AuditEntry } from '../../src/core/audit-log.js';
-import { state, send } from './state.js';
+import {
+  state,
+  send,
+  getActiveSessionRecord,
+  getSessionRecordForInstance,
+} from './state.js';
 
 // Phase 8 — AuditLog is a process-wide singleton so the four audit sinks
 // below (panel-bridge, host-call, config-set, install/uninstall) can
@@ -40,21 +46,24 @@ import {
 // moduleId payloads.
 const senderRegistry = new PanelSenderRegistry();
 
-// Shared "wait for daemon-client to publish" gate. Handlers that need a
+// Phase E3 — per-session ModuleHostClient cache. Handlers that need a
 // live `ModuleHostClient` (modules-config / modules-install /
-// modules-panels) await this instead of synchronously checking
-// `serviceBus.modulesClient`. Closes the boot-window race where a
-// renderer panel mounts before `connectElectronToDaemon` resolves and
-// the handler returns an empty/pending shape that the renderer can't
-// distinguish from "really nothing here". Phase 13.4.1 follow-up.
+// modules-panels) await `awaitModulesClient(instanceId?)`, which resolves
+// the client bound to that instance's session. Pre-E this was a
+// singleton: every new session clobbered the previous client, so the
+// renderer's second tab silently routed module RPCs to the first tab's
+// session (the very contamination memory `feedback_parallel_instance_requirement`
+// flags as a blocker).
 //
-// Resolves with the client once published; rejects after `MODULES_CLIENT_TIMEOUT_MS`
-// so a daemon-spawn failure doesn't hang the renderer's invoke
-// indefinitely. Resets on `modulesClient` null (daemon disconnect) so
-// a reconnect re-arms the wait.
+// Back-compat: callers that don't pass an instanceId fall back to the
+// active session. Single-session deployments (one tab open) behave
+// identically to the pre-E singleton path.
 const MODULES_CLIENT_TIMEOUT_MS = 30_000;
-let currentModulesClient: import('../../src/app/client/module-host-adapter.js').ModuleHostClient | null = null;
-let pendingClientPromise: Promise<import('../../src/app/client/module-host-adapter.js').ModuleHostClient> | null = null;
+const modulesClients = new Map<SessionId, ModuleHostClient>();
+const pendingClientPromises = new Map<SessionId, Promise<ModuleHostClient>>();
+// Pre-session-bound waiters: callers that await before ANY session has
+// minted its SessionId. They resolve with the FIRST published client.
+let pendingFirstClientPromise: Promise<ModuleHostClient> | null = null;
 
 // Latest `abortModulesClient` reason. Cached so a Settings/Marketplace
 // tab that mounts AFTER the abort fires gets the same fast rejection
@@ -65,18 +74,72 @@ serviceBus.on('modulesClientAborted', ({ reason }: { reason: string }) => {
   currentAbortReason = reason;
 });
 
-export function awaitModulesClient(): Promise<import('../../src/app/client/module-host-adapter.js').ModuleHostClient> {
-  if (currentModulesClient) return Promise.resolve(currentModulesClient);
+function resolveSessionForInstance(instanceId?: string): SessionId | null {
+  if (instanceId) {
+    const record = getSessionRecordForInstance(instanceId);
+    if (record) return record.sessionId;
+  }
+  const active = getActiveSessionRecord();
+  return active?.sessionId ?? null;
+}
+
+export function awaitModulesClient(instanceId?: string): Promise<ModuleHostClient> {
+  const sessionId = resolveSessionForInstance(instanceId);
+  if (sessionId) {
+    const existing = modulesClients.get(sessionId);
+    if (existing) return Promise.resolve(existing);
+  }
   if (currentAbortReason) {
     return Promise.reject(new Error(currentAbortReason));
   }
-  if (pendingClientPromise) return pendingClientPromise;
-  pendingClientPromise = new Promise((resolve, reject) => {
+  // Two waiting strategies:
+  //   1. sessionId known but client not yet published — wait specifically
+  //      for THAT session's client (avoids race where session-A's client
+  //      lands first but the caller asked about session-B).
+  //   2. sessionId not yet known (renderer mount fires before any
+  //      attachDaemonSession completes) — wait for ANY first client.
+  if (sessionId) {
+    const pending = pendingClientPromises.get(sessionId);
+    if (pending) return pending;
+    const promise = new Promise<ModuleHostClient>((resolve, reject) => {
+      const cleanup = (): void => {
+        clearTimeout(timer);
+        serviceBus.off('modulesClient', onClient);
+        serviceBus.off('modulesClientAborted', onAborted);
+        pendingClientPromises.delete(sessionId);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(
+          new Error(
+            `awaitModulesClient: daemon client did not publish within ${MODULES_CLIENT_TIMEOUT_MS}ms for session ${sessionId}`,
+          ),
+        );
+      }, MODULES_CLIENT_TIMEOUT_MS);
+      const onClient = (
+        payload: { sessionId: SessionId | null; client: ModuleHostClient | null },
+      ): void => {
+        if (!payload.client || payload.sessionId !== sessionId) return;
+        cleanup();
+        resolve(payload.client);
+      };
+      const onAborted = ({ reason }: { reason: string }): void => {
+        cleanup();
+        reject(new Error(reason));
+      };
+      serviceBus.on('modulesClient', onClient);
+      serviceBus.on('modulesClientAborted', onAborted);
+    });
+    pendingClientPromises.set(sessionId, promise);
+    return promise;
+  }
+  if (pendingFirstClientPromise) return pendingFirstClientPromise;
+  pendingFirstClientPromise = new Promise<ModuleHostClient>((resolve, reject) => {
     const cleanup = (): void => {
       clearTimeout(timer);
       serviceBus.off('modulesClient', onClient);
       serviceBus.off('modulesClientAborted', onAborted);
-      pendingClientPromise = null;
+      pendingFirstClientPromise = null;
     };
     const timer = setTimeout(() => {
       cleanup();
@@ -86,10 +149,10 @@ export function awaitModulesClient(): Promise<import('../../src/app/client/modul
         ),
       );
     }, MODULES_CLIENT_TIMEOUT_MS);
-    const onClient = ({ client }: { client: import('../../src/app/client/module-host-adapter.js').ModuleHostClient | null }): void => {
-      if (!client) return;
+    const onClient = (payload: { client: ModuleHostClient | null }): void => {
+      if (!payload.client) return;
       cleanup();
-      resolve(client);
+      resolve(payload.client);
     };
     const onAborted = ({ reason }: { reason: string }): void => {
       cleanup();
@@ -98,15 +161,22 @@ export function awaitModulesClient(): Promise<import('../../src/app/client/modul
     serviceBus.on('modulesClient', onClient);
     serviceBus.on('modulesClientAborted', onAborted);
   });
-  return pendingClientPromise;
+  return pendingFirstClientPromise;
 }
 
-serviceBus.on('modulesClient', ({ client }) => {
-  currentModulesClient = client ?? null;
-  // A successful publish clears any previous abort — the next renderer
-  // mount of a modules-bound panel re-fetches successfully without an
-  // app restart.
-  if (client) currentAbortReason = null;
+serviceBus.on('modulesClient', (payload: { sessionId: SessionId | null; client: ModuleHostClient | null }) => {
+  if (payload.client && payload.sessionId) {
+    modulesClients.set(payload.sessionId, payload.client);
+    currentAbortReason = null;
+  } else if (!payload.client) {
+    // serviceBus.clearModulesClient() — clear all. Per-session disconnect
+    // already removes ITS entry in services.ts surfaceDisconnect.
+    if (payload.sessionId) {
+      modulesClients.delete(payload.sessionId);
+    } else {
+      modulesClients.clear();
+    }
+  }
 });
 
 export { startRealServices } from './services.js';
@@ -206,87 +276,99 @@ export function setupIpcBridge(window: BrowserWindow, initialProjectRoot?: strin
  */
 function registerModulePanelsHandlers(window: BrowserWindow): void {
   const boundsCache = createBoundsCache();
-  const moduleRoots = new Map<string, string>();
-  let deps: ModulesPanelsIpcDeps | null = null;
+  // Phase E3 — per-session moduleRoots so panel-bridge resolves paths
+  // against the correct session's installed module tree. Each session
+  // has its own ModuleHostManager with potentially different installed
+  // versions of the same module.
+  const moduleRootsBySession = new Map<SessionId, Map<string, string>>();
+  function moduleRootsFor(sessionId: SessionId): Map<string, string> {
+    let map = moduleRootsBySession.get(sessionId);
+    if (!map) {
+      map = new Map<string, string>();
+      moduleRootsBySession.set(sessionId, map);
+    }
+    return map;
+  }
+  // Single panel-bridge per BrowserWindow — its lookups thread through
+  // the active-session resolver. The previous single deps-cache made the
+  // bridge implicitly session-bound (whichever attached first), which
+  // surfaced session-A's manifest entries in session-B's panel view
+  // after a tab switch.
+  let bridge: ReturnType<typeof installPanelBridge> | null = null;
 
   const handle = registerModulesPanelsIpc(
     async () => {
-      if (deps) return deps;
-      // Wait for modulesClient to publish, then deps will populate via
-      // the listener below; loop a tick to pick it up.
-      await awaitModulesClient();
-      // The listener that builds `deps` runs synchronously after the
-      // serviceBus emit; by the time the awaitModulesClient promise
-      // resolves, `deps` is populated.
-      if (!deps) {
+      // Phase E3 — resolve the active session's client per-call. The
+      // previous closure-cached singleton clobbered cross-session work
+      // (session A's panels visible from session B). Active-session
+      // resolution costs one Map lookup; cheap relative to the
+      // round-trip the deps drive.
+      const client = await awaitModulesClient();
+      const record = getActiveSessionRecord();
+      if (!record) {
         throw new Error(
-          'modules-panels: modulesClient published but deps were not initialized',
+          'modules-panels: no active session — daemon disconnected?',
         );
       }
-      return deps;
+      if (!bridge) {
+        const preloadPath = path.join(__dirname, '..', 'preload-module.js');
+        bridge = installPanelBridge({
+          window,
+          preloadPath,
+          moduleRoot: (id: string) => {
+            // Resolve against the active session's roots — panel bridge
+            // is shared, but the path it hands the WebContentsView must
+            // match the currently-focused tab.
+            const active = getActiveSessionRecord();
+            if (!active) return '';
+            return moduleRootsFor(active.sessionId).get(id) ?? '';
+          },
+          getBounds: () =>
+            handle.getActiveBounds() ?? { x: 0, y: 0, width: 0, height: 0 },
+          auditLog: (event) => {
+            void auditLog.append({
+              kind: 'panel-bridge',
+              moduleId: event.moduleId,
+              outcome: 'ok',
+              action: event.kind,
+              panelId: event.panelId,
+            });
+          },
+          senderRegistry,
+        });
+      }
+      return {
+        bridge,
+        modulesClient: client,
+        bounds: boundsCache,
+        moduleRoots: moduleRootsFor(record.sessionId),
+      } satisfies ModulesPanelsIpcDeps;
     },
     () => senderRegistry,
   );
 
+  // Wake-up signal: when a session's modulesClient first publishes, tell
+  // the renderer's sidebar to re-fetch its panel list. Pre-E this fired
+  // once globally; under N sessions it fires per-session attach so each
+  // tab's first mount sees up-to-date panels.
   serviceBus.on('modulesClient', ({ client }) => {
-    if (!client) {
-      // Daemon dropped — invalidate. The panel-bridge stays installed
-      // (its BrowserWindow hook owns the lifecycle); a fresh `deps` will
-      // land on the next `setModulesClient` after reconnect.
-      deps = null;
-      moduleRoots.clear();
-      return;
-    }
-    if (deps) return;
-
-    const preloadPath = path.join(__dirname, '..', 'preload-module.js');
-    const bridge = installPanelBridge({
-      window,
-      preloadPath,
-      moduleRoot: (id: string) => moduleRoots.get(id) ?? '',
-      getBounds: () =>
-        handle.getActiveBounds() ?? { x: 0, y: 0, width: 0, height: 0 },
-      auditLog: (event) => {
-        void auditLog.append({
-          kind: 'panel-bridge',
-          moduleId: event.moduleId,
-          outcome: 'ok',
-          action: event.kind,
-          panelId: event.panelId,
-        });
-      },
-      senderRegistry,
-    });
-
-    deps = {
-      bridge,
-      modulesClient: client,
-      bounds: boundsCache,
-      moduleRoots,
-    };
-
-    // Re-notify the renderer so sidebar re-fetches panel list now that
-    // deps are live. Renderer subscribes to `modules:event` and refetches
-    // `modules:list-panels` on any kind — `ready` is a synthetic marker
-    // for "deps just transitioned to non-null". Same semantics as before
-    // the flip; the trigger is now serviceBus.modulesClient arrival.
+    if (!client) return;
     send('modules:event', { kind: 'ready', moduleId: '', scopeUnit: '' });
   });
 
   // Clear moduleRoots on uninstall / state-changed (module left `active`)
   // so the panel-bridge's `moduleRoot(id)` callback never hands out a
   // stale path after uninstall-then-reinstall. Sec P1-1 + Arch P1 on
-  // PR #20. Attached once per `setupIpcBridge` call; the subscription
-  // reads live `deps` via closure so it works across disconnect cycles.
-  const moduleRootsInvalidator = (event: { kind?: string; moduleId?: string }) => {
-    if (!event.moduleId) return;
-    if (event.kind === 'uninstall' || event.kind === 'crashed' || event.kind === 'failed') {
-      moduleRoots.delete(event.moduleId);
-    }
-  };
-  serviceBus.on('modulesClient', ({ client }) => {
-    if (!client) return;
-    client.on('modules-event', moduleRootsInvalidator);
+  // PR #20. Scoped per session so an uninstall in session A doesn't
+  // wipe session B's path cache.
+  serviceBus.on('modulesClient', ({ sessionId, client }) => {
+    if (!client || !sessionId) return;
+    client.on('modules-event', (event: { kind?: string; moduleId?: string }) => {
+      if (!event.moduleId) return;
+      if (event.kind === 'uninstall' || event.kind === 'crashed' || event.kind === 'failed') {
+        moduleRootsFor(sessionId).delete(event.moduleId);
+      }
+    });
   });
 }
 
@@ -301,42 +383,30 @@ function registerModulePanelsHandlers(window: BrowserWindow): void {
  * config-set outcomes; the daemon runs its own HMAC-chained audit log.
  */
 function registerModulesConfigHandlers(): void {
-  let deps: ModulesConfigIpcDeps | null = null;
-
+  // Phase E3 — resolve per-call against the active session. Each session
+  // has its own ModuleHostClient and (since module installs are
+  // per-worktree) its own visible config namespace. The audit sink is
+  // session-agnostic so we can construct fresh deps each call without
+  // worrying about closure-leaks on the auditLog reference.
   registerModulesConfigIpc(
-    async () => {
-      if (deps) return deps;
-      await awaitModulesClient();
-      if (!deps) {
-        throw new Error(
-          'modules-config: modulesClient published but deps were not initialized',
-        );
-      }
-      return deps;
+    async (): Promise<ModulesConfigIpcDeps> => {
+      const client = await awaitModulesClient();
+      return {
+        modulesClient: client,
+        auditConfigSet: (event) => {
+          void auditLog.append({
+            kind: 'config-set',
+            moduleId: event.moduleId,
+            outcome: event.outcome === 'ok' ? 'ok' : 'error',
+            patchKeys: event.patchKeys,
+            ...(event.code ? { code: event.code } : {}),
+            ...(event.scopeUnit ? { scopeUnit: event.scopeUnit } : {}),
+          });
+        },
+      };
     },
     () => senderRegistry,
   );
-
-  serviceBus.on('modulesClient', ({ client }) => {
-    if (!client) {
-      deps = null;
-      return;
-    }
-    if (deps) return;
-    deps = {
-      modulesClient: client,
-      auditConfigSet: (event) => {
-        void auditLog.append({
-          kind: 'config-set',
-          moduleId: event.moduleId,
-          outcome: event.outcome === 'ok' ? 'ok' : 'error',
-          patchKeys: event.patchKeys,
-          ...(event.code ? { code: event.code } : {}),
-          ...(event.scopeUnit ? { scopeUnit: event.scopeUnit } : {}),
-        });
-      },
-    };
-  });
 }
 
 /**
@@ -348,42 +418,29 @@ function registerModulesConfigHandlers(): void {
  * principal is only granted to the host UI's webContents.
  */
 function registerModulesInstallHandlers(): void {
-  let deps: ModulesInstallIpcDeps | null = null;
-
   senderRegistry.allowHostWrite('marketplace');
+  // Phase E3 — install/uninstall/marketplace queries route through the
+  // active session's client. Module install is daemon-process-global
+  // (writes to `~/.rn-dev/modules/`), but the dispatcher entry-point
+  // still lives on the session's ModuleHostClient.
   registerModulesInstallIpc(
-    async () => {
-      if (deps) return deps;
-      await awaitModulesClient();
-      if (!deps) {
-        throw new Error(
-          'modules-install: modulesClient published but deps were not initialized',
-        );
-      }
-      return deps;
+    async (): Promise<ModulesInstallIpcDeps> => {
+      const client = await awaitModulesClient();
+      return {
+        modulesClient: client,
+        auditInstall: (event) => {
+          void auditLog.append({
+            kind: event.kind,
+            moduleId: event.moduleId,
+            outcome: event.outcome === 'ok' ? 'ok' : 'error',
+            ...(event.code ? { code: event.code } : {}),
+            ...(event.version ? { version: event.version } : {}),
+          });
+        },
+      };
     },
     () => senderRegistry,
   );
-
-  serviceBus.on('modulesClient', ({ client }) => {
-    if (!client) {
-      deps = null;
-      return;
-    }
-    if (deps) return;
-    deps = {
-      modulesClient: client,
-      auditInstall: (event) => {
-        void auditLog.append({
-          kind: event.kind,
-          moduleId: event.moduleId,
-          outcome: event.outcome === 'ok' ? 'ok' : 'error',
-          ...(event.code ? { code: event.code } : {}),
-          ...(event.version ? { version: event.version } : {}),
-        });
-      },
-    };
-  });
 }
 
 /**

@@ -2,21 +2,40 @@ import { ipcMain } from 'electron';
 import { execShellAsync } from '../../src/core/exec-async.js';
 import { serviceBus } from '../../src/app/service-bus.js';
 import type { WatcherClient } from '../../src/app/client/watcher-adapter.js';
-import { instances, state, appendLog, send } from './state.js';
+import type { SessionId } from '../../src/core/identifiers.js';
+import {
+  instances,
+  state,
+  appendLog,
+  send,
+  getActiveSessionRecord,
+  getSessionRecordForInstance,
+} from './state.js';
 
-// Phase 13.4.1 — watcher:toggle flips to the daemon-client adapter.
-// `state.watcher` on the in-process path is retired as services.ts
-// collapses; `serviceBus.watcher` is the daemon adapter published by
-// `connectElectronToDaemon`.
-let watcherClient: WatcherClient | null = null;
-serviceBus.on('watcher', ({ watcher }: { watcher: WatcherClient }) => {
-  watcherClient = watcher;
+// Phase E2 — per-session WatcherClient map. The on-save watcher belongs
+// to a session because its watched paths (the worktree + .rn-dev profile
+// directory) are session-scoped. Singleton-by-coincidence pre-E.
+const watcherClients = new Map<SessionId, WatcherClient>();
+
+serviceBus.on('watcher', ({ sessionId, watcher }) => {
+  watcherClients.set(sessionId, watcher);
 });
 
+function clientForInstance(instanceId?: string): WatcherClient | null {
+  if (instanceId) {
+    const record = getSessionRecordForInstance(instanceId);
+    if (record) return watcherClients.get(record.sessionId) ?? null;
+  }
+  const active = getActiveSessionRecord();
+  if (!active) return null;
+  return watcherClients.get(active.sessionId) ?? null;
+}
+
 export function registerToolsHandlers() {
-  ipcMain.handle('run:lint', async () => {
+  ipcMain.handle('run:lint', async (_evt, instanceId?: string) => {
     if (!state.projectRoot) return;
-    const instance = state.activeInstanceId ? instances.get(state.activeInstanceId) : null;
+    const id = instanceId ?? state.activeInstanceId;
+    const instance = id ? instances.get(id) : null;
     const emitLog = (text: string) => {
       if (instance) {
         appendLog(instance, 'service', text);
@@ -40,9 +59,10 @@ export function registerToolsHandlers() {
     }
   });
 
-  ipcMain.handle('run:typecheck', async () => {
+  ipcMain.handle('run:typecheck', async (_evt, instanceId?: string) => {
     if (!state.projectRoot) return;
-    const instance = state.activeInstanceId ? instances.get(state.activeInstanceId) : null;
+    const id = instanceId ?? state.activeInstanceId;
+    const instance = id ? instances.get(id) : null;
     const emitLog = (text: string) => {
       if (instance) {
         appendLog(instance, 'service', text);
@@ -70,18 +90,19 @@ export function registerToolsHandlers() {
     send('service:log', 'Clean requires selecting a mode. Use Settings > Clean.');
   });
 
-  ipcMain.handle('watcher:toggle', async () => {
-    if (!watcherClient) {
+  ipcMain.handle('watcher:toggle', async (_evt, instanceId?: string) => {
+    const client = clientForInstance(instanceId);
+    if (!client) {
       send('service:log', 'No on-save actions configured');
       return;
     }
-    const running = await watcherClient.isRunning();
+    const running = await client.isRunning();
     if (running) {
-      await watcherClient.stop();
+      await client.stop();
       send('service:log', 'Watcher disabled');
     } else {
       send('service:log', 'Starting watcher...');
-      await watcherClient.start();
+      await client.start();
       send('service:log', 'Watcher enabled');
     }
   });

@@ -521,16 +521,13 @@ export function App() {
       'instances:create',
       profileName,
     );
-    // The handler returns { ok: false, code: 'PROFILE_MISMATCH', ... } when
-    // the daemon already has a session for a different profile and the
-    // single-Electron-process multi-profile story isn't wired (Phase 13.6+).
-    // Pre-fix this surfaced only as a buried line in the service log;
-    // surface it as a visible alert so the user knows why the new tab
-    // didn't bring up its session.
-    if (!result?.ok && result?.code === 'PROFILE_MISMATCH') {
+    // Phase E1 retired the cross-profile rejection — the daemon now
+    // supports N concurrent sessions per worktree. Two failure modes
+    // remain visible: the session-cap gate and a daemon connect failure.
+    if (!result?.ok && result?.code === 'E_SESSION_LIMIT_REACHED') {
       window.alert(
         result.error ??
-          'Cross-profile multi-attach in one Electron app is not yet supported. Restart the app to switch profiles.',
+          'Maximum concurrent sessions reached. Close an existing tab first.',
       );
     }
   }, [invoke]);
@@ -546,16 +543,14 @@ export function App() {
 
   const handleWizardComplete = useCallback(async (profileName: string) => {
     setShowWizard(false);
-    // Same handling as handleDialogSelectProfile — surface
-    // PROFILE_MISMATCH as a visible alert.
     const result = await invoke<{ ok: boolean; code?: string; error?: string }>(
       'instances:create',
       profileName,
     );
-    if (!result?.ok && result?.code === 'PROFILE_MISMATCH') {
+    if (!result?.ok && result?.code === 'E_SESSION_LIMIT_REACHED') {
       window.alert(
         result.error ??
-          'Cross-profile multi-attach in one Electron app is not yet supported. Restart the app to switch profiles.',
+          'Maximum concurrent sessions reached. Close an existing tab first.',
       );
     }
   }, [invoke]);

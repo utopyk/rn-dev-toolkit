@@ -485,6 +485,7 @@ export async function bootSessionServices(
     manager: moduleHost,
     registry: moduleRegistry,
     subscribeRegistry: opts.subscribeRegistry,
+    sessionId,
   });
 
   // 13. Hook system three-phase boot.

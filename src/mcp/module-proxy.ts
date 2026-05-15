@@ -103,15 +103,18 @@ function buildProxyToolDefinition(
       }
 
       // Phase M1 — module-proxied tools are session-scoped. Resolve the
-      // target session before sending modules/call: the daemon's
-      // dispatcher routes the call to whichever session's
-      // ModuleHostManager owns the tool's subprocess, so the choice of
-      // socket here matters.
+      // target session before sending modules/call. Socket choice alone
+      // is NOT enough: the daemon shares one IpcServer across sessions
+      // and each session's `registerModulesIpc` attaches its own listener
+      // to `ipc.on("message")`. Every listener fires on every message,
+      // so the payload MUST carry sessionId for non-matching listeners
+      // to bail. Mirror of the builder/metro fix in c464d4d.
       const resolved = resolveSession(ctx, args);
       if (!resolved.ok) return resolved.result;
 
       const resp = await resolved.record.session.client.send(
         makeIpcMessage("modules/call", {
+          sessionId: resolved.sessionId,
           moduleId: row.id,
           scopeUnit: row.scopeUnit,
           tool: bareTool,

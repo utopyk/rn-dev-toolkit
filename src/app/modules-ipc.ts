@@ -28,6 +28,7 @@
 
 import { EventEmitter } from "node:events";
 import type { IpcMessage, IpcServer, IpcMessageEvent } from "../core/ipc.js";
+import type { SessionId } from "../core/identifiers.js";
 import type {
   ModuleHostManager,
 } from "../core/module-host/manager.js";
@@ -66,6 +67,22 @@ import { SenderBindings } from "../daemon/sender-bindings.js";
 export interface ModulesIpcOptions {
   manager: ModuleHostManager;
   registry: ModuleRegistry;
+  /**
+   * Phase M follow-up — the daemon shares one `IpcServer` across all
+   * attached sessions, and each per-session `registerModulesIpc` call
+   * adds its own `ipc.on("message")` listener. Every listener fires on
+   * every message because Node's EventEmitter has no stop-propagation.
+   * When supplied, the listener bails before dispatch if the payload's
+   * `sessionId` is present and does not match — only the targeted
+   * session's listener replies. Without it (single-session boot, unit
+   * tests), the listener dispatches every message as before, which is
+   * fine because there's only one listener registered.
+   *
+   * Required from production `bootSessionServices`; optional for tests
+   * that instantiate `registerModulesIpc` directly and don't exercise
+   * multi-session routing.
+   */
+  sessionId?: SessionId;
   /**
    * Root directory for on-disk disabled-flag persistence. Defaults to
    * `~/.rn-dev/modules/`. Tests override this to an isolated tmpdir.
@@ -1142,6 +1159,32 @@ export function registerModulesIpc(
     ) {
       // handleMessage already sent E_RPC_NOT_AUTHORIZED; do NOT reply again.
       return;
+    }
+
+    // Phase M follow-up — multi-session routing. The daemon's single
+    // IpcServer has N per-session modules listeners (one per active
+    // session). Every listener fires on every message. If the payload
+    // targets a specific session and we're not it, silently bail so
+    // only the targeted session's listener replies. Without this the
+    // first-registered session always wins regardless of sessionId and
+    // sibling sessions' state leaks through. Mirrors the daemon-side
+    // `resolveSessionServices` pattern in client-rpcs.ts for builder /
+    // metro / devtools RPCs.
+    if (effectiveOptions.sessionId !== undefined) {
+      const rawPayload = event.message.payload;
+      const payloadSessionId =
+        rawPayload &&
+        typeof rawPayload === "object" &&
+        "sessionId" in rawPayload &&
+        typeof (rawPayload as { sessionId?: unknown }).sessionId === "string"
+          ? (rawPayload as { sessionId: string }).sessionId
+          : undefined;
+      if (
+        payloadSessionId !== undefined &&
+        payloadSessionId !== effectiveOptions.sessionId
+      ) {
+        return;
+      }
     }
 
     // Phase 13.5 — register the per-connection sender-bindings

@@ -178,6 +178,7 @@ export async function fakeBootSessionServices(
     manager: moduleHost as FakeModuleHostSurface as unknown as ModuleHostManager,
     registry: moduleRegistry,
     subscribeRegistry: opts.subscribeRegistry,
+    sessionId,
   });
   const moduleEvents = modulesIpc.moduleEvents;
 

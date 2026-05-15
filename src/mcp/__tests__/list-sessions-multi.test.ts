@@ -92,8 +92,8 @@ describe("rn-dev/list-sessions (M2)", () => {
     const ctx = makeCtx([], null);
     const tools = createToolDefinitions(ctx);
     const tool = tools.find((t) => t.name === "rn-dev/list-sessions")!;
-    const out = (await tool.handler({})) as { sessions: unknown[] };
-    expect(out).toEqual({ sessions: [] });
+    const out = (await tool.handler({})) as ToolResult;
+    expect(out.structuredContent).toEqual({ sessions: [] });
   });
 
   it("queries the daemon's sessions/list RPC and surfaces the full snapshot", async () => {
@@ -128,8 +128,10 @@ describe("rn-dev/list-sessions (M2)", () => {
     );
     const tools = createToolDefinitions(ctx);
     const tool = tools.find((t) => t.name === "rn-dev/list-sessions")!;
-    const out = (await tool.handler({})) as { sessions: unknown[] };
-    expect(out.sessions).toEqual(daemonSnapshot.sessions);
+    const out = (await tool.handler({})) as ToolResult;
+    expect(
+      (out.structuredContent as { sessions: unknown[] }).sessions,
+    ).toEqual(daemonSnapshot.sessions);
   });
 
   it("uses any attached session's socket — sessions/list is daemon-global", async () => {
@@ -184,8 +186,10 @@ describe("rn-dev/list-sessions (M2)", () => {
     );
     const tools = createToolDefinitions(ctx);
     const tool = tools.find((t) => t.name === "rn-dev/list-sessions")!;
-    const out = (await tool.handler({})) as { sessions: unknown[] };
-    expect(out.sessions).toEqual([]);
+    const out = (await tool.handler({})) as ToolResult;
+    expect(
+      (out.structuredContent as { sessions: unknown[] }).sessions,
+    ).toEqual([]);
   });
 });
 

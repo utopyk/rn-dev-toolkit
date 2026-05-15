@@ -132,8 +132,10 @@ describe("rn-dev/stop-session (M4) — destructive gating", () => {
 
     const out = (await tool.handler({
       permissionsAccepted: ["rn-dev/stop-session"],
-    })) as { sessionId: string; status?: string };
-    expect(out.sessionId).toBe("sid-1");
+    })) as ToolResult;
+    expect((out.structuredContent as { sessionId: string }).sessionId).toBe(
+      "sid-1",
+    );
     expect(session.client.send).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "session/stop",
@@ -152,8 +154,10 @@ describe("rn-dev/stop-session (M4) — destructive gating", () => {
     const tools = createToolDefinitions(ctx);
     const tool = tools.find((t) => t.name === "rn-dev/stop-session")!;
 
-    const out = (await tool.handler({})) as { sessionId: string };
-    expect(out.sessionId).toBe("sid-1");
+    const out = (await tool.handler({})) as ToolResult;
+    expect((out.structuredContent as { sessionId: string }).sessionId).toBe(
+      "sid-1",
+    );
     expect(session.client.send).toHaveBeenCalled();
   });
 });
@@ -203,8 +207,10 @@ describe("rn-dev/stop-session (M4) — sessionId routing", () => {
     const out = (await tool.handler({
       sessionId: "sid-2",
       permissionsAccepted: ["rn-dev/stop-session"],
-    })) as { sessionId: string };
-    expect(out.sessionId).toBe("sid-2");
+    })) as ToolResult;
+    expect((out.structuredContent as { sessionId: string }).sessionId).toBe(
+      "sid-2",
+    );
     expect(s2.client.send).toHaveBeenCalledWith(
       expect.objectContaining({
         action: "session/stop",

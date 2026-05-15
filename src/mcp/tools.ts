@@ -605,9 +605,14 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
           makeIpcMessage("session/stop", { sessionId: resolved.sessionId }),
         );
         const payload = (resp.payload as Record<string, unknown>) ?? {};
+        // outputSchema declared above means the MCP SDK rejects responses
+        // without structuredContent. Wrap so the schema and the wire shape
+        // agree.
         return {
-          sessionId: resolved.sessionId,
-          ...payload,
+          structuredContent: {
+            sessionId: resolved.sessionId,
+            ...payload,
+          },
         };
       },
     },
@@ -641,13 +646,15 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         // session's subscribe socket works; resolveAnySession picks the
         // default (or any first entry as fallback).
         const anySession = resolveAnySession(ctx);
-        if (!anySession) return { sessions: [] };
+        if (!anySession) {
+          return { structuredContent: { sessions: [] } };
+        }
         const resp = await anySession.session.client.send(
           makeIpcMessage("sessions/list"),
         );
         const payload = resp.payload as { sessions?: unknown } | undefined;
         const raw = Array.isArray(payload?.sessions) ? payload.sessions : [];
-        return { sessions: raw };
+        return { structuredContent: { sessions: raw } };
       },
     },
     {

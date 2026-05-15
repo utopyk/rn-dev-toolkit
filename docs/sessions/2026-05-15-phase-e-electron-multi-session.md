@@ -2,11 +2,15 @@
 
 ## What landed
 
-Three commits, 32 commits ahead of origin (local-only per [[workflow-local-only-personal-account]]):
+Five commits, 34 commits ahead of origin (local-only per [[workflow-local-only-personal-account]]):
 
 - `2d9e7d4` feat(electron): Phase E1 — sessions Map + ModuleHostClient sessionId threading
 - `4328714` feat(electron): Phase E2+E3 — per-session metro/devtools/tools/modules client maps
 - `1d537bf` feat(renderer): Phase E4+E5 — multi-session UX cleanup + InstanceTabs parity tests
+- `c65350d` docs: Phase E1-E5 session handoff (this doc, superseded by the post-E6 edit below)
+- `cedaa96` test(electron): Phase E6+E6.5 — real-boot multi-session Playwright probes
+
+**Phase E is fully closed.** All sub-slices E1 through E6.5 landed with real-boot validation against the acme-mobile-app project + physical iPhone 15 Pro.
 
 ## Architecture
 
@@ -26,16 +30,19 @@ The Electron host now multiplexes the daemon's per-session adapters cleanly:
 ## Gate
 
 ```bash
-npx vitest run                                                        # 1477 + 6 skipped (0 fail)
-npx tsc --noEmit -p electron/tsconfig.json                            # clean
-npx tsc --noEmit 2>&1 | grep -v "src/ui/" | grep "error TS" | wc -l   # 4 baseline
-npm run test:smoke                                                    # 13 pass + 4 skipped (32.2s)
+npx vitest run                                                                                    # 1477 + 6 skipped (0 fail)
+npx tsc --noEmit -p electron/tsconfig.json                                                        # clean
+npx tsc --noEmit 2>&1 | grep -v "src/ui/" | grep "error TS" | wc -l                               # 4 baseline
+npm run test:smoke                                                                                # 13 pass + 4 skipped (32s)
+REAL_BOOT_SMOKE=1 npx playwright test --config tests/electron-real-e2e/playwright.config.ts \
+  tests/electron-real-e2e/multi-session-electron.spec.ts                                          # 2 pass (9.2s)
 ```
 
-+9 new tests landed:
++11 new tests landed:
 
 - `src/app/client/__tests__/module-host-adapter.test.ts` (+5): sessionId-in-payload for call/host-call/bind-sender, payload-clean for non-session-scoped RPCs (list/listPanels), graceful fall-through when getSessionId returns null.
 - `renderer/components/__tests__/InstanceTabs.test.tsx` (+4): two-instance render, inactive-tab click selects the second instance, closing the second tab doesn't fire onClose for the first, add-button is single-fire.
+- `tests/electron-real-e2e/multi-session-electron.spec.ts` (+2, REAL_BOOT_SMOKE=1 gated): E6 serial path (click + → wizard → second profile → both tabs running → close one survives the other) and E6.5 concurrent path (two `instances:create` dispatched in parallel land cleanly, ≤2 sessions, no duplicate sessionIds, PORT_B binds).
 
 ## Decisions made
 
@@ -48,60 +55,55 @@ npm run test:smoke                                                    # 13 pass 
 
 ## Parked / known issues
 
-- **E6 + E6.5 real-boot Playwright spec.** Plan calls for `tests/electron-real-e2e/multi-session-electron.spec.ts` (two tabs from one daemon, close one → modal Confirm → other survives). Needs a physical device + the existing `extraProfiles` infrastructure at [tests/electron-real-e2e/launch.ts:103-126](../../tests/electron-real-e2e/launch.ts). The serial happy path + concurrent race variant per § C3 E6.5 are next-session work. The architecture is correct under all three unit + smoke layers; real-boot is the validation that catches "this is correct in isolation but the boot ordering across two simultaneous daemon attaches surfaces a race the listener filter doesn't cover."
-- **CloseSessionModal-as-a-component test.** The close-confirm modal lives inline in App.tsx (lines 688-717). Testing it requires mounting the whole App with stubbed IPC bridge — bigger lift than the InstanceTabs unit test. The InstanceTabs tests cover the close-click → onClose path; the modal-confirm path is covered by the smoke suite end-to-end. A focused App-level integration test is a nice-to-have, not a blocker.
+- **D7 (`multi-session-daemon.spec.ts`) stopResp.ok shape.** First D7 test now gets past the daemon-files race (same waitFor patch as E6) but fails at `expect((stopResp.payload as { ok?: boolean })?.ok).toBe(true)` — `session/stop` no longer surfaces `{ok: true}` at the bare payload level. Likely a follow-on to Phase M's structuredContent wrapping that affected an internal shape D7 depends on. Out of scope for E; the D7 leak-cleanup test passes after the race fix.
+- **CloseSessionModal-as-a-component test.** The close-confirm modal lives inline in App.tsx (lines 688-717). Testing it requires mounting the whole App with stubbed IPC bridge — bigger lift than the InstanceTabs unit test. The InstanceTabs tests cover the close-click → onClose path; the modal-confirm path is covered by the smoke suite end-to-end AND by E6 real-boot (clicks through the actual modal). A focused App-level integration test is a nice-to-have, not a blocker.
 - **CloseSessionModal `Esc` key.** Already wired in App.tsx (lines 501-513); no test today. Would catch a future refactor that ditches the keydown listener.
 - **MCP outputSchema audit.** Still parked from Phase M handoff — only `stop-session` + `list-sessions` were wrapped this cycle. Other tools with `outputSchema` may have the same bare-return defect, unmasked next time a probe exercises them.
 - **TUI multi-session (Phase T).** Depends on TUI adapter sessionId-in-payload fix. Pre-existing single-session; not regressed by E. Tracked at [[code-fact-daemon-resolves-session-by-payload]].
 - **`session-events-envelope` parallel-load flake.** Pre-existing; passes in isolation. Unrelated.
-- **`@/` import path style for new files.** Mixed `node:events` vs `events` imports — non-blocking but inconsistent. Cleanup pass when convenient.
+- **launch.ts `extraProfiles` always writes `branch: "main"`** (line 110) even in real-mode. The default profile picks up the real branch dynamically; extraProfiles should too. Not blocking E6 (the profile is loaded by name, not by branch-match), but the inconsistency will bite a future probe that does match by branch.
+- **Smoke + real-e2e suites still leak daemons across runs.** Pre-existing per `middle_phase_complete.md`. E6's teardown is symmetric with D7's; both rely on `teardownRealE2e` which has its own pid-then-rmSync ordering.
 
 ## Next-session prompt
 
 ```
-Pick up at: Phase E6 + E6.5 — real-boot Electron multi-session.
+Pick up at: Phase T (TUI multi-session) OR the parked D7 stopResp.ok regression.
 Session doc: docs/sessions/2026-05-15-phase-e-electron-multi-session.md
-Plan: docs/plans/2026-05-12-feat-multi-session-daemon-and-electron-plan.md (§ E6, § C3 E6.5)
-Repo: /Users/martincouso/Downloads/rn-dev-cli, branch main @ 1d537bf, 32 commits ahead of origin (local-only, do not push).
+Plan: docs/plans/2026-05-12-feat-multi-session-daemon-and-electron-plan.md (§ T1-T2)
+Repo: /Users/martincouso/Downloads/rn-dev-cli, branch main @ cedaa96, 34 commits ahead of origin (local-only, do not push).
 
-Phase E1–E5 closed. State, IPC, adapter, and renderer all multi-session-aware:
-- state.sessions Map<SessionId, SessionRecord> + activeSessionId
-- ModuleHostClient stamps sessionId in modules/call,host-call,bind-sender (wire-contract parity with M-phase fix 48fde5b)
-- metro/devtools/tools/modules clients keyed by SessionId
-- DevTools fan-out scoped per session
-- registerModule*Handlers resolve per-call against active session
-- InstanceTabs covers multi-instance render/select/close
-- PROFILE_MISMATCH dead code retired
+Phase E1–E6.5 fully closed. State, IPC, adapter, renderer, AND real-boot
+validation all complete. Multi-session is production-correct for the
+Electron + MCP arms (per [[phase-m-complete]] and [[phase-e-electron-multi-session-landed]]).
 
-Standard gate green: 1477 vitest + 4 tsc baseline + 0 electron tsc + 13/13 smoke.
+Standard gate green: 1477 vitest + 4 tsc baseline + 0 electron tsc + 13/13 smoke + 2/2 E6 real-boot.
 
-Phase E6 + E6.5 sub-slices (per plan):
-  E6: REAL_BOOT_SMOKE happy-serial path — tests/electron-real-e2e/multi-session-electron.spec.ts
-      - Use existing extraProfiles support at tests/electron-real-e2e/launch.ts:103-126
-      - Two profiles { iphone, android } against acme-mobile-app fixture
-      - Click "+" → second session, two tabs visible
-      - Switch tabs → DevTools panel renders focused session's data
-      - Close one tab → modal Confirm → that session's Metro stops, OTHER session's lsof shows port still bound
-  E6.5: Concurrent race variant — split from E6
-      - Both instances:create dispatched in parallel (no wait between)
-      - Assert both reach `running` without cross-contamination
-      - Asserts there is no race in `pendingCreate` (state.sessions.size cap) under concurrency
+Two parallel candidate slices, pick one:
 
-Before starting:
-- Read docs/sessions/2026-05-15-phase-e-electron-multi-session.md end-to-end.
-- Read tests/electron-real-e2e/launch.ts to understand the extraProfiles call shape.
-- Probe E6 with REAL_BOOT_SMOKE=1 npx playwright test --config tests/electron-real-e2e/playwright.config.ts after writing it.
-- Need physical device or a working pair of simulators bootable concurrently (the two-iOS-simulator path is what the acme team runs in their pair-programming sessions).
+1. **Phase T (TUI multi-session)** — plan § T1-T2.
+   Wire sessionId into TUI's `builder-adapter.ts`, `metro-adapter.ts`,
+   `devtools-adapter.ts` RPC payloads (parity with the M-phase MCP fix
+   `48fde5b` and the E-phase Electron ModuleHostClient fix). The TUI is
+   currently single-session by convention; multi-session would need a
+   UI affordance (Ctrl-1/Ctrl-2 to switch active session per § T1) and
+   start-flow refactor (`let session` → `const sessions: Map<SessionId, DaemonSession>`).
+   Smaller diff than E because the TUI has no tab strip / modal / per-
+   panel state — just the input handler.
 
-Highest-leverage next slice: E6 happy serial path. Once that's green, E6.5
-(concurrent race variant) is a small delta. E5's missing
-CloseSessionModal-as-component test can drop in alongside.
+2. **D7 stopResp.ok regression** — first test in tests/electron-real-e2e/multi-session-daemon.spec.ts.
+   After the Phase E daemon-files race fix landed, the test gets further
+   but fails at the session/stop response shape. Likely a follow-on to
+   Phase M's structuredContent wrapping. Investigate `session/stop`
+   handler's return path; trace where `{ ok: true }` was emitted vs
+   wrapped. Small surface, but blocks the D7 gate.
 
-Parked:
+Other parked items (cheaper, do alongside):
+- CloseSessionModal-as-component renderer test (App.tsx integration).
 - MCP outputSchema audit across remaining tools.
-- Phase T (TUI multi-session) — depends on TUI adapter sessionId-in-payload.
-- session-events-envelope parallel-load flake.
-- Phase X3 solution doc — write after E6 lands.
+- launch.ts extraProfiles `branch: "main"` hardcode fix.
+- Phase X3 solution doc — write to capture the multi-session pattern
+  for future refactors (Map<sessionId>, sessionId-in-payload rule,
+  per-call deps resolution).
 ```
 
 ## Related memories

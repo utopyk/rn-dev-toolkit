@@ -11,6 +11,7 @@ import type {
   NetworkEntry,
   NetworkFilter,
 } from "../../core/devtools/types.js";
+import type { SessionId } from "../../core/identifiers.js";
 import type { AdapterSink, DevToolsEventKind } from "./adapter-sink.js";
 import type { IpcSender } from "./session.js";
 
@@ -32,8 +33,16 @@ export class DevToolsClient
   constructor(
     private client: IpcSender,
     private nextId: () => string,
+    // Phase E wire-contract follow-on. See builder-adapter.ts for rationale.
+    private getSessionId: () => SessionId | null = () => null,
   ) {
     super();
+  }
+
+  private payloadWithSession(extra?: Record<string, unknown>): Record<string, unknown> | undefined {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) return extra;
+    return { ...(extra ?? {}), sessionId };
   }
 
   /**
@@ -51,7 +60,7 @@ export class DevToolsClient
       type: "command",
       action: "devtools/listNetwork",
       id: this.nextId(),
-      payload: filter !== undefined ? { filter } : undefined,
+      payload: this.payloadWithSession(filter !== undefined ? { filter } : undefined),
     });
     return resp.payload as CaptureListResult<NetworkEntry>;
   }
@@ -61,6 +70,7 @@ export class DevToolsClient
       type: "command",
       action: "devtools/status",
       id: this.nextId(),
+      payload: this.payloadWithSession(),
     });
     return resp.payload as DevToolsStatus;
   }
@@ -70,6 +80,7 @@ export class DevToolsClient
       type: "command",
       action: "devtools/clear",
       id: this.nextId(),
+      payload: this.payloadWithSession(),
     });
   }
 
@@ -78,7 +89,7 @@ export class DevToolsClient
       type: "command",
       action: "devtools/selectTarget",
       id: this.nextId(),
-      payload: { targetId },
+      payload: this.payloadWithSession({ targetId }),
     });
     const p = resp.payload as { ok?: boolean; code?: string; message?: string };
     if (p?.code) {
@@ -98,6 +109,7 @@ export class DevToolsClient
       type: "command",
       action: "devtools/restart",
       id: this.nextId(),
+      payload: this.payloadWithSession(),
     });
     // Mirror selectTarget's `p?.code` pattern + add a malformed-response
     // guard so a daemon that ever returns null/undefined doesn't trip

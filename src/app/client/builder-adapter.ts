@@ -6,6 +6,7 @@
 
 import { EventEmitter } from "node:events";
 import type { BuildOptions } from "../../core/builder.js";
+import type { SessionId } from "../../core/identifiers.js";
 import type { AdapterSink, BuilderEventKind } from "./adapter-sink.js";
 import type { IpcSender } from "./session.js";
 
@@ -67,22 +68,29 @@ export class BuilderClient
   constructor(
     private client: IpcSender,
     private nextId: () => string,
-    opts: { ringSize?: number } = {},
+    opts: { ringSize?: number; getSessionId?: () => SessionId | null } = {},
   ) {
     super();
     this.ringSize = opts.ringSize ?? DEFAULT_BUILDER_RING_SIZE;
+    this.getSessionId = opts.getSessionId ?? (() => null);
   }
 
+  private getSessionId: () => SessionId | null;
+
   async build(opts: BuildOptions): Promise<void> {
-    // `IpcMessage.payload` is typed `unknown`, so `BuildOptions`
-    // assigns directly — no cast needed. An earlier iteration went
-    // through `as unknown as Record<string, unknown>` for no reason
-    // (Kieran P0-2 on PR #17).
+    // Phase E wire-contract follow-on. Under N>1 sessions the daemon's
+    // `resolveSessionServices` rejects with E_SESSION_AMBIGUOUS when
+    // payload.sessionId is missing — the back-compat "use the only
+    // session" fallback only kicks in at sessions.size === 1. Thread
+    // the bound sessionId into every per-session RPC so the daemon
+    // routes to THIS session's Builder. Same fix shape as ModuleHostClient
+    // (Phase E1) and the M-phase 48fde5b daemon-side modules listener.
+    const sessionId = this.getSessionId();
     await this.client.send({
       type: "command",
       action: "builder/build",
       id: this.nextId(),
-      payload: opts,
+      payload: sessionId !== null ? { ...opts, sessionId } : opts,
     });
   }
 

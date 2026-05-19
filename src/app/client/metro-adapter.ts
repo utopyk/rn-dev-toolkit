@@ -13,6 +13,7 @@
 import { EventEmitter } from "node:events";
 import type { IpcMessage } from "../../core/ipc.js";
 import type { MetroInstance } from "../../core/types.js";
+import type { SessionId } from "../../core/identifiers.js";
 import type { AdapterSink, MetroEventKind } from "./adapter-sink.js";
 import type { IpcSender } from "./session.js";
 
@@ -31,8 +32,18 @@ export class MetroClient extends EventEmitter implements AdapterSink<MetroEventK
   constructor(
     private client: IpcSender,
     private nextId: () => string,
+    // Phase E wire-contract follow-on — under N>1 sessions the daemon's
+    // resolveSessionServices rejects payload-less RPCs with E_SESSION_AMBIGUOUS.
+    // See builder-adapter.ts for the full rationale.
+    private getSessionId: () => SessionId | null = () => null,
   ) {
     super();
+  }
+
+  private payloadWithSession(extra?: Record<string, unknown>): Record<string, unknown> | undefined {
+    const sessionId = this.getSessionId();
+    if (sessionId === null) return extra;
+    return { ...(extra ?? {}), sessionId };
   }
 
   async reload(): Promise<boolean> {
@@ -40,6 +51,7 @@ export class MetroClient extends EventEmitter implements AdapterSink<MetroEventK
       type: "command",
       action: "metro/reload",
       id: this.nextId(),
+      payload: this.payloadWithSession(),
     });
     return readOk(resp);
   }
@@ -49,6 +61,7 @@ export class MetroClient extends EventEmitter implements AdapterSink<MetroEventK
       type: "command",
       action: "metro/devMenu",
       id: this.nextId(),
+      payload: this.payloadWithSession(),
     });
     return readOk(resp);
   }
@@ -58,6 +71,7 @@ export class MetroClient extends EventEmitter implements AdapterSink<MetroEventK
       type: "command",
       action: "metro/getInstance",
       id: this.nextId(),
+      payload: this.payloadWithSession(),
     });
     const p = resp.payload as { instance?: MetroInstance | null };
     return p?.instance ?? null;

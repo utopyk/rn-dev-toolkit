@@ -4,6 +4,7 @@
 // TUI consumer needs them.
 
 import { EventEmitter } from "node:events";
+import type { SessionId } from "../../core/identifiers.js";
 import type { AdapterSink, WatcherEventKind } from "./adapter-sink.js";
 import type { IpcSender } from "./session.js";
 
@@ -28,8 +29,15 @@ export class WatcherClient
   constructor(
     private client: IpcSender,
     private nextId: () => string,
+    // Phase E wire-contract follow-on. See builder-adapter.ts for rationale.
+    private getSessionId: () => SessionId | null = () => null,
   ) {
     super();
+  }
+
+  private payloadWithSession(): Record<string, unknown> | undefined {
+    const sessionId = this.getSessionId();
+    return sessionId !== null ? { sessionId } : undefined;
   }
 
   async start(): Promise<void> {
@@ -37,6 +45,7 @@ export class WatcherClient
       type: "command",
       action: "watcher/start",
       id: this.nextId(),
+      payload: this.payloadWithSession(),
     });
   }
 
@@ -45,6 +54,7 @@ export class WatcherClient
       type: "command",
       action: "watcher/stop",
       id: this.nextId(),
+      payload: this.payloadWithSession(),
     });
   }
 
@@ -53,6 +63,7 @@ export class WatcherClient
       type: "command",
       action: "watcher/isRunning",
       id: this.nextId(),
+      payload: this.payloadWithSession(),
     });
     return (resp.payload as { running?: boolean }).running === true;
   }

@@ -201,19 +201,21 @@ export async function connectToDaemonSession(
     },
   };
 
-  const metro = new MetroClient(channelClient, idGen);
-  const devtools = new DevToolsClient(channelClient, idGen);
-  const builder = new BuilderClient(channelClient, idGen);
-  const watcher = new WatcherClient(channelClient, idGen);
   // Phase E (wire-contract parity, follow-on to Phase M `48fde5b`).
-  // The closure reads the outer `sessionId` variable so the adapter
-  // can stamp every per-session RPC payload (`modules/call`,
-  // `modules/host-call`, `modules/bind-sender`) with the daemon-minted
-  // SessionId. Pre-ack it returns `null` and the adapter falls back to
-  // a payload without sessionId — fine because no RPC call site fires
-  // before the events/subscribe ack populates `sessionId` (adapters
-  // are constructed eagerly but only callable after `await runningPromise`).
-  const modules = new ModuleHostClient(channelClient, client, idGen, () => sessionId);
+  // Every per-session RPC payload carries the daemon-minted sessionId so
+  // the daemon's `resolveSessionServices` routes to THIS session's
+  // services — rather than falling through to the single-session
+  // back-compat (which under N>1 sessions rejects with E_SESSION_AMBIGUOUS).
+  // The closure reads the outer `sessionId` variable; pre-ack it returns
+  // `null` and adapters fall back to a payload without sessionId — fine
+  // because RPC call sites only fire after `await runningPromise`, by
+  // which time the events/subscribe ack has populated `sessionId`.
+  const getSid = (): SessionId | null => sessionId;
+  const metro = new MetroClient(channelClient, idGen, getSid);
+  const devtools = new DevToolsClient(channelClient, idGen, getSid);
+  const builder = new BuilderClient(channelClient, idGen, { getSessionId: getSid });
+  const watcher = new WatcherClient(channelClient, idGen, getSid);
+  const modules = new ModuleHostClient(channelClient, client, idGen, getSid);
   const lifecycle = new SessionClient();
 
   let worktreeKey: string | null = null;

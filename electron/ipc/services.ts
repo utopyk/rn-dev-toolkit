@@ -397,7 +397,13 @@ export async function startRealServices(
 
   const worktreePath = defaultProfile.worktree ?? null;
   const worktreeName = worktreePath ? path.basename(worktreePath) : 'main';
-  const port = findFreePort();
+  // Phase E bug-fix — see instance.ts for the full rationale: the
+  // renderer's instance.port must match the daemon's metroPort or the
+  // DevTools panel + every port-displaying tooltip drift, and DevTools
+  // dies with ERR_CONNECTION_REFUSED.
+  const port = typeof defaultProfile.metroPort === 'number' && defaultProfile.metroPort > 0
+    ? defaultProfile.metroPort
+    : findFreePort();
   const id = `${worktreeName}-${port}`;
 
   let deviceName = 'No device';

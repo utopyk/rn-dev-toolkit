@@ -163,12 +163,36 @@ async function doCreate(data: unknown): Promise<unknown> {
     profileData = profileStore.load(data);
     if (!profileData) return { ok: false, error: `Profile "${data}" not found` };
   } else {
-    profileData = data as { worktree?: string; branch?: string; platform?: 'ios' | 'android' | 'both'; mode?: 'quick' | 'dirty' | 'clean' | 'ultra-clean'; devices?: { ios?: string; android?: string }; name?: string };
+    profileData = data as {
+      worktree?: string;
+      branch?: string;
+      platform?: 'ios' | 'android' | 'both';
+      mode?: 'quick' | 'dirty' | 'clean' | 'ultra-clean';
+      metroPort?: number;
+      devices?: { ios?: string; android?: string };
+      name?: string;
+    };
   }
 
   const worktreePath = profileData.worktree ?? null;
   const worktreeName = worktreePath ? path.basename(worktreePath) : 'main';
-  const port = findFreePort();
+  // Phase E bug-fix — use the profile's `metroPort` instead of
+  // findFreePort's lowest-free scan. Pre-fix the renderer's instance
+  // port ('8081' for tab 1, '8082' for tab 2 — whatever findFreePort
+  // returned) drifted from the daemon's `react-native run-* --port X`
+  // (X = profile.metroPort), so the renderer's DevToolsView tried to
+  // load the React Native fusebox at `localhost:<renderer port>` and
+  // got ERR_CONNECTION_REFUSED because Metro was actually on
+  // `<profile.metroPort>`. Manifested as "DevTools unavailable" for
+  // every tab whose profile's metroPort wasn't 8081. Same bug applied
+  // for `metro:port` IPC + every tooltip that displays the port.
+  //
+  // Fallback to findFreePort only when the profile's metroPort is
+  // missing or invalid — should never happen with wizard-written
+  // profiles (metroPort is required in `Profile`).
+  const port = typeof profileData.metroPort === 'number' && profileData.metroPort > 0
+    ? profileData.metroPort
+    : findFreePort();
   const id = `${worktreeName}-${port}`;
 
   if (instances.has(id)) {

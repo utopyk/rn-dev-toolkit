@@ -306,12 +306,25 @@ export async function connectToDaemonSession(
     const evt = parseSessionEventEnvelope(msg.payload);
     if (!evt) return;
     if (!worktreeKey) worktreeKey = evt.worktreeKey;
-    // Any event = the daemon is alive and making progress. Reset the
-    // idle watchdog. Slow machines and heavy builds (pnpm install, pod
-    // install, gradle, xcodebuild) can run for 30+ minutes; as long as
-    // the daemon emits a lifecycle/log line every < idle window, the
-    // watchdog never fires.
+    // Any event from ANY session = the daemon is alive and making
+    // progress. Reset the idle watchdog before any session-filtering so
+    // a busy sibling-session keeps this connection's watchdog quiet.
     armIdleWatchdog();
+    // Phase E wire-contract follow-on (multi-session client dispatch).
+    // The daemon's `supervisor.onEvent` fans out EVERY session's events
+    // to EVERY subscribed socket — so without this filter, a renderer
+    // with two open tabs sees iOS metro/log events land on the Android
+    // tab's MetroClient (and vice versa). Each Electron tab opens its
+    // own subscribe socket, so each socket must drop events for sessions
+    // other than its own.
+    //
+    // Pre-ack the `sessionId` variable is null; in that window, every
+    // event we see is for THIS session (the daemon's listener only
+    // attaches mid-`events/subscribe` and the ack carries our sessionId).
+    // After ack, filter strictly.
+    if (sessionId !== null && evt.sessionId !== sessionId) {
+      return;
+    }
     // Pre-running session/status edges drive the runningPromise:
     //   starting → running   → resolve
     //   starting → stopped   → reject  (bootSessionServices failed)

@@ -157,6 +157,16 @@ test.describe("Real-boot Electron — two Android tabs capture independent netwo
       console.log("[EA] ✅ tab A captured network");
       await page.screenshot({ path: join(SCREENSHOT_DIR, "01-tabA-network.png") });
 
+      // Open the React Native DevTools tab for instance A and confirm the
+      // renderer's DevTools view reaches `connected` (.devtools-container =
+      // the embedded RN DevTools / Fusebox frame; placeholders use
+      // .devtools-placeholder). This is the GUI-level proof of "DevTools
+      // tab connecting", on top of the daemon-side network capture above.
+      await page.locator('button[aria-label="DevTools"]').click();
+      await expect(page.locator(".devtools-container")).toBeVisible({ timeout: 90_000 });
+      await page.screenshot({ path: join(SCREENSHOT_DIR, "01b-tabA-devtools.png") });
+      console.log("[EA] ✅ tab A DevTools tab connected (RN DevTools loaded)");
+
       // ---- Add tab B (emulator) via the renderer's "+" ----
       grantAndColdStart(ANDROID_B);
       const addBtn = page.locator(".instance-tab-add").first();
@@ -182,6 +192,17 @@ test.describe("Real-boot Electron — two Android tabs capture independent netwo
       }, 5 * 60_000);
       console.log("[EA] ✅ tab B captured network");
       await page.screenshot({ path: join(SCREENSHOT_DIR, "02-tabB-network.png") });
+
+      // Switch to instance B's tab, open its DevTools, confirm it connects
+      // INDEPENDENTLY (its own port/target — proves both tabs' RN DevTools
+      // work side by side).
+      await page.locator(".instance-tab").nth(1).click();
+      await page.locator('button[aria-label="DevTools"]').click();
+      await expect(page.locator(".devtools-container")).toBeVisible({ timeout: 90_000 });
+      const portLabel = await page.locator(".devtools-toolbar-port").first().textContent();
+      console.log(`[EA] tab B DevTools port label: ${portLabel}`);
+      await page.screenshot({ path: join(SCREENSHOT_DIR, "02b-tabB-devtools.png") });
+      console.log("[EA] ✅ tab B DevTools tab connected (RN DevTools loaded)");
 
       // ---- Isolation + steady-state assertions ----
       const portAHolder = lsofListenPid(PORT_A);
@@ -213,6 +234,16 @@ test.describe("Real-boot Electron — two Android tabs capture independent netwo
       expect(deltaB.length, "tab B produced no devtools/delta").toBeGreaterThan(0);
 
       console.log(`[EA] ✅ TWO Android tabs captured independent network — A(${deltaA.length} deltas) B(${deltaB.length} deltas), Metros ${portAHolder}/${portBHolder}`);
+
+      // Optional: hold the window open so a human can eyeball the live
+      // (real-pixel) RN DevTools / Fusebox on each tab — Playwright/CDP
+      // screenshots can't capture the Electron <webview> content.
+      if (process.env.EA_KEEP_OPEN === "1") {
+        // Leave tab B active on the DevTools view for inspection.
+        const holdMin = Number(process.env.EA_KEEP_OPEN_MIN ?? 25);
+        console.log(`[EA] KEEP_OPEN: GUI is live with 2 tabs — inspect each tab's DevTools → Network. Holding ${holdMin} min.`);
+        await page.waitForTimeout(holdMin * 60_000);
+      }
     } finally {
       sub?.close();
       await app.close().catch(() => undefined);

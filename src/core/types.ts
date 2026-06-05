@@ -24,11 +24,21 @@ export interface Profile {
    */
   scheme?: string;
   /**
-   * iOS configuration name. Optional — defaults to "Debug" for
-   * `buildVariant: "debug"` and "Release" for "release". Set when the
-   * project ships custom configurations (e.g. "DebugQA").
+   * Build configuration name. Optional — defaults via `buildVariant`.
+   * Maps to RN CLI's `--mode` on both platforms: the iOS Xcode
+   * configuration (e.g. "Debug"/"DebugQA") or the Android Gradle variant
+   * (e.g. "betaDebug"). Required for Android projects with product
+   * flavors and no plain `debug` variant (the acme case:
+   * beta/production).
    */
   configuration?: string;
+  /**
+   * Android applicationId suffix (e.g. "beta" → `com.acme.beta`),
+   * passed as `--appIdSuffix`. Set when the selected Gradle variant
+   * applies an `applicationIdSuffix` so run-android launches the
+   * installed package rather than the base applicationId. iOS ignores it.
+   */
+  appIdSuffix?: string;
 }
 
 export interface PreflightConfig {

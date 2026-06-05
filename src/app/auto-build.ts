@@ -42,15 +42,15 @@ export function triggerBuildsIfNeeded(
         port: profile.metroPort,
         variant: profile.buildVariant,
         env: profile.env,
-        // iOS scheme + configuration are profile-driven for projects
-        // with multiple schemes (e.g. acme's Acme vs Acme-beta).
-        // Only forward on iOS — Android uses Gradle variants instead.
+        // Configuration is profile-driven on both platforms (it maps to
+        // RN CLI's `--mode`): the iOS Xcode configuration or the Android
+        // Gradle variant. `scheme` is iOS-only (Xcode schemes);
+        // `appIdSuffix` is Android-only (applicationIdSuffix flavors,
+        // e.g. acme beta → com.acme.beta).
+        ...(profile.configuration ? { configuration: profile.configuration } : {}),
         ...(plat === "ios"
-          ? {
-              ...(profile.scheme ? { scheme: profile.scheme } : {}),
-              ...(profile.configuration ? { configuration: profile.configuration } : {}),
-            }
-          : {}),
+          ? { ...(profile.scheme ? { scheme: profile.scheme } : {}) }
+          : { ...(profile.appIdSuffix ? { appIdSuffix: profile.appIdSuffix } : {}) }),
       });
     }
   }, 200);

@@ -541,10 +541,20 @@ function parseBuildOptions(
     }
     configuration = p.configuration;
   }
+  let appIdSuffix: string | undefined;
+  if (p.appIdSuffix !== undefined) {
+    if (typeof p.appIdSuffix !== "string" || p.appIdSuffix.length === 0) {
+      return fail(
+        "E_RPC_INVALID_PAYLOAD",
+        "builder/build.appIdSuffix must be a non-empty string when present",
+      );
+    }
+    appIdSuffix = p.appIdSuffix;
+  }
 
   return {
     ok: true,
-    opts: { projectRoot, platform, port, variant, deviceId, env, scheme, configuration },
+    opts: { projectRoot, platform, port, variant, deviceId, env, scheme, configuration, appIdSuffix },
   };
 }
 

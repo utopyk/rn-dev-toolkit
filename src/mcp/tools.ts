@@ -802,7 +802,8 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
           variant: { type: "string", enum: ["debug", "release"] },
           deviceId: { type: "string", description: "iOS UDID or Android device id; defaults to the session profile's selected device." },
           scheme: { type: "string", description: "iOS scheme; falls back to the session profile's value." },
-          configuration: { type: "string", description: "iOS configuration (e.g. Debug/Release); falls back to variant default." },
+          configuration: { type: "string", description: "Build configuration / variant, maps to RN CLI --mode (iOS Xcode configuration e.g. Debug; Android Gradle variant e.g. betaDebug). Falls back to the profile or variant default." },
+          appIdSuffix: { type: "string", description: "Android applicationId suffix (e.g. beta → com.acme.beta), passed as --appIdSuffix. Falls back to the session profile's value." },
         },
       }),
       handler: async (args) => {
@@ -819,6 +820,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const deviceId = (args.deviceId as string | undefined) ?? profile.devices?.[platform] ?? undefined;
         const scheme = (args.scheme as string | undefined) ?? profile.scheme ?? undefined;
         const configuration = (args.configuration as string | undefined) ?? profile.configuration ?? undefined;
+        const appIdSuffix = (args.appIdSuffix as string | undefined) ?? profile.appIdSuffix ?? undefined;
         const port = profile.metroPort;
 
         const payload: Record<string, unknown> = {
@@ -831,6 +833,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         if (deviceId) payload.deviceId = deviceId;
         if (scheme) payload.scheme = scheme;
         if (configuration) payload.configuration = configuration;
+        if (appIdSuffix) payload.appIdSuffix = appIdSuffix;
 
         const resp = await resolved.record.session.client.send(
           makeIpcMessage("builder/build", payload),

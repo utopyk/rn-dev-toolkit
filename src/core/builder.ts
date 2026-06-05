@@ -14,6 +14,78 @@ function resolveRnBin(projectRoot: string): [string, ...string[]] {
 }
 import type { BuildError } from "./types.js";
 
+/**
+ * Build the `react-native run-<platform>` argv from a BuildOptions.
+ * Pure (no spawn, no I/O) so the CLI-boundary mapping — the part that
+ * has caused real bugs (`--configuration` vs `--mode`, missing Android
+ * variant/appIdSuffix) — is unit-testable in isolation.
+ */
+export function composeRunArgs(options: BuildOptions): string[] {
+  const { platform, deviceId, port, variant, scheme, configuration, appIdSuffix } = options;
+  const args = [`run-${platform}`, "--port", String(port), "--verbose"];
+
+  if (platform === "ios") {
+    if (deviceId) {
+      args.push("--udid", deviceId);
+    }
+    // Scheme + configuration (iOS only). Profile-driven so projects
+    // with multiple schemes (acme has Acme + Acme-beta) can pin
+    // the right one without relying on RN CLI's default heuristic.
+    //
+    // `react-native run-ios` calls the configuration flag `--mode`
+    // (not `--configuration`); pre-existing code passed
+    // `--configuration Release` for release builds, which the CLI
+    // rejected with `error: unknown option '--configuration'`. The
+    // `BuildOptions` field stays semantically-named `configuration`
+    // because that's the Xcode term users recognise; we map to
+    // `--mode` at the CLI boundary.
+    if (scheme) {
+      args.push("--scheme", scheme);
+    }
+    if (configuration) {
+      args.push("--mode", configuration);
+    } else if (variant === "release") {
+      args.push("--mode", "Release");
+    }
+  } else {
+    if (deviceId) {
+      args.push("--deviceId", deviceId);
+    }
+    // Android build variant ("mode" in RN CLI parlance, e.g.
+    // "betaDebug"). Mirrors iOS's configuration→--mode mapping. Projects
+    // with product flavors and no plain `debug` variant (acme:
+    // beta/production) need this or run-android fails with an
+    // ambiguous-variant error. Fall back to the legacy `--variant
+    // release` only when no explicit configuration is given.
+    if (configuration) {
+      args.push("--mode", configuration);
+      // Override the gradle task to `assemble<Variant>` (build only).
+      // RN CLI's default `install<Variant>` task installs the APK on
+      // EVERY connected device, which reinstalls + restarts the apps of
+      // OTHER sessions running on this host — a cross-session disruption
+      // under multi-device use (building session B drops session A's
+      // running app + DevTools target). RN CLI separately does a
+      // device-scoped reverse + `adb -s <deviceId> install` + launch
+      // (installAndLaunchOnDevice, unconditional), so assembling and
+      // letting that step do the install keeps the build scoped to the
+      // one targeted device. Only safe when we know the exact variant
+      // (configuration set); otherwise leave RN CLI's default.
+      const variantName = `${configuration[0]!.toUpperCase()}${configuration.slice(1)}`;
+      args.push("--tasks", `assemble${variantName}`);
+    } else if (variant === "release") {
+      args.push("--variant", "release");
+    }
+    // applicationIdSuffix-bearing variants (acme beta →
+    // com.acme.beta) need the suffix at the CLI boundary so
+    // run-android's launch step targets the installed package.
+    if (appIdSuffix) {
+      args.push("--appIdSuffix", appIdSuffix);
+    }
+  }
+
+  return args;
+}
+
 // Strip ANSI escape codes
 function stripAnsi(text: string): string {
   // eslint-disable-next-line no-control-regex
@@ -46,14 +118,27 @@ export interface BuildOptions {
    */
   scheme?: string;
   /**
-   * iOS configuration to build (Debug/Release/etc.). Optional; defaults
-   * via the variant field (`release` → "Release", `debug` → unset so
-   * RN CLI picks Debug). When set explicitly, passed as
-   * `--configuration <name>` and overrides the variant default. Useful
-   * for projects with custom configurations like "DebugQA" or
-   * "ReleaseStaging".
+   * Build configuration / variant name. Optional; defaults via the
+   * variant field (`release` → "Release", `debug` → unset so RN CLI
+   * picks its default).
+   *
+   * Both platforms map this to RN CLI's `--mode` flag:
+   *  - iOS: the Xcode configuration ("Debug"/"Release"/"DebugQA").
+   *  - Android: the Gradle build variant ("betaDebug"/"productionRelease").
+   *    Required for projects with product flavors and no plain `debug`
+   *    variant — acme's flavors are beta/production, so an unqualified
+   *    `run-android` fails with an ambiguous-variant error.
    */
   configuration?: string;
+  /**
+   * Android applicationId suffix (e.g. "beta" → `com.acme.beta`).
+   * Passed as `--appIdSuffix <suffix>`. Needed when the selected Gradle
+   * variant applies an `applicationIdSuffix`: run-android's launch step
+   * `am start`s the installed package, so without the suffix it tries
+   * the base applicationId and fails to resolve the activity. iOS
+   * ignores this field.
+   */
+  appIdSuffix?: string;
 }
 
 export interface BuildResult {
@@ -201,43 +286,11 @@ export class Builder extends EventEmitter {
       return { buildId, promise, cancel: () => {} };
     }
 
-    const { projectRoot, platform, deviceId, port, variant, env, scheme, configuration } = options;
+    const { projectRoot, platform, env } = options;
 
-    const args = [`run-${platform}`, "--port", String(port), "--verbose"];
+    const args = composeRunArgs(options);
 
     this.detectedXcresultPath = null;
-
-    if (platform === "ios") {
-      if (deviceId) {
-        args.push("--udid", deviceId);
-      }
-      // Scheme + configuration (iOS only). Profile-driven so projects
-      // with multiple schemes (acme has Acme + Acme-beta) can
-      // pin the right one without relying on RN CLI's default heuristic.
-      //
-      // `react-native run-ios` calls the configuration flag `--mode`
-      // (not `--configuration`); pre-existing code passed
-      // `--configuration Release` for release builds, which the CLI
-      // rejected with `error: unknown option '--configuration'`. The
-      // `BuildOptions` field stays semantically-named `configuration`
-      // because that's the Xcode term users recognise; we map to
-      // `--mode` at the CLI boundary.
-      if (scheme) {
-        args.push("--scheme", scheme);
-      }
-      if (configuration) {
-        args.push("--mode", configuration);
-      } else if (variant === "release") {
-        args.push("--mode", "Release");
-      }
-    } else {
-      if (deviceId) {
-        args.push("--deviceId", deviceId);
-      }
-      if (variant === "release") {
-        args.push("--variant", "release");
-      }
-    }
 
     const [cmd, ...cmdPrefix] = resolveRnBin(projectRoot);
 

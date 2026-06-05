@@ -179,6 +179,14 @@ export function validateProfile(input: unknown): ValidateProfileResult {
       );
     }
   }
+  if (p.appIdSuffix !== undefined) {
+    if (typeof p.appIdSuffix !== "string" || p.appIdSuffix.length === 0) {
+      return fail(
+        "E_PROFILE_APP_ID_SUFFIX",
+        "profile.appIdSuffix must be a non-empty string when present",
+      );
+    }
+  }
 
   // Input is now shape-safe; mint the branded type so downstream APIs
   // that require a validated profile (e.g. HookManager.fire) accept it.

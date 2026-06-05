@@ -23,6 +23,7 @@ describe("composeRunArgs — iOS", () => {
       "--port",
       "8081",
       "--verbose",
+      "--no-packager",
       "--udid",
       "00008130-ABC",
     ]);
@@ -68,6 +69,7 @@ describe("composeRunArgs — Android (acme product-flavor case)", () => {
       "--port",
       "8090",
       "--verbose",
+      "--no-packager",
       "--deviceId",
       "R5CX23WBLKE",
       "--mode",

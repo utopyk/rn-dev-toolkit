@@ -22,7 +22,13 @@ import type { BuildError } from "./types.js";
  */
 export function composeRunArgs(options: BuildOptions): string[] {
   const { platform, deviceId, port, variant, scheme, configuration, appIdSuffix } = options;
-  const args = [`run-${platform}`, "--port", String(port), "--verbose"];
+  // `--no-packager`: rn-dev's daemon owns Metro (MetroManager starts
+  // `react-native start` on this port). Without this flag, run-ios/
+  // run-android each try to launch their OWN packager in a new terminal
+  // window (`launchPackager.command`), which collides with the daemon's
+  // Metro (`EADDRINUSE`) and litters a terminal window per build. Tell
+  // the CLI to skip the bundler — the app loads from the daemon's Metro.
+  const args = [`run-${platform}`, "--port", String(port), "--verbose", "--no-packager"];
 
   if (platform === "ios") {
     if (deviceId) {

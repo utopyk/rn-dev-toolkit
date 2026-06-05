@@ -27,6 +27,7 @@ import {
 } from "../src/app/client/session.js";
 import { serviceBus } from "../src/app/service-bus.js";
 import type { Profile } from "../src/core/types.js";
+import type { SessionId } from "../src/core/identifiers.js";
 
 /**
  * Locate the rn-dev CLI entry so `connectToDaemon` can cold-spawn a
@@ -74,7 +75,11 @@ function resolveDaemonEntry(): string {
 
 export interface ConnectElectronToDaemonOptions {
   projectRoot: string;
-  profile: Profile;
+  /**
+   * Boot-or-join profile. `null` only in observe mode (attach-by-id),
+   * where the daemon ignores profile and resolves by `attachSessionId`.
+   */
+  profile: Profile | null;
   /**
    * Override the CLI entry resolver. Tests inject this so they don't
    * accidentally cold-spawn a daemon off the dev entry. Production
@@ -82,6 +87,17 @@ export interface ConnectElectronToDaemonOptions {
    * dev + packaged layouts.
    */
   daemonEntry?: string;
+  /**
+   * Observe mode — attach read-only to an existing (agent/MCP) session
+   * by id instead of booting/joining a profile. The GUI's SessionsWatcher
+   * sets these to surface "watch the agent" tabs. `observer: true` makes
+   * the daemon attach non-counting (observing never keeps a session
+   * alive); `worktreeKeyHint` (from `sessions/list`) skips the ambiguous
+   * worktreeKey backfill under N>1 sessions.
+   */
+  attachSessionId?: SessionId;
+  observer?: boolean;
+  worktreeKeyHint?: string;
 }
 
 /**
@@ -108,6 +124,15 @@ export async function connectElectronToDaemon(
   // truly stuck daemon — no progress events whatsoever — fails fast.
   const session = await connectToDaemonSession(opts.projectRoot, opts.profile, {
     daemonEntry: opts.daemonEntry ?? resolveDaemonEntry(),
+    ...(opts.attachSessionId !== undefined
+      ? {
+          attachSessionId: opts.attachSessionId,
+          observer: opts.observer ?? false,
+          ...(opts.worktreeKeyHint !== undefined
+            ? { worktreeKeyHint: opts.worktreeKeyHint }
+            : {}),
+        }
+      : {}),
   });
 
   serviceBus.setMetro(session.sessionId, session.metro);

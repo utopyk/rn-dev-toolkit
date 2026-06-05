@@ -1,8 +1,16 @@
 # Feature spec — GUI observes agent/MCP-driven sessions ("watch the AI work")
 
 **Date:** 2026-06-05
-**Status:** spec / design (not yet implemented)
-**Origin:** user question during the multi-session Android capture verification — "if an LLM uses the MCP client, do I get to see it through the Electron app somehow?" Today the answer is **no**; this spec closes that gap.
+**Status:** Phase 1 IMPLEMENTED (2026-06-05). Phases 2 (take-over) + 3 (origin labels) still spec-only.
+**Origin:** user question during the multi-session Android capture verification — "if an LLM uses the MCP client, do I get to see it through the Electron app somehow?" Before this, the answer was **no**; Phase 1 closes that gap.
+
+## Implementation note (Phase 1, 2026-06-05)
+
+Built per `docs/plans/2026-06-05-feat-gui-observes-mcp-sessions.md` (this file) + the approved implementation plan. One deliberate deviation from this spec's optimistic "no daemon change" (step 4 below): a small daemon change WAS required. A naive observer attach via `events/subscribe {sessionId}` counts toward the session's teardown refcount, and the daemon has **no idle reaper**, so an observer would pin the agent's session (and its Metro port) alive forever after the agent released. Fix: `events/subscribe` attach-by-id accepts an `observer: true` flag; observer connections live in a separate non-counting set (`SessionEntry.observerConnections`) that never gates teardown. `DAEMON_VERSION` bumped to `0.1.3`.
+
+Surface decisions (confirmed with the user): external sessions **auto-appear as badged 🤖 tabs** (no click); mutating controls are **disabled with a read-only banner**; closing an observe tab detaches only the observer (never `session/stop`). Discovery is a refcount-free `sessions/list` poll from the Electron main (`electron/ipc/sessions.ts` `SessionsWatcher`, gated on `isDaemonAlive`, never `connectToDaemon`).
+
+**The Fusebox-on-shared-proxy risk (this spec's §"Risks / open") is RESOLVED:** the real-boot probe (`tests/electron-real-e2e/gui-observes-mcp-session.spec.ts`) verified on the workspace-1 emulator that the GUI opening Fusebox through the agent's per-session CDP proxy does NOT break the agent's `devtools-network` capture (proxy + targets survive). The delta-fed-list contingency was not needed.
 
 ## Problem
 

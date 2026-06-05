@@ -2,6 +2,7 @@ import { app, BrowserWindow } from 'electron';
 import path from 'path';
 import { setupIpcBridge, startRealServices } from './ipc/index.js';
 import { setElectronQuitting } from './ipc/services.js';
+import { SessionsWatcher } from './ipc/sessions.js';
 import { state } from './ipc/state.js';
 import { detectProjectRoot } from '../src/core/project.js';
 import { serviceBus } from '../src/app/service-bus.js';
@@ -9,6 +10,10 @@ import { serviceBus } from '../src/app/service-bus.js';
 const isDev = !app.isPackaged;
 
 let mainWindow: BrowserWindow | null = null;
+
+// Polls the shared daemon's sessions/list and auto-surfaces sessions
+// started by other clients (MCP/CLI) as read-only observe tabs.
+const sessionsWatcher = new SessionsWatcher();
 
 // Phase 13.4.1 — the daemon-client session is the ONLY path. Electron
 // main connects to (or cold-spawns) the per-worktree daemon after the
@@ -97,6 +102,14 @@ async function createWindow() {
   // Pass projectRoot to IPC bridge so wizard handlers have it immediately
   setupIpcBridge(mainWindow, projectRoot);
 
+  // Start watching the shared daemon for sessions started by OTHER
+  // clients (an LLM over MCP, the CLI/TUI). Any session this Electron
+  // process didn't create is auto-surfaced as a read-only 🤖 observe
+  // tab. The watcher gates on a live daemon socket each tick, so
+  // starting it before any session exists is safe — it no-ops until a
+  // daemon is up. See electron/ipc/sessions.ts.
+  sessionsWatcher.start();
+
   // Start real services after renderer has loaded. `startRealServices`
   // runs local UX helpers (pm-conflict + code-signing prompts) + the
   // Electron instance bookkeeping, then connects to the daemon —
@@ -149,6 +162,11 @@ app.on('window-all-closed', () => {
   // socket drop in the same tick doesn't fire a spurious "Daemon
   // disconnected" warning at a window that's about to tear down.
   setElectronQuitting(true);
+
+  // Stop polling the daemon for external sessions before tearing the
+  // sessions down — otherwise a final tick could re-observe a session
+  // we're about to disconnect.
+  sessionsWatcher.stop();
 
   // Phase E1 — close every session's subscribe socket. The daemon's
   // per-socket auto-release decrements each session's refcount and

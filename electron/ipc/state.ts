@@ -19,6 +19,14 @@ export interface InstanceState {
   serviceLog: string[];
   metroLog: string[];
   metroStatus: string;
+  /**
+   * True for a tab the GUI is *observing* (an agent/MCP-started session
+   * the user did not create). Observe tabs are read-only: their close
+   * detaches only our observer socket (never kills the agent's session),
+   * mutating controls are disabled, and DevTools target/proxy controls
+   * are hidden. See docs/plans/2026-06-05-feat-gui-observes-mcp-sessions.md.
+   */
+  observed: boolean;
 }
 
 export interface InstanceSummary {
@@ -30,6 +38,7 @@ export interface InstanceSummary {
   deviceIcon: string;
   platform: string;
   metroStatus: string;
+  observed: boolean;
 }
 
 /**
@@ -52,6 +61,15 @@ export interface SessionRecord {
   profileName: string | null;
   attachedAt: number;
   disconnectLogged: boolean;
+  /**
+   * True when this record was created by *observing* an external
+   * (agent/MCP) session via attach-by-id, rather than by the GUI
+   * booting/joining its own session. Drives the read-only teardown
+   * branch in `instances:remove` (disconnect our socket only, never
+   * `session/stop`) and excludes the record from the human MAX_SESSIONS
+   * cap.
+   */
+  observed: boolean;
 }
 
 /**
@@ -61,6 +79,16 @@ export interface SessionRecord {
  * `instances:create` surfaces `E_SESSION_LIMIT_REACHED` past this point.
  */
 export const MAX_SESSIONS = 4;
+
+/**
+ * Cap on concurrently *observed* (agent/MCP) sessions auto-surfaced as
+ * read-only tabs. Separate from `MAX_SESSIONS` so a burst of agent
+ * sessions can't fill the human's create cap — observe tabs are cheap on
+ * the GUI side but each still opens a subscribe socket and streams the
+ * event firehose, so they're bounded too. The watcher logs a dropped
+ * count past this (no silent truncation).
+ */
+export const MAX_OBSERVED_SESSIONS = 4;
 
 export const MAX_LOG_LINES = 1000;
 
@@ -112,6 +140,24 @@ export function getSessionRecordForInstance(
  * tab the user is looking at." Single-session callers (TUI, smoke
  * fixtures with one profile) get the only session.
  */
+/** Count of GUI-created (non-observed) sessions — gates MAX_SESSIONS. */
+export function countNonObservedSessions(): number {
+  let n = 0;
+  for (const record of state.sessions.values()) {
+    if (!record.observed) n++;
+  }
+  return n;
+}
+
+/** Count of observed (agent/MCP) sessions — gates MAX_OBSERVED_SESSIONS. */
+export function countObservedSessions(): number {
+  let n = 0;
+  for (const record of state.sessions.values()) {
+    if (record.observed) n++;
+  }
+  return n;
+}
+
 export function getActiveSessionRecord(): SessionRecord | null {
   if (state.activeSessionId) {
     const record = state.sessions.get(state.activeSessionId);
@@ -149,6 +195,7 @@ export function toSummary(inst: InstanceState): InstanceSummary {
     deviceIcon: inst.deviceIcon,
     platform: inst.platform,
     metroStatus: inst.metroStatus,
+    observed: inst.observed,
   };
 }
 

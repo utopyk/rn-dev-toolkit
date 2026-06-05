@@ -160,11 +160,38 @@ export interface ConnectToDaemonSessionOptions extends ConnectToDaemonOptions {
    * that out would hang the boot. Callers don't need to remember.
    */
   kinds?: string[];
+  /**
+   * Attach-by-id mode. When set, the subscribe payload carries
+   * `{ sessionId }` instead of `{ profile }`, binding this connection to
+   * an already-running session the caller did NOT create (the Electron
+   * GUI uses this to observe agent/MCP-started sessions). The daemon
+   * rejects passing both profile and sessionId, so `profile` is ignored
+   * in this mode — callers pass `null`.
+   */
+  attachSessionId?: SessionId;
+  /**
+   * Read-only observe. Only meaningful with `attachSessionId`. Marks the
+   * attach as a non-counting observer in the daemon, so this connection
+   * can never keep the session alive (see the daemon's
+   * `observerConnections`). The GUI's "watch the agent" tabs set this.
+   */
+  observer?: boolean;
+  /**
+   * Attach-by-id worktreeKey hint. `connectToDaemonSession` normally
+   * learns the worktreeKey from the first session event; for an
+   * already-running attach-by-id the joiner short-circuits before any
+   * event arrives, so it would otherwise issue a *bare* `session/status`
+   * backfill that returns `E_SESSION_AMBIGUOUS` whenever more than one
+   * session is active. Callers that already know the worktreeKey (the
+   * GUI gets it from `sessions/list`) pass it here to skip that backfill
+   * entirely.
+   */
+  worktreeKeyHint?: string;
 }
 
 export async function connectToDaemonSession(
   projectRoot: string,
-  profile: Profile,
+  profile: Profile | null,
   opts: ConnectToDaemonSessionOptions = {},
 ): Promise<DaemonSession> {
   const {
@@ -172,6 +199,15 @@ export async function connectToDaemonSession(
     sessionReadyIdleTimeoutMs = 90_000,
     ...connectOpts
   } = opts;
+
+  // Exactly one of profile (boot-or-join) or attachSessionId
+  // (attach-by-id) must be supplied — mirrors the daemon's
+  // `parseEventsSubscribeInput` two-cell union.
+  if (!profile && !opts.attachSessionId) {
+    throw new Error(
+      "connectToDaemonSession: pass a profile (boot-or-join) or attachSessionId (attach-by-id)",
+    );
+  }
 
   const client = await connectToDaemon(projectRoot, connectOpts);
   const idGen = makeIdGenerator();
@@ -218,7 +254,11 @@ export async function connectToDaemonSession(
   const modules = new ModuleHostClient(channelClient, client, idGen, getSid);
   const lifecycle = new SessionClient();
 
-  let worktreeKey: string | null = null;
+  // Seed worktreeKey from the attach-by-id hint (the caller already has
+  // it from sessions/list). This lets the already-running joiner path
+  // skip the bare `session/status` backfill that would otherwise return
+  // E_SESSION_AMBIGUOUS under N>1 sessions.
+  let worktreeKey: string | null = opts.worktreeKeyHint ?? null;
   let sessionId: SessionId | null = null;
   let resolveRunning!: () => void;
   let rejectRunning!: (err: Error) => void;
@@ -371,16 +411,28 @@ export async function connectToDaemonSession(
         : [...opts.kinds, "session/status"])
     : undefined;
 
+  // Attach-by-id carries `{ sessionId, observer }`; boot-or-join carries
+  // `{ profile }`. The daemon rejects passing both (E_SUBSCRIBE_INVALID_ARGS),
+  // so the two are mutually exclusive.
+  const subscribePayload = opts.attachSessionId
+    ? {
+        sessionId: opts.attachSessionId,
+        observer: opts.observer ?? false,
+        supportsBidirectionalRpc: true,
+        ...(effectiveKinds !== undefined ? { kinds: effectiveKinds } : {}),
+      }
+    : {
+        profile,
+        supportsBidirectionalRpc: true,
+        ...(effectiveKinds !== undefined ? { kinds: effectiveKinds } : {}),
+      };
+
   const sub = await client.subscribe(
     {
       type: "command",
       action: "events/subscribe",
       id: idGen(),
-      payload: {
-        profile,
-        supportsBidirectionalRpc: true,
-        ...(effectiveKinds !== undefined ? { kinds: effectiveKinds } : {}),
-      },
+      payload: subscribePayload,
     },
     {
       onEvent: onIncomingEvent,

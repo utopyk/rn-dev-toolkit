@@ -59,6 +59,18 @@
 .instance-tab-name { font-weight: 600; color: inherit; }
 .instance-tab-device { color: var(--muted); font-size: 11px; }
 
+/* Observe tabs (agent/MCP sessions surfaced read-only). A dashed accent
+ * border + a tinted device label distinguish them from the user's own
+ * tabs without shouting. */
+.instance-tab.observed {
+  border-color: var(--accent-border);
+  border-style: dashed;
+}
+.instance-tab.observed .instance-tab-device {
+  color: var(--accent, var(--booting));
+  font-style: italic;
+}
+
 .instance-dot {
   display: inline-block;
   width: 8px; height: 8px;

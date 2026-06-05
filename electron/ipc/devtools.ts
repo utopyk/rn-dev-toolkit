@@ -75,6 +75,22 @@ function clientForInstance(instanceId?: string): DevToolsClient | null {
   return devtoolsClients.get(active.sessionId) ?? null;
 }
 
+/**
+ * Resolve the SessionRecord an instanceId (or the active tab) maps to.
+ * Used to gate the *mutating* DevTools ops (`select-target`, `restart`)
+ * for observed (read-only) sessions: both swap/restart the SHARED
+ * per-session CDP proxy + selected target the agent's capture module is
+ * reading, so a human observing must not perturb them. The renderer also
+ * hides these controls for observe tabs; this is defense-in-depth.
+ */
+function isObservedInstance(instanceId?: string): boolean {
+  if (instanceId) {
+    const record = getSessionRecordForInstance(instanceId);
+    if (record) return record.observed;
+  }
+  return getActiveSessionRecord()?.observed ?? false;
+}
+
 export function registerDevtoolsHandlers() {
   ipcMain.handle('devtools-network:proxy-port', async (_evt, instanceId?: string) => {
     const client = clientForInstance(instanceId);
@@ -118,6 +134,12 @@ export function registerDevtoolsHandlers() {
     } else {
       return { ok: false, error: 'select-target: invalid arguments' };
     }
+    if (isObservedInstance(instanceId)) {
+      return {
+        ok: false,
+        error: 'Target selection is disabled while observing an agent session (read-only).',
+      };
+    }
     const client = clientForInstance(instanceId);
     if (!client) return { ok: false, error: 'DevTools not started' };
     try {
@@ -131,6 +153,13 @@ export function registerDevtoolsHandlers() {
   });
 
   ipcMain.handle('devtools-network:restart', async (_evt, instanceId?: string) => {
+    if (isObservedInstance(instanceId)) {
+      // Restart disposes + re-starts the shared per-session CDP proxy,
+      // which would tear down the target the agent's capture is reading.
+      // Read-only observers never restart it.
+      console.warn('[devtools-network:restart] refused — observed (read-only) session');
+      return null;
+    }
     const client = clientForInstance(instanceId);
     if (!client) return null;
     try {

@@ -36,6 +36,11 @@ interface ModulePanelListEntry {
 // arrays + DOM from growing without limit during long sessions.
 const MAX_LOG_LINES = 1000;
 
+// Keyboard shortcuts that drive a *mutating* action on the active
+// session. Suppressed when the active tab is a read-only observe tab so
+// a human watching an agent can't reload/clean/toggle the agent's app.
+const MUTATING_SHORTCUTS = new Set(['r', 'd', 'l', 't', 'c', 'w']);
+
 function makeEmptyLogs(): InstanceLogs {
   return { serviceLines: [], metroLines: [], sections: [] };
 }
@@ -390,6 +395,7 @@ export function App() {
 
   // Get the current active instance and its logs
   const activeInstance = instances.find(i => i.id === activeId) ?? null;
+  const activeObserved = activeInstance?.observed === true;
   const activeLogs = activeId ? instanceLogsRef.current.get(activeId) ?? makeEmptyLogs() : makeEmptyLogs();
 
   const activeProfile: ProfileInfo = activeInstance
@@ -409,6 +415,12 @@ export function App() {
       const sel = window.getSelection();
       if (sel && sel.toString().length > 0) return;
       if ((e.target as HTMLElement).tagName === 'INPUT' || (e.target as HTMLElement).tagName === 'TEXTAREA') return;
+
+      // Read-only observe tab: swallow every shortcut that would mutate
+      // the agent's session (reload, dev menu, lint/typecheck/clean,
+      // watcher toggle). Navigation/read keys (Tab, dump logs, quit)
+      // still work.
+      if (activeObserved && MUTATING_SHORTCUTS.has(e.key)) return;
 
       switch (e.key) {
         case 'r':
@@ -456,7 +468,7 @@ export function App() {
 
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [activeTab, invoke, modulePanels]);
+  }, [activeTab, invoke, modulePanels, activeObserved]);
 
   const handleShortcut = useCallback((command: string) => {
     invoke(command);
@@ -478,12 +490,18 @@ export function App() {
   const [closeConfirm, setCloseConfirm] = useState<{
     instanceId: string;
     label: string;
+    observed: boolean;
   } | null>(null);
 
   const handleCloseInstance = useCallback((id: string) => {
     const inst = instances.find((i) => i.id === id);
-    const label = inst ? `${inst.worktreeName}:${inst.port}` : id;
-    setCloseConfirm({ instanceId: id, label });
+    const observed = inst?.observed === true;
+    const label = observed
+      ? 'agent session'
+      : inst
+        ? `${inst.worktreeName}:${inst.port}`
+        : id;
+    setCloseConfirm({ instanceId: id, label, observed });
   }, [instances]);
 
   const confirmCloseInstance = useCallback(() => {
@@ -592,7 +610,7 @@ export function App() {
           />
         );
       case 'devtools':
-        return <DevToolsView metroPort={activeProfile.port} />;
+        return <DevToolsView metroPort={activeProfile.port} readOnly={activeInstance?.observed ?? false} />;
       case 'lint-test':
         return <LintTest />;
       case 'metro-logs':
@@ -679,6 +697,11 @@ export function App() {
           onAdd={handleAddInstance}
         />
         <ProfileBanner profile={activeProfile} />
+        {activeObserved && (
+          <div className="observe-banner" role="status">
+            👁 Observing an agent session — read-only. Reload, Dev Menu, and Build are disabled; closing this tab only stops your view.
+          </div>
+        )}
         <div className="app-content">
           {closeConfirm ? (
             <div
@@ -689,9 +712,15 @@ export function App() {
               }}
             >
               <div className="prompt-modal" role="dialog" aria-modal="true" aria-label="Close instance confirmation">
-                <h3 className="prompt-title">Close {closeConfirm.label}?</h3>
+                <h3 className="prompt-title">
+                  {closeConfirm.observed
+                    ? `Stop observing ${closeConfirm.label}?`
+                    : `Close ${closeConfirm.label}?`}
+                </h3>
                 <p className="prompt-message">
-                  This stops Metro and the daemon&rsquo;s session services for this tab.
+                  {closeConfirm.observed
+                    ? "The agent’s session keeps running — this only closes your read-only view."
+                    : 'This stops Metro and the daemon’s session services for this tab.'}
                 </p>
                 <div className="prompt-options">
                   <button
@@ -705,7 +734,9 @@ export function App() {
                     className="prompt-option"
                     onClick={confirmCloseInstance}
                   >
-                    <span className="prompt-option-label">Close tab</span>
+                    <span className="prompt-option-label">
+                      {closeConfirm.observed ? 'Stop observing' : 'Close tab'}
+                    </span>
                   </button>
                 </div>
               </div>

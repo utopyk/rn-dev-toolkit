@@ -22,7 +22,14 @@
 //           Electron "Reconnect" button surfaces the failure as
 //           "Cannot restart DevTools proxy for Metro on port N" — Bug
 //           5 fix only lands once the running daemon picks this up.
-export const DAEMON_VERSION = "0.1.2";
+//   0.1.3 — `events/subscribe` attach-by-id accepts an `observer` flag
+//           ([rpc-args.ts]). Observer connections are tracked in a
+//           separate non-counting set so the GUI's read-only "watch the
+//           agent" tabs can never keep a session alive. An old daemon
+//           would silently ignore the flag and count the observer toward
+//           teardown (pinning the agent's session), so a mismatch must
+//           restart it — feat: GUI observes agent/MCP sessions.
+export const DAEMON_VERSION = "0.1.3";
 
 // Range of host versions this daemon will accept clients from. Returned
 // in `daemon/ping` responses but not currently enforced — kept for

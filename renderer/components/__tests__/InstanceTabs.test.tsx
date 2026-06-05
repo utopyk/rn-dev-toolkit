@@ -166,3 +166,64 @@ describe('InstanceTabs — multi-session (Phase E5)', () => {
     expect(onAdd).toHaveBeenCalledTimes(1);
   });
 });
+
+// GUI-observes-MCP — agent/MCP sessions surface as read-only 🤖 tabs.
+describe('InstanceTabs — observed (agent/MCP) tabs', () => {
+  beforeEach(() => cleanup());
+
+  const OBSERVED: InstanceInfo = {
+    id: 'agent-1a2b3c4d',
+    worktreeName: 'acme-mobile-app',
+    branch: 'main',
+    port: 8088,
+    deviceName: 'whatever',
+    deviceIcon: '📱',
+    platform: 'android',
+    metroStatus: 'running',
+    observed: true,
+  };
+
+  it('renders a 🤖 badge + read-only label + dashed .observed class', () => {
+    const { container } = render(
+      <InstanceTabs
+        instances={[OBSERVED]}
+        activeId={OBSERVED.id}
+        onClose={vi.fn()}
+        onSelect={vi.fn()}
+        onAdd={vi.fn()}
+      />,
+    );
+    const tab = container.querySelector('.instance-tab.observed');
+    expect(tab).not.toBeNull();
+    expect(tab!.textContent).toContain('🤖');
+    expect(tab!.textContent).toContain('read-only');
+  });
+
+  it('the close button reads "Stop observing", not "Close instance"', () => {
+    render(
+      <InstanceTabs
+        instances={[OBSERVED]}
+        activeId={OBSERVED.id}
+        onClose={vi.fn()}
+        onSelect={vi.fn()}
+        onAdd={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole('button', { name: /stop observing/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /close instance/i })).toBeNull();
+  });
+
+  it('a GUI tab and an observed tab coexist; only the observed one is badged', () => {
+    const { container } = render(
+      <InstanceTabs
+        instances={[SAMPLE, OBSERVED]}
+        activeId={SAMPLE.id}
+        onClose={vi.fn()}
+        onSelect={vi.fn()}
+        onAdd={vi.fn()}
+      />,
+    );
+    expect(container.querySelectorAll('.instance-tab')).toHaveLength(2);
+    expect(container.querySelectorAll('.instance-tab.observed')).toHaveLength(1);
+  });
+});

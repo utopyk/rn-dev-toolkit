@@ -136,6 +136,18 @@ export interface SessionEntry {
   sessionWorktreeKey: string;
   attachedConnections: Set<string>;
   /**
+   * Read-only observer connections (the Electron GUI's "watch the
+   * agent" tabs). They receive the full event fan-out exactly like
+   * attached connections, but are tracked separately because they MUST
+   * NOT count toward the teardown refcount: the daemon tears a session
+   * down only when `attachedConnections.size === 0`, and there is no
+   * idle reaper, so a counting observer would pin an agent's session
+   * (and its Metro/devtools subprocesses + port) alive forever after
+   * the agent itself released. Observing must never keep a session
+   * alive. See docs/plans/2026-06-05-feat-gui-observes-mcp-sessions.md.
+   */
+  observerConnections: Set<string>;
+  /**
    * Phase D4 — every `(moduleId, scopeUnit, consumerId)` triple this
    * session has acquired through `services.moduleHost.acquire()`.
    * After `bootAsync` wires services, the reference is reassigned to
@@ -229,6 +241,7 @@ export class DaemonSupervisor extends EventEmitter {
       bootInFlight: null,
       sessionWorktreeKey,
       attachedConnections: new Set(),
+      observerConnections: new Set(),
       acquiredModules: [],
     };
     this.sessions.set(sessionId, entry);
@@ -290,6 +303,7 @@ export class DaemonSupervisor extends EventEmitter {
     sessionId: SessionId,
     connectionId: string,
     profile: ValidatedProfile,
+    observer = false,
   ): AttachSessionResult {
     const entry = this.sessions.get(sessionId);
     if (!entry) {
@@ -313,7 +327,16 @@ export class DaemonSupervisor extends EventEmitter {
         message: `session ${sessionId} runs profile "${entry.activeProfile.name}"; cannot attach to "${profile.name}"`,
       };
     }
-    entry.attachedConnections.add(connectionId);
+    // Observer attaches go into a separate set that does NOT gate
+    // teardown — see `observerConnections` on SessionEntry. `attached`
+    // always reports the real refcount (observers excluded) so
+    // `session/status.attached` and any future "am I the last attacher"
+    // logic stay honest.
+    if (observer) {
+      entry.observerConnections.add(connectionId);
+    } else {
+      entry.attachedConnections.add(connectionId);
+    }
     return {
       kind: "ok",
       status: entry.state.status,
@@ -414,6 +437,12 @@ export class DaemonSupervisor extends EventEmitter {
     const toStop: SessionEntry[] = [];
     for (const entry of this.sessions.values()) {
       const wasAttached = entry.attachedConnections.delete(connectionId);
+      // Always drop the connId from the observer set too — a socket
+      // close fires this for every session, and leaving a dead observer
+      // id behind would slowly leak. Observer releases never trigger
+      // teardown: `wasAttached` is false (they were never counted), so
+      // the predicate below can't fire on them.
+      entry.observerConnections.delete(connectionId);
       if (
         wasAttached &&
         entry.attachedConnections.size === 0 &&
@@ -474,6 +503,7 @@ export class DaemonSupervisor extends EventEmitter {
       // entry would block the next attach() from booting via the
       // first-attacher branch.
       entry.attachedConnections.clear();
+      entry.observerConnections.clear();
       this.sessions.delete(entry.sessionId);
       return { kind: "ok", status: "stopped" };
     }
@@ -488,7 +518,11 @@ export class DaemonSupervisor extends EventEmitter {
     // session/stop is the kill-for-everyone path (distinct from
     // release, the ref-counted detach). Empty the attached set so a
     // release racing alongside teardown can't double-dispatch a stop.
+    // Observers are cleared too so a re-created entry with the same id
+    // can't inherit ghost observers (their sockets still get the
+    // `stopping`/`stopped` event before this entry is deleted).
     entry.attachedConnections.clear();
+    entry.observerConnections.clear();
     this.transition(entry, "stopping");
 
     // Wait for any boot in progress to finish its teardown. Without

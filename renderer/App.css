@@ -37,6 +37,19 @@
   position: relative;
 }
 
+/* Read-only observe banner — shown above the content when the active
+ * tab is an agent/MCP session the GUI is watching. */
+.observe-banner {
+  flex-shrink: 0;
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--surface-hi);
+  border: 1px dashed var(--accent-border);
+  border-radius: var(--radius-pill);
+  margin: 0 0 6px 0;
+}
+
 /* ── Prompt Modal ── */
 .prompt-overlay {
   position: absolute;

@@ -864,6 +864,7 @@ async function handleEventsSubscribe(
       input.sessionId,
       subscribeConnId,
       entry.activeProfile,
+      input.observer,
     );
     if (attachResult.kind === "error") {
       rejectAndCleanup(attachResult.code, attachResult.message);

@@ -14,6 +14,7 @@ import {
   toSummary,
   findFreePort,
   getSessionRecordForInstance,
+  countNonObservedSessions,
   MAX_SESSIONS,
   type InstanceState,
 } from './state.js';
@@ -72,25 +73,34 @@ export function registerInstanceHandlers() {
     // Phase E1: scoped to one session — other sessions keep running.
     const record = getSessionRecordForInstance(instanceId);
     if (record) {
-      const { sessionId, daemonSession } = record;
-      // Clear before firing the (async) stop so a follow-up
+      const { sessionId, daemonSession, observed } = record;
+      // Clear before firing the (async) teardown so a follow-up
       // instances:create doesn't see a tearing-down record.
       state.sessions.delete(sessionId);
       if (state.activeSessionId === sessionId) {
         const next = state.sessions.keys().next().value ?? null;
         state.activeSessionId = next;
       }
-      void daemonSession.client
-        .send({
-          type: 'command',
-          action: 'session/stop',
-          id: `electron-close-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-          payload: { sessionId },
-        })
-        .catch((err: unknown) => {
-          const message = err instanceof Error ? err.message : String(err);
-          send('instance:log', { instanceId, text: `⚠ Background session/stop failed: ${message}` });
-        });
+      if (observed) {
+        // Observe tab: detach our read-only observer socket ONLY. The
+        // agent's session keeps running for everyone else — firing
+        // `session/stop` here would be kill-for-everyone and yank the
+        // session out from under the agent we're watching.
+        // `disconnect()` is idempotent + safe if the daemon already died.
+        daemonSession.disconnect();
+      } else {
+        void daemonSession.client
+          .send({
+            type: 'command',
+            action: 'session/stop',
+            id: `electron-close-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            payload: { sessionId },
+          })
+          .catch((err: unknown) => {
+            const message = err instanceof Error ? err.message : String(err);
+            send('instance:log', { instanceId, text: `⚠ Background session/stop failed: ${message}` });
+          });
+      }
     }
 
     instances.delete(instanceId);
@@ -149,7 +159,10 @@ export function registerInstanceHandlers() {
 async function doCreate(data: unknown): Promise<unknown> {
   if (!state.projectRoot) return { ok: false, error: 'No project root' };
 
-  if (state.sessions.size >= MAX_SESSIONS) {
+  // Only count GUI-created sessions toward the human cap — auto-observed
+  // agent/MCP tabs live in the same Map but must not block the user from
+  // opening their own session.
+  if (countNonObservedSessions() >= MAX_SESSIONS) {
     return {
       ok: false,
       code: 'E_SESSION_LIMIT_REACHED' as const,
@@ -239,6 +252,7 @@ async function doCreate(data: unknown): Promise<unknown> {
     serviceLog: [],
     metroLog: [],
     metroStatus: 'starting',
+    observed: false,
   };
 
   instances.set(id, instance);
@@ -255,7 +269,11 @@ async function doCreate(data: unknown): Promise<unknown> {
       ...profileData,
       projectRoot: state.projectRoot,
     } as Profile;
-    const record = await attachDaemonSession(sessionProfile, state.projectRoot, id);
+    const record = await attachDaemonSession({
+      projectRoot: state.projectRoot,
+      instanceId: id,
+      profile: sessionProfile,
+    });
     const session = record.daemonSession;
     // Mirror startRealServices's wiring step (services.ts). Without
     // this, Metro starts but its log lines never reach the renderer's

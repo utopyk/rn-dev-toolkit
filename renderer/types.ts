@@ -69,6 +69,12 @@ export interface InstanceInfo {
   deviceIcon: string;
   platform: string;
   metroStatus: string;
+  /**
+   * True for a tab the GUI is *observing* — an agent/MCP-started session
+   * surfaced read-only. Drives the 🤖 badge, the read-only banner, the
+   * "Stop observing" close copy, and disabling mutating controls.
+   */
+  observed?: boolean;
 }
 
 export interface InstanceLogs {

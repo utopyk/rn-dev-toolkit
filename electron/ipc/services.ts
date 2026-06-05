@@ -38,6 +38,7 @@ import { serviceBus } from '../../src/app/service-bus.js';
 import { triggerBuildsIfNeeded } from '../../src/app/auto-build.js';
 import type { DaemonSession } from '../../src/app/client/session.js';
 import type { Profile } from '../../src/core/types.js';
+import type { SessionId } from '../../src/core/identifiers.js';
 import {
   instances,
   state,
@@ -260,19 +261,47 @@ export function setElectronQuitting(flag: boolean): void {
  * re-deriving the sessionId. The legacy `attachDaemonSession` name is
  * preserved (callers grep for it) but the body now multiplexes per session.
  */
+export interface AttachDaemonSessionOptions {
+  projectRoot: string;
+  instanceId: string;
+  /** Boot-or-join a profile (the GUI's own tabs). */
+  profile?: Profile;
+  /**
+   * Observe-mode: attach read-only by id to an existing (agent/MCP)
+   * session instead of booting a profile. Sets `observed: true` on the
+   * record and uses the daemon's non-counting observer attach so the GUI
+   * can never keep the agent's session alive. `worktreeKeyHint` (from
+   * `sessions/list`) skips the ambiguous worktreeKey backfill.
+   */
+  observe?: { sessionId: SessionId; worktreeKeyHint?: string };
+}
+
 export async function attachDaemonSession(
-  profile: Profile,
-  projectRoot: string,
-  instanceId: string,
+  opts: AttachDaemonSessionOptions,
 ): Promise<SessionRecord> {
-  const session = await connectElectronToDaemon({ projectRoot, profile });
+  const { projectRoot, instanceId, profile, observe } = opts;
+  const observed = observe !== undefined;
+  const session = await connectElectronToDaemon({
+    projectRoot,
+    profile: profile ?? null,
+    ...(observe
+      ? {
+          attachSessionId: observe.sessionId,
+          observer: true,
+          ...(observe.worktreeKeyHint !== undefined
+            ? { worktreeKeyHint: observe.worktreeKeyHint }
+            : {}),
+        }
+      : {}),
+  });
   const record: SessionRecord = {
     sessionId: session.sessionId,
     daemonSession: session,
     instanceId,
-    profileName: profile.name ?? null,
+    profileName: profile?.name ?? null,
     attachedAt: Date.now(),
     disconnectLogged: false,
+    observed,
   };
   state.sessions.set(session.sessionId, record);
   // First session also becomes the active one — `instances:setActive`
@@ -287,6 +316,29 @@ export async function attachDaemonSession(
     const current = state.sessions.get(session.sessionId);
     if (!current || current.disconnectLogged) return;
     current.disconnectLogged = true;
+
+    state.sessions.delete(session.sessionId);
+    if (state.activeSessionId === session.sessionId) {
+      // Promote any surviving session; null when this was the last.
+      const next = state.sessions.keys().next().value ?? null;
+      state.activeSessionId = next;
+    }
+
+    if (current.observed) {
+      // Observe tab: the agent's session went away (daemon died, or the
+      // session was stopped and the socket finally dropped). Remove the
+      // tab quietly — the SessionsWatcher poller is the primary teardown
+      // signal; this is the backstop for a hard socket close. No scary
+      // "daemon disconnected" line for a read-only view.
+      instances.delete(instanceId);
+      if (state.activeInstanceId === instanceId) {
+        state.activeInstanceId = instances.keys().next().value ?? null;
+      }
+      send('instance:removed', instanceId);
+      send('service:log', '👁 Agent session ended — observe tab closed.');
+      return;
+    }
+
     const message = err instanceof Error ? err.message : 'unknown';
     if (state.mainWindow && !state.mainWindow.isDestroyed()) {
       state.mainWindow.webContents.send(
@@ -299,12 +351,6 @@ export async function attachDaemonSession(
     // serviceBus consumer side. Pre-multi-session, a single disconnect
     // emptied the cache for everyone; under N, the surviving sessions
     // keep their clients live.
-    state.sessions.delete(session.sessionId);
-    if (state.activeSessionId === session.sessionId) {
-      // Promote any surviving session; null when this was the last.
-      const next = state.sessions.keys().next().value ?? null;
-      state.activeSessionId = next;
-    }
     if (state.sessions.size === 0) {
       serviceBus.clearModulesClient();
     }
@@ -439,6 +485,7 @@ export async function startRealServices(
     serviceLog: [],
     metroLog: [],
     metroStatus: 'starting',
+    observed: false,
   };
   instances.set(id, instance);
   state.activeInstanceId = id;
@@ -454,7 +501,11 @@ export async function startRealServices(
   // starts its session, and publishes every adapter on the serviceBus.
   // The modules ipcMain handlers hanging off `serviceBus.modulesClient`
   // become live as soon as this resolves.
-  const record = await attachDaemonSession(defaultProfile, targetProjectRoot, instance.id);
+  const record = await attachDaemonSession({
+    projectRoot: targetProjectRoot,
+    instanceId: instance.id,
+    profile: defaultProfile,
+  });
   const session = record.daemonSession;
 
   wireInstanceEvents(instance, session);

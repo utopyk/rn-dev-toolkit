@@ -4,6 +4,14 @@ import './DevToolsView.css';
 
 interface DevToolsViewProps {
   metroPort: number;
+  /**
+   * Read-only observe mode (an agent/MCP session). Hides the mutating
+   * controls — Reconnect/Retry (which restart the SHARED per-session CDP
+   * proxy) and the target picker (which swaps the target the agent's
+   * capture is reading). The live Fusebox view + target list still
+   * render; only the controls that would perturb the agent are removed.
+   */
+  readOnly?: boolean;
 }
 
 interface Target {
@@ -74,7 +82,7 @@ function pickTarget(targets: Target[], preferredId: string | null): Target | nul
   return targets.find(t => t.type === 'node') ?? targets[0] ?? null;
 }
 
-export function DevToolsView({ metroPort }: DevToolsViewProps) {
+export function DevToolsView({ metroPort, readOnly = false }: DevToolsViewProps) {
   const [state, setState] = useState<ConnectionState>('connecting');
   const [devtoolsUrl, setDevtoolsUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
@@ -254,9 +262,11 @@ export function DevToolsView({ metroPort }: DevToolsViewProps) {
           Metro is running on port {metroPort} but no app is connected yet.
           <br />Launch the app on a device or simulator to see DevTools.
         </div>
-        <button className="devtools-toolbar-btn" onClick={() => { void restart(); }}>
-          ↻ Retry target discovery
-        </button>
+        {!readOnly && (
+          <button className="devtools-toolbar-btn" onClick={() => { void restart(); }}>
+            ↻ Retry target discovery
+          </button>
+        )}
         <div className="devtools-hint">
           DevTools will reconnect automatically once the app attaches.
         </div>
@@ -270,9 +280,11 @@ export function DevToolsView({ metroPort }: DevToolsViewProps) {
         <div className="devtools-icon">⚠</div>
         <div className="devtools-title">DevTools unavailable</div>
         <div className="devtools-subtitle">{errorMsg}</div>
-        <button className="devtools-toolbar-btn" onClick={() => { void restart(); }}>
-          ↻ Retry
-        </button>
+        {!readOnly && (
+          <button className="devtools-toolbar-btn" onClick={() => { void restart(); }}>
+            ↻ Retry
+          </button>
+        )}
         <div className="devtools-hint">Make sure Metro is running on port {metroPort}.</div>
       </div>
     );
@@ -283,7 +295,12 @@ export function DevToolsView({ metroPort }: DevToolsViewProps) {
       <div className="devtools-toolbar">
         <span className="devtools-toolbar-title">React Native DevTools</span>
         <span className="devtools-toolbar-port">:{metroPort}</span>
-        {targets.length > 1 && (
+        {readOnly && (
+          <span className="devtools-toolbar-readonly" title="Observing an agent session — read-only">
+            👁 read-only
+          </span>
+        )}
+        {!readOnly && targets.length > 1 && (
           <select
             className="devtools-target-select"
             value={selectedTargetId ?? ''}
@@ -296,12 +313,14 @@ export function DevToolsView({ metroPort }: DevToolsViewProps) {
             ))}
           </select>
         )}
-        <button
-          className="devtools-toolbar-btn"
-          onClick={() => { void restart(); }}
-        >
-          ↻ Reconnect
-        </button>
+        {!readOnly && (
+          <button
+            className="devtools-toolbar-btn"
+            onClick={() => { void restart(); }}
+          >
+            ↻ Reconnect
+          </button>
+        )}
         <button
           className="devtools-toolbar-btn"
           onClick={() => {

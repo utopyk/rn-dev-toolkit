@@ -119,7 +119,7 @@ export function optionalProfile(
  */
 export type EventsSubscribeInput =
   | { mode: "boot-or-join"; profile: ValidatedProfile }
-  | { mode: "attach-by-id"; sessionId: SessionId };
+  | { mode: "attach-by-id"; sessionId: SessionId; observer: boolean };
 
 /**
  * Parse an `events/subscribe` payload into the discriminated union.
@@ -161,7 +161,16 @@ export function parseEventsSubscribeInput(
   if (hasProfile) {
     return { mode: "boot-or-join", profile: requireProfile(payload, where) };
   }
-  return { mode: "attach-by-id", sessionId: requireSessionId(payload, where) };
+  // attach-by-id. `observer: true` marks a read-only attach that does
+  // NOT count toward the session's teardown refcount — the GUI's
+  // "watch the agent" tabs use it so observing can never keep an
+  // agent's session alive (the daemon has no idle reaper; a counting
+  // observer would pin the session forever after the agent releases).
+  return {
+    mode: "attach-by-id",
+    sessionId: requireSessionId(payload, where),
+    observer: boolField(payload, "observer"),
+  };
 }
 
 /**
@@ -183,4 +192,9 @@ function stringField(payload: unknown, key: string): string | undefined {
   if (!payload || typeof payload !== "object") return undefined;
   const v = (payload as RpcPayload)[key];
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+function boolField(payload: unknown, key: string): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  return (payload as RpcPayload)[key] === true;
 }

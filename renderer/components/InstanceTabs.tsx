@@ -10,6 +10,8 @@ export interface InstanceInfo {
   deviceIcon: string;
   platform: string;
   metroStatus: string;
+  /** Read-only tab observing an agent/MCP session (badged 🤖). */
+  observed?: boolean;
 }
 
 interface InstanceTabsProps {
@@ -54,25 +56,32 @@ export function InstanceTabs({ instances, activeId, onSelect, onClose, onAdd }: 
       <div className="instance-tabs-scroll">
         {instances.map((inst) => {
           const isActive = inst.id === activeId;
+          const observed = inst.observed === true;
           return (
             <div
               key={inst.id}
-              className={`instance-tab${isActive ? ' active' : ''}`}
+              className={`instance-tab${isActive ? ' active' : ''}${observed ? ' observed' : ''}`}
               onClick={() => onSelect(inst.id)}
+              title={observed ? 'Observing an agent/MCP session (read-only)' : undefined}
             >
-              <span className="instance-tab-icon">{inst.deviceIcon}</span>
+              <span className="instance-tab-icon">{observed ? '🤖' : inst.deviceIcon}</span>
               <span className="instance-tab-name">
-                {shortenName(inst.worktreeName, 10)}:{inst.port}
+                {observed ? 'agent' : shortenName(inst.worktreeName, 10)}
+                {inst.port ? `:${inst.port}` : ''}
               </span>
               <span className="instance-tab-device">
-                {shortenName(inst.deviceName, 14)}
+                {observed ? 'read-only' : shortenName(inst.deviceName, 14)}
               </span>
               <span className={statusDotClass(inst.metroStatus)} />
               <button
                 className="instance-tab-close"
                 onClick={(e) => handleClose(e, inst.id)}
-                aria-label={`Close instance on port ${inst.port}`}
-                title="Close instance"
+                aria-label={
+                  observed
+                    ? `Stop observing agent session ${inst.id}`
+                    : `Close instance on port ${inst.port}`
+                }
+                title={observed ? 'Stop observing (agent keeps running)' : 'Close instance'}
               >
                 {'×'}
               </button>

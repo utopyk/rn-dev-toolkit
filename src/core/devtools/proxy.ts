@@ -33,6 +33,18 @@ const PROXY_ID_BASE = 1_000_000_000;
 /** Default per-command timeout when a tap calls sendCommand(). */
 const DEFAULT_COMMAND_TIMEOUT_MS = 5_000;
 
+/**
+ * Eager-upstream connect deadline. Bounded well under the IPC subscribe-send
+ * timeout (`src/core/ipc.ts` CLIENT_TIMEOUT_MS = 5_000ms) so a wedged Hermes
+ * inspector — common when the app is backgrounded, the simulator is paused,
+ * or a prior proxy left a half-open WS attached — returns control to the
+ * RPC layer instead of timing out two layers higher. On timeout `start()`
+ * still resolves with port + nonce; the existing lazy-reconnect path at
+ * `handleDownstreamConnect` retries when Fusebox connects, and the manager's
+ * `startTargetPolling` rediscovers if the target itself changed.
+ */
+const EAGER_UPSTREAM_TIMEOUT_MS = 3_000;
+
 /** WS close codes. */
 const WS_CODE_SERVICE_RESTART = 1012;
 const WS_CODE_GOING_AWAY = 1001;
@@ -150,7 +162,47 @@ export class CdpProxy extends EventEmitter {
     });
 
     if (this.opts.eagerUpstream) {
-      await this.connectUpstream();
+      // Race the upstream open against a deadline. A wedged Hermes inspector
+      // would otherwise hang `start()` forever — and since `start()` is
+      // awaited two layers higher (DevToolsManager.restart → daemon RPC →
+      // IPC subscribe-send), the hang surfaces in the renderer as
+      // `subscribe.send: timeout after 5000ms` with no actionable context.
+      // On timeout we drop through with the proxy listening but the upstream
+      // still pending; the late open / late error are caught below so we
+      // don't leak an unhandledRejection.
+      const upstreamPromise = this.connectUpstream();
+      let settled = false;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          this.opts.onError?.(
+            new Error(
+              `CdpProxy: eager upstream did not open within ${EAGER_UPSTREAM_TIMEOUT_MS}ms`,
+            ),
+          );
+          resolve();
+        }, EAGER_UPSTREAM_TIMEOUT_MS);
+        upstreamPromise
+          .then(() => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+          })
+          .catch((err) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            this.opts.onError?.(err);
+            resolve();
+          });
+      });
+      // If the upstream eventually settles after the deadline, swallow the
+      // result here — late errors must not bubble as unhandledRejection
+      // (the early-resolve above already detached the promise from the
+      // start() caller).
+      upstreamPromise.catch(() => {});
     }
 
     return {

@@ -252,5 +252,12 @@ export const DEFAULTS = {
   bodyFetchQueueCap: 200,
   captureBodies: true,
   deltaFlushIntervalMs: 100,
-  pollIntervalMs: 10_000,
+  // Metro `/json` discovery poll. Kept short so that when an app connects,
+  // its Hermes target is discovered + capture auto-armed (Network.enable)
+  // within ~1s — before the app's JS bundle finishes downloading and fires
+  // its launch fetch burst. The previous 10s interval routinely missed
+  // that burst (target discovered long after the requests completed, then
+  // an idle app makes nothing more). A localhost GET /json per second is
+  // negligible overhead for a dev tool.
+  pollIntervalMs: 1_000,
 } as const;

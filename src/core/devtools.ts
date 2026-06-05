@@ -348,7 +348,22 @@ export class DevToolsManager extends EventEmitter {
         `DevToolsManager: target ${targetId} not found for session ${sessionId}`
       );
     }
-    if (state.selectedTargetId === targetId) return;
+    if (state.selectedTargetId === targetId) {
+      // Re-selecting the already-selected target is a re-arm request, not
+      // a no-op. After a Hermes reload the inspector ws bounces and
+      // reopens on the SAME target, but CDP domain state (Network.enable)
+      // does not survive the new connection — capture silently stops. The
+      // UI/agent re-selects to recover; re-flush each tap's enable
+      // commands so capture comes back without a full proxy teardown.
+      for (const tap of state.taps) {
+        for (const cmd of tap.enableCommands) {
+          state.proxy.sendCommand(cmd, 5000).catch(() => {
+            // non-fatal — capability is probed by event arrival
+          });
+        }
+      }
+      return;
+    }
 
     // Bump ring epoch with target-swap reason for every tap's ring.
     for (const tap of state.taps) {
@@ -710,6 +725,33 @@ export class DevToolsManager extends EventEmitter {
 
     if (changed) {
       state.targets = fresh;
+    }
+
+    // Auto-arm: select + enable capture the instant an app first connects.
+    // The CDP Network domain only records requests AFTER `Network.enable`,
+    // and an app's launch API burst fires within a second or two of the
+    // Hermes target registering. Waiting for a client to manually
+    // select-target adds a poll + RPC round-trip that routinely loses that
+    // race, so the buffer comes up empty and an idle app makes nothing
+    // more. Auto-selecting the default target here closes the gap — a
+    // network-capture module should capture from the moment it can. Only
+    // fires for the FIRST target when nothing is selected yet; the user or
+    // agent can still switch targets afterward. `proxyStatus = "starting"`
+    // guards against a re-entrant poll tick double-firing selectTarget.
+    if (
+      state.selectedTargetId === null &&
+      state.proxyStatus === "no-target" &&
+      fresh.length > 0
+    ) {
+      const def = pickTarget(fresh);
+      if (def) {
+        state.proxyStatus = "starting";
+        void this.selectTarget(state.sessionId, def.id).catch(() => {
+          const s = this.instances.get(state.sessionId);
+          if (s && s.selectedTargetId === null) s.proxyStatus = "no-target";
+        });
+        return;
+      }
     }
 
     // If the selected target has vanished and we still thought we were

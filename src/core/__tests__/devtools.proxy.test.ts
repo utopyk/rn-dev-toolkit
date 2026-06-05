@@ -16,7 +16,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
-import type { AddressInfo } from "node:net";
+import { createServer as createTcpServer, type AddressInfo, type Server as TcpServer } from "node:net";
 import { CdpProxy } from "../devtools/proxy.js";
 import type { CdpEvent } from "../devtools/domain-tap.js";
 
@@ -348,5 +348,62 @@ describe("CdpProxy transparency", () => {
     } finally {
       process.off("unhandledRejection", onRejection);
     }
+  });
+
+  it("eagerUpstream — start() resolves within the deadline when the upstream hangs", async () => {
+    // Repro: a wedged Hermes inspector accepts the TCP connect but never
+    // completes the WS upgrade. Pre-fix, `proxy.start()` awaited the open
+    // promise forever — and since DevToolsManager.restart() awaits start()
+    // two layers under the daemon's IPC subscribe-send (CLIENT_TIMEOUT_MS
+    // = 5_000ms), the Reconnect button surfaced
+    // `subscribe.send: timeout after 5000ms` with no actionable context.
+    // Captured against acme-mobile-app on 2026-05-21.
+
+    // Track every accepted connection so teardown can destroy them
+    // synchronously. server.close() only stops accepting new connections;
+    // open ones drain on their own schedule, and the `ws` client's TCP
+    // socket stays half-open even after we proxy.stop() / terminate(),
+    // because `ws` issues TCP RST asynchronously. Without destroying the
+    // server-side socket explicitly, hangingUpstream.close() blocks past
+    // the test's 5s budget.
+    const acceptedSockets = new Set<import("node:net").Socket>();
+    const hangingUpstream: TcpServer = createTcpServer((socket) => {
+      acceptedSockets.add(socket);
+      socket.on("close", () => acceptedSockets.delete(socket));
+      // Never write a response — the `ws` client stays in CONNECTING.
+    });
+    await new Promise<void>((r) =>
+      hangingUpstream.listen(0, "127.0.0.1", () => r()),
+    );
+    const hangPort = (hangingUpstream.address() as AddressInfo).port;
+
+    const errors: Error[] = [];
+    const proxy = new CdpProxy({
+      upstreamUrl: `ws://127.0.0.1:${hangPort}/inspector/debug`,
+      eagerUpstream: true,
+      onError: (err) => errors.push(err),
+    });
+    proxies.push(proxy);
+
+    const startedAt = Date.now();
+    const handle = await proxy.start();
+    const elapsed = Date.now() - startedAt;
+
+    // 3_000ms deadline + 1_000ms scheduler slack. A pre-fix run sat here
+    // until the test timeout (default 5_000ms) blew up the suite.
+    expect(elapsed).toBeLessThan(4_000);
+    expect(handle.port).toBeGreaterThan(0);
+    expect(typeof handle.nonce).toBe("string");
+    expect(handle.nonce.length).toBeGreaterThan(0);
+    expect(
+      errors.some((e) => /eager upstream did not open/i.test(e.message)),
+      `Expected an onError call signaling the deadline. Got: ${errors
+        .map((e) => e.message)
+        .join("; ")}`,
+    ).toBe(true);
+
+    await proxy.stop();
+    for (const s of acceptedSockets) s.destroy();
+    await new Promise<void>((r) => hangingUpstream.close(() => r()));
   });
 });

@@ -60,14 +60,43 @@ interface MutableEnv {
   teardown(): Promise<void>;
 }
 
-async function startMutableEnv(initial: object[]): Promise<MutableEnv> {
+async function startMutableEnv(
+  initial: object[],
+  opts?: {
+    /**
+     * When set, the fake inspector ANSWERS CDP commands: methods in this
+     * map get an error response (the RN multiple-hosts refusal shape);
+     * everything else gets `{ result: {} }`. Legacy default (undefined)
+     * keeps the silent-accept behavior the older tests were written
+     * against.
+     */
+    refuseMethods?: Record<string, string>;
+  }
+): Promise<MutableEnv> {
   let currentTargets: object[] = initial;
   const ws = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise<void>((r) => ws.once("listening", () => r()));
   const wsAddr = ws.address() as AddressInfo;
   const inspectorPath = `/inspector/debug?device=dev&page=1`;
-  ws.on("connection", () => {
-    /* accept */
+  ws.on("connection", (sock: WsSocket) => {
+    const refuse = opts?.refuseMethods;
+    if (!refuse) return; // legacy: accept silently, never respond
+    sock.on("message", (data) => {
+      try {
+        const m = JSON.parse(String(data)) as { id?: number; method?: string };
+        if (typeof m.id !== "number" || typeof m.method !== "string") return;
+        const message = refuse[m.method];
+        sock.send(
+          JSON.stringify(
+            message
+              ? { id: m.id, error: { code: -32603, message } }
+              : { id: m.id, result: {} }
+          )
+        );
+      } catch {
+        // ignore malformed frames
+      }
+    });
   });
 
   const http = createHttpServer((req, res) => {
@@ -377,5 +406,74 @@ describe("DevToolsManager same-target reconnect (iOS suspend/resume)", () => {
     await pollNow(mgr, sid("w1"));
     await waitMs(200);
     expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("preempted");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Enable-command refusals surface in meta (2026-06-11 acme iOS
+// battle-test). CDP error responses RESOLVE (`CdpResponse.error`), so the
+// old bare `.catch()` swallow never saw RN refusing `Network.enable` —
+// the session reported `connected` with an eternally empty buffer.
+// ---------------------------------------------------------------------------
+
+describe("DevToolsManager enable-command refusals", () => {
+  let env: MutableEnv;
+  let metro: MetroFake;
+  let mgr: DevToolsManager;
+
+  function wireMetro(): void {
+    metro = makeMetroFake();
+    metro.setInstance(sid("w1"), {
+      sessionId: sid("w1"),
+      worktree: "w1",
+      port: env.metroPort,
+      pid: 1,
+      status: "running",
+      startedAt: new Date(),
+      projectRoot: "/tmp",
+    });
+    mgr = new DevToolsManager(metro as unknown as MetroManager, {
+      deltaFlushIntervalMs: 30,
+      pollIntervalMs: 0,
+    });
+  }
+
+  afterEach(async () => {
+    await mgr.stopAll();
+    await env.teardown();
+  });
+
+  it("a refused Network.enable lands in meta.enableErrors (connected + empty buffer is diagnosable)", async () => {
+    env = await startMutableEnv([{ id: "abc", type: "node", title: "App" }], {
+      refuseMethods: {
+        "Network.enable":
+          "The Network domain is unavailable when multiple React Native hosts are registered.",
+      },
+    });
+    wireMetro();
+    await mgr.start(sid("w1"));
+    await waitMs(200);
+
+    const meta = mgr.status(sid("w1")).meta;
+    expect(meta.proxyStatus).toBe("connected");
+    expect(meta.enableErrors).toBeDefined();
+    expect(meta.enableErrors).toContainEqual({
+      method: "Network.enable",
+      message:
+        "The Network domain is unavailable when multiple React Native hosts are registered.",
+    });
+  });
+
+  it("a healthy target acks enables and meta.enableErrors stays absent", async () => {
+    env = await startMutableEnv([{ id: "abc", type: "node", title: "App" }], {
+      refuseMethods: {}, // responder on, nothing refused → all acks
+    });
+    wireMetro();
+    await mgr.start(sid("w1"));
+    await waitMs(200);
+
+    const meta = mgr.status(sid("w1")).meta;
+    expect(meta.proxyStatus).toBe("connected");
+    expect(meta.enableErrors).toBeUndefined();
   });
 });

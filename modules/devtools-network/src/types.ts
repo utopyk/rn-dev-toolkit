@@ -103,6 +103,12 @@ export interface SessionBoundary {
   at: number;
 }
 
+/** An enable command the target refused or that never reached it. */
+export interface EnableCommandError {
+  method: string;
+  message: string;
+}
+
 export interface CaptureMeta {
   worktreeKey: string;
   bufferEpoch: number;
@@ -115,6 +121,13 @@ export interface CaptureMeta {
   bodyTruncatedCount: number;
   bodyCapture: BodyCaptureMode;
   sessionBoundary: SessionBoundary | null;
+  /**
+   * Present only when an enable command failed at the last (re)attach —
+   * e.g. RN refusing `Network.enable` when multiple React Native hosts
+   * are registered. `connected` + empty buffer + this field = the target
+   * is attached but refuses to emit; fix the app, not the capture.
+   */
+  enableErrors?: readonly EnableCommandError[];
 }
 
 export interface CaptureListResult<T> {

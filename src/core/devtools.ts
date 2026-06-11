@@ -89,6 +89,14 @@ interface SessionState {
   selectedTargetId: string | null;
   selectedTarget: TargetDescriptor | null;
   proxyStatus: ProxyStatus;
+  /**
+   * Enable-command failures from the last (re)attach, keyed by CDP
+   * method. Cleared on every flush; surfaced via `composeMeta` so a
+   * target that ACCEPTS the connection but REFUSES a domain (acme iOS:
+   * `Network.enable` → "unavailable when multiple React Native hosts are
+   * registered") is diagnosable instead of `connected`-with-empty-buffer.
+   */
+  enableErrors: Map<string, string>;
   deltaTimer: ReturnType<typeof setInterval> | null;
   /**
    * Periodic `/json` poll — tracks target availability without requiring
@@ -217,6 +225,7 @@ export class DevToolsManager extends EventEmitter {
       pollTimer: null,
       lastSnapshot: new Map(),
       dirty: { added: new Set(), updated: new Set(), evicted: new Set() },
+      enableErrors: new Map(),
     };
 
     if (!selected) {
@@ -268,18 +277,15 @@ export class DevToolsManager extends EventEmitter {
     this.instances.set(sessionId, state);
 
     // Attach every tap + flush their enable commands. Errors here are
-    // non-fatal — the proxy remains up even if an enable fails.
+    // non-fatal — the proxy remains up even if an enable fails — but they
+    // ARE recorded (see flushEnableCommands).
     const dispatch: TapDispatch = {
       sendCommand: (cmd, timeoutMs) => proxy.sendCommand(cmd, timeoutMs),
     };
     for (const tap of taps) {
       tap.attach(dispatch);
-      for (const cmd of tap.enableCommands) {
-        proxy.sendCommand(cmd, 5000).catch(() => {
-          // Swallow — capability is probed by event arrival, not cmd success.
-        });
-      }
     }
+    this.flushEnableCommands(state, proxy);
 
     state.state = "RUNNING";
     state.proxyStatus = "connected";
@@ -366,13 +372,7 @@ export class DevToolsManager extends EventEmitter {
       // "succeeded" while flushing enables into a dead socket and the
       // session stayed `no-target` forever. Fall through to the full
       // re-dial below instead.
-      for (const tap of state.taps) {
-        for (const cmd of tap.enableCommands) {
-          state.proxy.sendCommand(cmd, 5000).catch(() => {
-            // non-fatal — capability is probed by event arrival
-          });
-        }
-      }
+      this.flushEnableCommands(state, state.proxy);
       return;
     }
 
@@ -432,13 +432,53 @@ export class DevToolsManager extends EventEmitter {
         // best-effort
       }
       tap.attach(dispatch);
+    }
+    this.flushEnableCommands(state, newProxy);
+    this.emitStatus(state);
+  }
+
+  /**
+   * Send every tap's enable commands down `proxy`, recording failures in
+   * `state.enableErrors`. Two failure shapes, both previously swallowed:
+   *
+   *  - CDP error RESPONSES resolve (`CdpResponse.error`) — a bare
+   *    `.catch()` never sees them. The load-bearing case is RN refusing
+   *    `Network.enable` with "The Network domain is unavailable when
+   *    multiple React Native hosts are registered" (2026-06-11 acme
+   *    iOS battle-test): the session reported `connected` while the
+   *    buffer stayed empty forever, with zero diagnostics anywhere.
+   *  - Transport rejections (`upstream-not-open`, `command-timeout`).
+   *
+   * Results are recorded only while `state.proxy === proxy` — a re-dial
+   * mid-flight must not let the OLD proxy's stragglers overwrite the new
+   * attach's slate. Success deletes the method's entry so a recovered
+   * domain clears its stale error.
+   */
+  private flushEnableCommands(state: SessionState, proxy: CdpProxy): void {
+    state.enableErrors.clear();
+    for (const tap of state.taps) {
       for (const cmd of tap.enableCommands) {
-        newProxy.sendCommand(cmd, 5000).catch(() => {
-          // non-fatal
-        });
+        proxy.sendCommand(cmd, 5000).then(
+          (resp) => {
+            if (state.proxy !== proxy) return;
+            if (!this.instances.has(state.sessionId)) return;
+            if (resp.error) {
+              state.enableErrors.set(cmd.method, resp.error.message);
+              this.emitStatus(state);
+            } else {
+              state.enableErrors.delete(cmd.method);
+            }
+          },
+          (err: unknown) => {
+            if (state.proxy !== proxy) return;
+            if (!this.instances.has(state.sessionId)) return;
+            const message = err instanceof Error ? err.message : String(err);
+            state.enableErrors.set(cmd.method, message);
+            this.emitStatus(state);
+          }
+        );
       }
     }
-    this.emitStatus(state);
   }
 
   // -------------------------------------------------------------------------
@@ -865,7 +905,7 @@ export class DevToolsManager extends EventEmitter {
     const bodyCapture: BodyCaptureMode = state.bodyCaptureEnabled
       ? "full"
       : "metadata-only";
-    return {
+    const meta: CaptureMeta = {
       worktreeKey: state.worktreeKey,
       bufferEpoch: ringState.bufferEpoch,
       oldestSequence: ringState.oldestSequence,
@@ -878,6 +918,13 @@ export class DevToolsManager extends EventEmitter {
       bodyCapture,
       sessionBoundary: ringState.sessionBoundary,
     };
+    if (state.enableErrors.size > 0) {
+      meta.enableErrors = Array.from(state.enableErrors, ([method, message]) => ({
+        method,
+        message,
+      }));
+    }
+    return meta;
   }
 }
 

@@ -143,6 +143,15 @@ export interface SessionBoundary {
   at: number;
 }
 
+/**
+ * An enable command the target refused (CDP error response) or that never
+ * reached it (transport failure / timeout) at the last (re)attach.
+ */
+export interface EnableCommandError {
+  method: string;
+  message: string;
+}
+
 export interface CaptureMeta {
   worktreeKey: string;
   bufferEpoch: number;
@@ -160,6 +169,15 @@ export interface CaptureMeta {
   bodyTruncatedCount: number;
   bodyCapture: BodyCaptureMode;
   sessionBoundary: SessionBoundary | null;
+  /**
+   * Present only when at least one tap enable command failed at the last
+   * (re)attach. The load-bearing case: RN refuses `Network.enable` with
+   * "The Network domain is unavailable when multiple React Native hosts
+   * are registered" (2026-06-11 acme iOS battle-test) — without this
+   * field the session reports `connected` with an eternally empty buffer
+   * and zero diagnostics.
+   */
+  enableErrors?: readonly EnableCommandError[];
 }
 
 export interface CaptureListResult<T> {

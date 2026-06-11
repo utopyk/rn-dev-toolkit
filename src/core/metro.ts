@@ -22,6 +22,65 @@ function resolveRnBin(projectRoot: string): [string, ...string[]] {
 }
 
 /**
+ * Compose the `react-native start` argv. Pure (no spawn, no I/O) so the
+ * CLI-boundary mapping is unit-testable in isolation — same rationale as
+ * `composeRunArgs` in builder.ts.
+ *
+ * `--client-logs`: RN 0.77 moved `console.*` off Metro stdout and onto
+ * the CDP channel ("JavaScript logs have moved!"), which removed app
+ * console output from every consumer of Metro's stdout — including
+ * rn-dev's metro-logs capture module, so agents lost console visibility
+ * entirely (2026-06-11 acme battle-test). The flag flips
+ * `metroConfig.server.forwardClientLogs` back on: plain-text JS logs
+ * stream into Metro stdout alongside bundler output, and metro-logs
+ * picks them up for free. It does NOT touch the CDP path — the RN
+ * DevTools console keeps working in parallel. Upstream marks the flag
+ * deprecated ("will be removed in future"), so the durable replacement
+ * is a CDP-based devtools-console module; until then this is the
+ * cheapest console pipe an agent can get.
+ */
+export function composeMetroStartArgs(opts: {
+  port: number;
+  resetCache?: boolean;
+  verbose?: boolean;
+  clientLogs?: boolean;
+}): string[] {
+  const args = ["start", "--port", String(opts.port)];
+  if (opts.resetCache) {
+    args.push("--reset-cache");
+  }
+  if (opts.verbose) {
+    args.push("--verbose");
+  }
+  if (opts.clientLogs) {
+    args.push("--client-logs");
+  }
+  return args;
+}
+
+/**
+ * `--client-logs` exists only on RN >= 0.77 (the release that removed
+ * default forwarding and added the opt-back-in flag). Older CLIs
+ * hard-error on unknown options — and forward client logs by default
+ * anyway — so the flag must be version-gated, not unconditional.
+ * Unparseable / missing react-native versions return false: a Metro
+ * that starts without console forwarding beats one that doesn't start.
+ */
+export function supportsClientLogs(projectRoot: string): boolean {
+  try {
+    const pkgPath = path.join(projectRoot, "node_modules", "react-native", "package.json");
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { version?: string };
+    const match = /^(\d+)\.(\d+)\./.exec(pkg.version ?? "");
+    if (!match) return false;
+    const major = Number(match[1]);
+    const minor = Number(match[2]);
+    return major > 0 || minor >= 77;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Markers that indicate Metro has finished its startup phase and is ready
  * to serve bundles. The list grows over time as RN versions ship new
  * wording — RN 0.83 prints "Starting dev server on http://localhost:PORT"
@@ -367,13 +426,12 @@ export class MetroManager extends EventEmitter {
 
     const port = explicitPort ?? this.allocatePort(worktreeKey);
 
-    const args = ["start", "--port", String(port)];
-    if (resetCache) {
-      args.push("--reset-cache");
-    }
-    if (verbose) {
-      args.push("--verbose");
-    }
+    const args = composeMetroStartArgs({
+      port,
+      resetCache,
+      verbose,
+      clientLogs: supportsClientLogs(projectRoot),
+    });
 
     // Use Node's child_process.spawn for compatibility with both Bun and Node/Electron
     const [cmd, ...cmdPrefix] = resolveRnBin(projectRoot);

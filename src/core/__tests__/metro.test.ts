@@ -7,11 +7,17 @@ import {
   vi,
   type Mock,
 } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { ArtifactStore } from "../artifact.js";
-import { MetroManager, METRO_STARTUP_BANNERS, isMetroStartupBanner } from "../metro.js";
+import {
+  MetroManager,
+  METRO_STARTUP_BANNERS,
+  isMetroStartupBanner,
+  composeMetroStartArgs,
+  supportsClientLogs,
+} from "../metro.js";
 import { asSessionId, type SessionId } from "../identifiers.js";
 import type { MetroInstance } from "../types.js";
 
@@ -423,5 +429,82 @@ describe("MetroManager", () => {
 
       expect(manager.getAll()).toHaveLength(0);
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// composeMetroStartArgs + supportsClientLogs — the --client-logs pipe
+// (2026-06-11 acme battle-test: RN 0.77+ moved console.* off Metro
+// stdout, so agents reading metro-logs lost app console output entirely).
+// ---------------------------------------------------------------------------
+
+describe("composeMetroStartArgs", () => {
+  it("composes the base argv", () => {
+    expect(composeMetroStartArgs({ port: 8081 })).toEqual([
+      "start",
+      "--port",
+      "8081",
+    ]);
+  });
+
+  it("appends --client-logs when supported", () => {
+    expect(composeMetroStartArgs({ port: 8090, clientLogs: true })).toEqual([
+      "start",
+      "--port",
+      "8090",
+      "--client-logs",
+    ]);
+  });
+
+  it("keeps reset-cache + verbose ordering with client-logs last", () => {
+    expect(
+      composeMetroStartArgs({
+        port: 8081,
+        resetCache: true,
+        verbose: true,
+        clientLogs: true,
+      }),
+    ).toEqual(["start", "--port", "8081", "--reset-cache", "--verbose", "--client-logs"]);
+  });
+});
+
+describe("supportsClientLogs", () => {
+  function worktreeWithRnVersion(version: string | null): string {
+    const dir = mkdtempSync(join(tmpdir(), "rn-dev-clientlogs-"));
+    if (version !== null) {
+      const rnDir = join(dir, "node_modules", "react-native");
+      mkdirSync(rnDir, { recursive: true });
+      writeFileSync(join(rnDir, "package.json"), JSON.stringify({ version }));
+    }
+    return dir;
+  }
+
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  it.each([
+    ["0.77.0", true],
+    ["0.83.5", true],
+    ["1.0.0", true],
+    ["0.76.9", false],
+    ["0.73.4", false],
+  ])("react-native %s → %s", (version, expected) => {
+    const dir = worktreeWithRnVersion(version);
+    dirs.push(dir);
+    expect(supportsClientLogs(dir)).toBe(expected);
+  });
+
+  it("returns false when react-native is not installed (Metro must still start)", () => {
+    const dir = worktreeWithRnVersion(null);
+    dirs.push(dir);
+    expect(supportsClientLogs(dir)).toBe(false);
+  });
+
+  it("returns false on an unparseable version", () => {
+    const dir = worktreeWithRnVersion("nightly-whatever");
+    dirs.push(dir);
+    expect(supportsClientLogs(dir)).toBe(false);
   });
 });

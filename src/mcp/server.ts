@@ -122,6 +122,27 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
   const profiles = profileStore.list();
   const profile = profiles.find((p) => p.isDefault) ?? profiles[0] ?? null;
 
+  // Bug 6 — explicit allowlist (not `session/*` glob) so a future
+  // `session/error` event with a sensitive payload doesn't auto-leak
+  // into MCP's process address space. Security P1-3 on PR #27. Add new
+  // entries here when the daemon emits new session-level kinds and the
+  // MCP tool surface needs them.
+  //
+  // M2a — `builder/*` added so rn-dev/build-status can surface build
+  // progress (line/progress/done) to agents that polled after kicking
+  // the build off via rn-dev/build. builder events carry only
+  // build-process telemetry (xcodebuild stdout, gradle phases, error
+  // diagnostics) — no sensitive payloads, so the allowlist expansion is
+  // bounded.
+  //
+  // Hoisted to a helper because the reconnect path (below) re-runs the
+  // exact same connect — the kinds allowlist must never drift between
+  // boot and reconnect.
+  const connectSession = (p: NonNullable<typeof profile>) =>
+    connectToDaemonSession(projectRoot, p, {
+      kinds: ["modules/*", "session/log", "session/status", "builder/*"],
+    });
+
   // Phase M1 — multi-session shell. The boot path attaches at most one
   // session today (the profile MCP discovered at startup); M3 will let
   // an agent open additional sessions via `rn-dev/start-session
@@ -131,22 +152,7 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
   let defaultSessionId: SessionId | null = null;
   if (profile) {
     try {
-      const session = await connectToDaemonSession(projectRoot, profile, {
-        // Bug 6 — explicit allowlist (not `session/*` glob) so a
-        // future `session/error` event with a sensitive payload
-        // doesn't auto-leak into MCP's process address space.
-        // Security P1-3 on PR #27. Add new entries here when the
-        // daemon emits new session-level kinds and the MCP tool
-        // surface needs them.
-        //
-        // M2a — `builder/*` added so rn-dev/build-status can surface
-        // build progress (line/progress/done) to agents that polled
-        // after kicking the build off via rn-dev/build. builder events
-        // carry only build-process telemetry (xcodebuild stdout, gradle
-        // phases, error diagnostics) — no sensitive payloads, so the
-        // allowlist expansion is bounded.
-        kinds: ["modules/*", "session/log", "session/status", "builder/*"],
-      });
+      const session = await connectSession(profile);
       sessions.set(session.sessionId, { session, profile });
       defaultSessionId = session.sessionId;
     } catch {
@@ -248,6 +254,83 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
     });
   };
 
+  // -------------------------------------------------------------------
+  // Auto-reconnect (2026-06 acme battle-test blocker). The subscribe
+  // socket opened by connectToDaemonSession is the ONLY transport for
+  // every session-scoped RPC — pre-fix, a dead socket (daemon killed,
+  // crashed, or upgraded) left every session tool throwing "connection
+  // already closed" until the whole MCP client (i.e. Claude Code) was
+  // restarted.
+  //
+  // `disconnected` fires only on UNEXPECTED socket death:
+  // `notifyDisconnected` early-returns on voluntaryClose (disconnect/
+  // release), and `rn-dev/stop-session` only sends the `session/stop`
+  // RPC — the daemon leaves subscriber sockets open on session
+  // teardown. So this never resurrects a session an agent intentionally
+  // stopped.
+  //
+  // Recovery is boot-or-join by the record's profile: if the daemon
+  // died, connectToDaemonSession cold-spawns a fresh one; if only our
+  // socket died, it joins the still-running session. Bounded backoff
+  // (~2.5 min total) — if every attempt fails, the record is dropped
+  // cleanly and `rn-dev/start-session` remains the manual recovery, with
+  // tools reporting "no session" instead of dead-socket errors.
+  // -------------------------------------------------------------------
+  const RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 30_000, 30_000, 30_000];
+  const reconnecting = new Set<SessionId>();
+
+  const wireSessionReconnect = (record: McpSessionRecord): void => {
+    const deadId = record.session.sessionId;
+    record.session.lifecycle.on("disconnected", () => {
+      if (reconnecting.has(deadId)) return;
+      reconnecting.add(deadId);
+      void (async () => {
+        // Drop the dead record immediately so session tools degrade to
+        // the honest "no session" error during the retry window instead
+        // of "connection already closed".
+        ctx.sessions.delete(deadId);
+        if (ctx.defaultSessionId === deadId) ctx.defaultSessionId = null;
+        try {
+          record.session.disconnect();
+        } catch {
+          // already closed
+        }
+        console.error(
+          `rn-dev mcp: daemon connection lost for session ${deadId} — reconnecting`,
+        );
+
+        for (const delayMs of RECONNECT_DELAYS_MS) {
+          await new Promise((r) => setTimeout(r, delayMs));
+          try {
+            const fresh = await connectSession(record.profile);
+            const freshRecord: McpSessionRecord = {
+              session: fresh,
+              profile: record.profile,
+            };
+            ctx.sessions.set(fresh.sessionId, freshRecord);
+            if (ctx.defaultSessionId === null) {
+              ctx.defaultSessionId = fresh.sessionId;
+            }
+            wireSessionEvents(freshRecord);
+            wireSessionReconnect(freshRecord);
+            void refreshModuleTools();
+            console.error(
+              `rn-dev mcp: session reconnected (${deadId} -> ${fresh.sessionId})`,
+            );
+            reconnecting.delete(deadId);
+            return;
+          } catch {
+            // Daemon still down — keep backing off.
+          }
+        }
+        reconnecting.delete(deadId);
+        console.error(
+          `rn-dev mcp: reconnect attempts for session ${deadId} exhausted — call rn-dev/start-session to recover`,
+        );
+      })();
+    });
+  };
+
   // Phase M3 — when `rn-dev/start-session { profileName }` opens a new
   // session, attach it to the multi-session shell here so the
   // tools/listChanged stream picks up the new session's modules and
@@ -258,6 +341,7 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
       ctx.defaultSessionId = record.session.sessionId;
     }
     wireSessionEvents(record);
+    wireSessionReconnect(record);
     // Pick up any module the new session contributes that wasn't
     // present in the previous snapshot, and notify connected clients.
     void refreshModuleTools();
@@ -265,6 +349,7 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
 
   for (const record of ctx.sessions.values()) {
     wireSessionEvents(record);
+    wireSessionReconnect(record);
   }
 }
 

@@ -348,13 +348,24 @@ export class DevToolsManager extends EventEmitter {
         `DevToolsManager: target ${targetId} not found for session ${sessionId}`
       );
     }
-    if (state.selectedTargetId === targetId) {
-      // Re-selecting the already-selected target is a re-arm request, not
-      // a no-op. After a Hermes reload the inspector ws bounces and
-      // reopens on the SAME target, but CDP domain state (Network.enable)
-      // does not survive the new connection — capture silently stops. The
-      // UI/agent re-selects to recover; re-flush each tap's enable
-      // commands so capture comes back without a full proxy teardown.
+    if (state.selectedTargetId === targetId && state.proxy.handle.isUpstreamOpen) {
+      // Re-selecting the already-selected target over a LIVE upstream is a
+      // re-arm request, not a no-op. After a Hermes reload the inspector ws
+      // bounces and reopens on the SAME target, but CDP domain state
+      // (Network.enable) does not survive the new connection — capture
+      // silently stops. The UI/agent re-selects to recover; re-flush each
+      // tap's enable commands so capture comes back without a full proxy
+      // teardown.
+      //
+      // The `isUpstreamOpen` guard exists because this shortcut is
+      // guaranteed dead when the upstream socket has closed —
+      // `sendCommand` rejects with `upstream-not-open` before anything
+      // reaches the wire. iOS suspend/resume hits exactly that shape: the
+      // app suspends (upstream closes, target delisted), then resumes and
+      // re-registers under the SAME target id. Pre-guard, the re-select
+      // "succeeded" while flushing enables into a dead socket and the
+      // session stayed `no-target` forever. Fall through to the full
+      // re-dial below instead.
       for (const tap of state.taps) {
         for (const cmd of tap.enableCommands) {
           state.proxy.sendCommand(cmd, 5000).catch(() => {
@@ -365,9 +376,14 @@ export class DevToolsManager extends EventEmitter {
       return;
     }
 
-    // Bump ring epoch with target-swap reason for every tap's ring.
+    // Bump ring epoch for every tap's ring. `target-swap` for a genuine
+    // swap; `proxy-restart` when re-dialing the SAME target over a dead
+    // upstream (capture continuity is broken either way — CDP re-enables
+    // reset request ids).
+    const boundaryReason =
+      state.selectedTargetId === targetId ? "proxy-restart" : "target-swap";
     for (const tap of state.taps) {
-      tap.ring.markSessionBoundary("target-swap");
+      tap.ring.markSessionBoundary(boundaryReason);
     }
     state.lastSnapshot.clear();
     state.dirty = { added: new Set(), updated: new Set(), evicted: new Set() };
@@ -375,8 +391,20 @@ export class DevToolsManager extends EventEmitter {
     state.selectedTargetId = targetId;
     state.selectedTarget = target;
 
-    // Replace the proxy with one pointing at the new target. Fusebox URL
-    // rewrite layer (Phase 2) will reflect the new `sessionNonce`.
+    await this.attachProxyToTarget(state, target);
+  }
+
+  /**
+   * Replace the session's proxy with a fresh one dialed at `target` and
+   * re-attach every tap. Shared by `selectTarget` (swap / dead-upstream
+   * re-dial) and `pollTargets`' reconnect-on-reappear recovery — the
+   * Fusebox URL rewrite layer (Phase 2) reflects the new `sessionNonce`.
+   */
+  private async attachProxyToTarget(
+    state: SessionState,
+    target: TargetDescriptor
+  ): Promise<void> {
+    const sessionId = state.sessionId;
     await state.proxy.stop();
     const newProxy = new CdpProxy({
       upstreamUrl: target.webSocketDebuggerUrl,
@@ -749,6 +777,36 @@ export class DevToolsManager extends EventEmitter {
         void this.selectTarget(state.sessionId, def.id).catch(() => {
           const s = this.instances.get(state.sessionId);
           if (s && s.selectedTargetId === null) s.proxyStatus = "no-target";
+        });
+        return;
+      }
+    }
+
+    // Reconnect-on-reappear: the previously selected target dropped
+    // (upstream closed, `checkPreemption` delisted it → `no-target`) and
+    // has now re-registered under the SAME id. iOS suspend/resume is the
+    // canonical shape — the device suspends the app (inspector socket
+    // closes, target delisted from `/json`), then resume re-registers the
+    // identical device-hash/page id. The auto-arm branch above never
+    // fires for it (`selectedTargetId` is not null), and select-target's
+    // same-id shortcut used to flush enables into the dead socket — so
+    // pre-fix, the session sat in `no-target` permanently. Re-dial the
+    // stale selection the moment `/json` lists it again. Scoped to
+    // `no-target` only: `preempted` means another frontend owns the
+    // target, and auto-redialing would fight it.
+    if (state.selectedTargetId !== null && state.proxyStatus === "no-target") {
+      const reappeared = fresh.find((t) => t.id === state.selectedTargetId);
+      if (reappeared) {
+        state.proxyStatus = "starting"; // re-entrancy guard (same as auto-arm)
+        for (const tap of state.taps) {
+          tap.ring.markSessionBoundary("proxy-restart");
+        }
+        state.lastSnapshot.clear();
+        state.dirty = { added: new Set(), updated: new Set(), evicted: new Set() };
+        state.selectedTarget = reappeared;
+        void this.attachProxyToTarget(state, reappeared).catch(() => {
+          const s = this.instances.get(state.sessionId);
+          if (s) s.proxyStatus = "no-target";
         });
         return;
       }

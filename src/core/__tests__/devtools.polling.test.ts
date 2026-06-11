@@ -283,3 +283,99 @@ describe("DevToolsManager preemption detection (immediate /json re-poll)", () =>
     expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("no-target");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Same-target reconnect — the iOS suspend/resume shape (2026-06-11 acme
+// battle-test). The device suspends the app (upstream ws closes, target
+// delisted from /json), then resume re-registers the IDENTICAL
+// device-hash/page id. Pre-fix this landed in a permanent `no-target`:
+// auto-arm requires `selectedTargetId === null`, and select-target's
+// same-id shortcut flushed enables into the dead socket.
+// ---------------------------------------------------------------------------
+
+describe("DevToolsManager same-target reconnect (iOS suspend/resume)", () => {
+  let env: MutableEnv;
+  let metro: MetroFake;
+  let mgr: DevToolsManager;
+
+  beforeEach(async () => {
+    env = await startMutableEnv([
+      { id: "abc", type: "node", title: "App" },
+    ]);
+    metro = makeMetroFake();
+    metro.setInstance(sid("w1"), {
+      sessionId: sid("w1"),
+      worktree: "w1",
+      port: env.metroPort,
+      pid: 1,
+      status: "running",
+      startedAt: new Date(),
+      projectRoot: "/tmp",
+    });
+    mgr = new DevToolsManager(metro as unknown as MetroManager, {
+      deltaFlushIntervalMs: 30,
+      pollIntervalMs: 0,
+    });
+    await mgr.start(sid("w1"));
+    await waitMs(30);
+  });
+
+  afterEach(async () => {
+    await mgr.stopAll();
+    await env.teardown();
+  });
+
+  /** Drive the session into the suspend posture: target delisted +
+   *  upstream closed → `no-target` with the stale selection retained. */
+  async function suspendApp(): Promise<void> {
+    env.setTargets([]);
+    env.closeUpstream();
+    await waitMs(200);
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("no-target");
+    expect(mgr.status(sid("w1")).meta.selectedTargetId).toBe("abc");
+  }
+
+  it("pollTargets re-dials when the selected target reappears under the same id", async () => {
+    await suspendApp();
+
+    // Resume: the same target id re-registers.
+    env.setTargets([{ id: "abc", type: "node", title: "App" }]);
+    await pollNow(mgr, sid("w1"));
+    // attachProxyToTarget runs async off the poll tick — give the ws
+    // round-trip a moment.
+    await waitMs(300);
+
+    const status = mgr.status(sid("w1"));
+    expect(status.meta.proxyStatus).toBe("connected");
+    expect(status.meta.selectedTargetId).toBe("abc");
+  });
+
+  it("selectTarget with the same id over a dead upstream does a full re-dial", async () => {
+    await suspendApp();
+    env.setTargets([{ id: "abc", type: "node", title: "App" }]);
+    // Refresh `state.targets` (selectTarget validates against it). The
+    // poll's recovery branch may or may not win the race first — either
+    // way, a same-id re-select must leave the session connected.
+    // Pre-fix it silently no-op'd against the dead socket.
+    await pollNow(mgr, sid("w1")).catch(() => undefined);
+    await waitMs(300);
+
+    await mgr.selectTarget(sid("w1"), "abc");
+    await waitMs(200);
+
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("connected");
+  });
+
+  it("reconnect does NOT fire while 'preempted' (another frontend owns the target)", async () => {
+    // Upstream closes but the target stays listed → preempted.
+    env.closeUpstream();
+    await waitMs(200);
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("preempted");
+
+    // Polling must not auto-redial a preempted target — that would fight
+    // the other frontend for the slot.
+    await pollNow(mgr, sid("w1"));
+    await waitMs(200);
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("preempted");
+  });
+});

@@ -126,9 +126,9 @@ function makeMockSession(
 // ---------------------------------------------------------------------------
 
 describe("createToolDefinitions()", () => {
-  it("returns 35 tool definitions (Phase M5 adds rn-dev/audit-tail on top of the prior 34)", () => {
+  it("returns 36 tool definitions (devtools-reconnect joins the M5 set of 35)", () => {
     const tools = createToolDefinitions(makeMockContext());
-    expect(tools).toHaveLength(35);
+    expect(tools).toHaveLength(36);
   });
 
   it("each tool has name, description, inputSchema, and handler", () => {
@@ -235,6 +235,7 @@ describe("createToolDefinitions()", () => {
       "rn-dev/stop-session",
       "rn-dev/list-sessions",
       "rn-dev/reload",
+      "rn-dev/devtools-reconnect",
       "rn-dev/dev-menu",
       "rn-dev/metro-status",
       "rn-dev/clean",
@@ -508,5 +509,59 @@ describe("createToolDefinitions()", () => {
         code: "E_REGISTRY_FETCH_FAILED",
       });
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2026-06-11 battle-test follow-ups: agent parity for the GUI's DevTools
+// Reconnect + honest usage error from modules-status.
+// ---------------------------------------------------------------------------
+
+describe("rn-dev/devtools-reconnect", () => {
+  it("restarts the session's CDP proxy and returns the new proxy coordinates", async () => {
+    const session = makeMockSession(async () => ({}));
+    const restart = vi.fn(async () => ({ proxyPort: 9999, sessionNonce: "nonce-1" }));
+    (session as unknown as { devtools: { restart: typeof restart } }).devtools = {
+      restart,
+    };
+    const ctx = makeMockContext({ session });
+    const tools = createToolDefinitions(ctx);
+    const tool = tools.find((t) => t.name === "rn-dev/devtools-reconnect");
+    expect(tool).toBeDefined();
+
+    const result = (await tool!.handler({})) as ToolResult;
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect(result.structuredContent).toMatchObject({
+      status: "reconnected",
+      proxyPort: 9999,
+      sessionNonce: "nonce-1",
+    });
+  });
+
+  it("returns the no-session error when no session is attached", async () => {
+    const ctx = makeMockContext();
+    const tools = createToolDefinitions(ctx);
+    const tool = tools.find((t) => t.name === "rn-dev/devtools-reconnect")!;
+
+    const result = (await tool.handler({})) as { isError?: boolean };
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe("rn-dev/modules-status arg validation", () => {
+  it("missing moduleId returns a usage error, not a bare {found:false}", async () => {
+    // The MCP SDK does not enforce inputSchema.required server-side; the
+    // pre-fix handler forwarded the undefined moduleId to the daemon and
+    // surfaced {found:false} — indistinguishable from "module not
+    // loaded" (2026-06-11 battle-test confusion).
+    const ctx = makeMockContext({
+      session: makeMockSession(async () => ({ found: false })),
+    });
+    const tools = createToolDefinitions(ctx);
+    const tool = tools.find((t) => t.name === "rn-dev/modules-status")!;
+
+    const result = (await tool.handler({})) as { isError?: boolean };
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result)).toContain("requires { moduleId }");
   });
 });

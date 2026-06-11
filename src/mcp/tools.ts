@@ -714,6 +714,31 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
       },
     },
     {
+      name: "rn-dev/devtools-reconnect",
+      description:
+        "Restart the resolved session's DevTools CDP proxy (stop + fresh target discovery + re-arm capture). The agent-side equivalent of the GUI's DevTools Reconnect button — use when capture status reports `no-target`/`preempted` after the app relaunched, or when a raw debugger probe preempted the capture slot. Pass `sessionId` to target a specific session.",
+      inputSchema: withSessionIdProp({ type: "object", properties: {} }),
+      handler: async (args) => {
+        // Agent-native parity (2026-06-11 battle-test): the GUI has had
+        // Reconnect since the Phase 3 polish, but agents had no
+        // equivalent — recovering a wedged capture required a same-id
+        // select-target workaround. devtools/restart is the single
+        // atomic verb the daemon exposes for exactly this (stop+start
+        // composed inside DevToolsManager so concurrent observers never
+        // see the stop/start gap).
+        const resolved = resolveSession(ctx, args);
+        if (!resolved.ok) return resolved.result;
+        const { proxyPort, sessionNonce } =
+          await resolved.record.session.devtools.restart();
+        return okResult({
+          status: "reconnected",
+          sessionId: resolved.sessionId,
+          proxyPort,
+          sessionNonce,
+        });
+      },
+    },
+    {
       name: "rn-dev/dev-menu",
       description:
         "Open the device developer menu for the resolved session. Pass `sessionId` to target a specific session.",
@@ -1402,6 +1427,22 @@ function buildModulesLifecycleTools(ctx: McpContext): ToolDefinition[] {
         },
       },
       handler: async (args) => {
+        // The MCP SDK does not enforce inputSchema.required server-side,
+        // so a missing moduleId used to fall through to the daemon and
+        // come back as a bare `{found:false}` — indistinguishable from
+        // "module exists but isn't loaded" (2026-06-11 battle-test
+        // confusion). Reject with usage guidance instead.
+        if (typeof args.moduleId !== "string" || args.moduleId.length === 0) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text" as const,
+                text: 'rn-dev/modules-status requires { moduleId } (e.g. "devtools-network"). Use rn-dev/modules-list to see loaded modules.',
+              },
+            ],
+          } satisfies ToolResult;
+        }
         const resp = await ipcAction(ctx, "modules/status", args);
         if (!resp) return noSessionError();
         return okResult(

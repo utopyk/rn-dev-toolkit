@@ -44,6 +44,16 @@ import {
   makeNetworkCursor,
 } from "./devtools/types.js";
 
+/**
+ * Consecutive `/json` poll ticks `proxyStatus` may sit at `"starting"`
+ * before the wedge-escape in `pollTargets` reverts it to `"no-target"`.
+ * At the default 1s poll interval this is ~10s — far beyond any healthy
+ * attach (eager-upstream connect is capped at 3s) but short enough that
+ * a wedged session self-heals within one human sigh instead of needing
+ * a manual select-target. Exported for tests.
+ */
+export const STARTING_WEDGE_TICKS = 10;
+
 // ---------------------------------------------------------------------------
 // Per-worktree state
 // ---------------------------------------------------------------------------
@@ -97,6 +107,13 @@ interface SessionState {
    * registered") is diagnosable instead of `connected`-with-empty-buffer.
    */
   enableErrors: Map<string, string>;
+  /**
+   * Consecutive poll ticks spent in `proxyStatus: "starting"`. The
+   * wedge-escape in `pollTargets` reverts to `no-target` once this hits
+   * STARTING_WEDGE_TICKS — a hung attach must not disable the recovery
+   * branches forever. Reset on any non-starting tick.
+   */
+  startingTicks: number;
   deltaTimer: ReturnType<typeof setInterval> | null;
   /**
    * Periodic `/json` poll — tracks target availability without requiring
@@ -226,6 +243,7 @@ export class DevToolsManager extends EventEmitter {
       lastSnapshot: new Map(),
       dirty: { added: new Set(), updated: new Set(), evicted: new Set() },
       enableErrors: new Map(),
+      startingTicks: 0,
     };
 
     if (!selected) {
@@ -793,6 +811,27 @@ export class DevToolsManager extends EventEmitter {
 
     if (changed) {
       state.targets = fresh;
+    }
+
+    // Wedge escape (2026-06-11 acme battle-test): `starting` is the
+    // re-entrancy guard both arm branches below set before dispatching
+    // an async attach. If that attach hangs — observed live when the
+    // app was being reinstalled mid-build, leaving a half-dead inspector
+    // page — nothing ever resets the status, and BOTH recovery branches
+    // skip on `starting` forever: a permanent wedge only a manual
+    // select-target could clear. Count consecutive `starting` ticks and
+    // force back to `no-target` after the deadline so the arm branches
+    // (same tick, below) can immediately retry.
+    if (state.proxyStatus === "starting") {
+      state.startingTicks += 1;
+      if (state.startingTicks >= STARTING_WEDGE_TICKS) {
+        state.startingTicks = 0;
+        state.proxyStatus = "no-target";
+        this.emitStatus(state);
+        // fall through — recovery branches below may re-arm this tick
+      }
+    } else {
+      state.startingTicks = 0;
     }
 
     // Auto-arm: select + enable capture the instant an app first connects.

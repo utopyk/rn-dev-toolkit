@@ -22,7 +22,7 @@ import { WebSocketServer, type WebSocket as WsSocket } from "ws";
 import type { MetroManager } from "../metro.js";
 import type { MetroInstance } from "../types.js";
 import { asSessionId, type SessionId } from "../identifiers.js";
-import { DevToolsManager } from "../devtools.js";
+import { DevToolsManager, STARTING_WEDGE_TICKS } from "../devtools.js";
 
 function sid(s: string): SessionId {
   return asSessionId(s);
@@ -475,5 +475,87 @@ describe("DevToolsManager enable-command refusals", () => {
     const meta = mgr.status(sid("w1")).meta;
     expect(meta.proxyStatus).toBe("connected");
     expect(meta.enableErrors).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wedge escape — `starting` is the arm branches' re-entrancy guard; a hung
+// attach must not disable recovery forever (2026-06-11 acme battle-test:
+// an attach dispatched while the app was being reinstalled mid-build left
+// the session at `starting` until a manual select-target).
+// ---------------------------------------------------------------------------
+
+describe("DevToolsManager starting-wedge escape", () => {
+  let env: MutableEnv;
+  let metro: MetroFake;
+  let mgr: DevToolsManager;
+
+  beforeEach(async () => {
+    env = await startMutableEnv([{ id: "abc", type: "node", title: "App" }]);
+    metro = makeMetroFake();
+    metro.setInstance(sid("w1"), {
+      sessionId: sid("w1"),
+      worktree: "w1",
+      port: env.metroPort,
+      pid: 1,
+      status: "running",
+      startedAt: new Date(),
+      projectRoot: "/tmp",
+    });
+    mgr = new DevToolsManager(metro as unknown as MetroManager, {
+      deltaFlushIntervalMs: 30,
+      pollIntervalMs: 0,
+    });
+    await mgr.start(sid("w1"));
+    await waitMs(30);
+  });
+
+  afterEach(async () => {
+    await mgr.stopAll();
+    await env.teardown();
+  });
+
+  /** Force the wedge posture the live bug exhibited: `starting` stuck
+   *  with a selection, both arm branches skipping. */
+  function forceStartingWedge(): void {
+    const state = (mgr as unknown as {
+      instances: Map<SessionId, { proxyStatus: string }>;
+    }).instances.get(sid("w1"));
+    if (!state) throw new Error("no state");
+    state.proxyStatus = "starting";
+  }
+
+  it("escapes to no-target after STARTING_WEDGE_TICKS polls when the target is gone", async () => {
+    env.setTargets([]);
+    forceStartingWedge();
+
+    for (let i = 0; i < STARTING_WEDGE_TICKS - 1; i++) {
+      await pollNow(mgr, sid("w1"));
+    }
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("starting");
+
+    await pollNow(mgr, sid("w1"));
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("no-target");
+  });
+
+  it("escape + same-tick recovery: re-dials when the selected target is still listed", async () => {
+    forceStartingWedge();
+
+    for (let i = 0; i < STARTING_WEDGE_TICKS; i++) {
+      await pollNow(mgr, sid("w1"));
+    }
+    // The escape tick reverted to no-target AND the reconnect branch
+    // re-dialed the still-listed selection in the same pass.
+    await waitMs(300);
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("connected");
+  });
+
+  it("a healthy non-starting tick resets the counter (no false escape)", async () => {
+    // Healthy connected session: poll well past the deadline — status
+    // must remain connected, never bounced through no-target.
+    for (let i = 0; i < STARTING_WEDGE_TICKS + 3; i++) {
+      await pollNow(mgr, sid("w1"));
+    }
+    expect(mgr.status(sid("w1")).meta.proxyStatus).toBe("connected");
   });
 });

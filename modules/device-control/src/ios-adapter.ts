@@ -93,6 +93,18 @@ export function createIosAdapter(options: IosAdapterOptions = {}): DeviceAdapter
     async uninstallApp(udid, bundleId) {
       await simctl(["uninstall", udid, bundleId]);
     },
+
+    async setBundler(_udid, _opts) {
+      // No-op on iOS: physical devices read the dev-server host from the
+      // `ip.txt` that react-native-xcode.sh bakes into the .app at build
+      // time (the LAN IP), so they already connect over Wi-Fi and survive
+      // USB drops. There is no clean CLI to set RCT_jsLocation on a
+      // physical device, and simulators use localhost regardless.
+      return {
+        applied: false,
+        detail: "iOS uses the LAN IP baked into ip.txt at build time; no device-side bundler change needed",
+      };
+    },
   };
 }
 

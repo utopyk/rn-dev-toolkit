@@ -187,6 +187,12 @@ export function validateProfile(input: unknown): ValidateProfileResult {
       );
     }
   }
+  if (p.autoBundler !== undefined && typeof p.autoBundler !== "boolean") {
+    return fail(
+      "E_PROFILE_AUTO_BUNDLER",
+      "profile.autoBundler must be a boolean when present",
+    );
+  }
 
   // Input is now shape-safe; mint the branded type so downstream APIs
   // that require a validated profile (e.g. HookManager.fire) accept it.

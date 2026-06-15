@@ -37,6 +37,12 @@ export function createAndroidAdapter(
     throw execErrorToError(outcome);
   }
 
+  /** Like `adb()` but pipes `input` to the process stdin — for writing a
+   *  file on-device via `cat >` without arg-escaping the payload. */
+  async function adbInput(argv: readonly string[], input: string): Promise<string> {
+    return runAdb(binary, argv, { input });
+  }
+
   return {
     platform: "android",
 
@@ -141,15 +147,73 @@ export function createAndroidAdapter(
     async uninstallApp(udid, appId) {
       await adb(["-s", udid, "uninstall", appId]);
     },
+
+    async setBundler(udid, opts) {
+      const { appId, host, port } = opts;
+      // appId is from the build/profile (trusted), but it lands in a shell
+      // string via run-as — guard against anything that isn't a plain
+      // bundle id rather than trust the caller blindly.
+      if (!/^[A-Za-z0-9._-]+$/.test(appId)) {
+        throw new Error(`setBundler: refusing unsafe appId "${appId}"`);
+      }
+      const prefsPath = `shared_prefs/${appId}_preferences.xml`;
+      const value = `${host}:${port}`;
+      // RN reads the dev-server host from the DEFAULT SharedPreferences,
+      // key `debug_http_host` (PackagerConnectionSettings.kt). Read the
+      // existing prefs (may not exist before first launch), merge our key
+      // in WITHOUT clobbering the app's other prefs, write back via
+      // run-as + stdin, then force-stop so the next launch re-reads.
+      // run-as only works on debuggable builds — fine, this is dev only.
+      let existing = "";
+      try {
+        existing = await adb([
+          "-s", udid, "exec-out", "run-as", appId, "cat", prefsPath,
+        ]);
+      } catch {
+        existing = ""; // file/app absent → start a fresh prefs map
+      }
+      const merged = upsertDebugHttpHost(existing, value);
+      await adbInput(
+        [
+          "-s", udid, "shell",
+          `run-as ${appId} sh -c 'mkdir -p shared_prefs && cat > ${prefsPath}'`,
+        ],
+        merged,
+      );
+      await adb(["-s", udid, "shell", "am", "force-stop", appId]);
+      return { applied: true, detail: `debug_http_host=${value} (${appId})` };
+    },
   };
 }
 
 async function runAdbDefault(
   binary: string,
   argv: readonly string[],
-  options?: { timeoutMs?: number },
+  options?: { timeoutMs?: number; input?: string },
 ): Promise<string> {
+  if (options?.input !== undefined) {
+    const outcome = await execBinary(binary, argv, options);
+    if (outcome.kind === "ok") return outcome.stdout.toString("utf8");
+    throw execErrorToError(outcome);
+  }
   return execBinaryText(binary, argv, options);
+}
+
+/**
+ * Merge a `debug_http_host` entry into an Android SharedPreferences XML
+ * `<map>` without clobbering the app's other prefs. Replaces the value if
+ * the key exists, inserts before `</map>` otherwise, and synthesizes a
+ * minimal valid prefs file when there is none. Exported for unit tests.
+ */
+export function upsertDebugHttpHost(existingXml: string, hostPort: string): string {
+  const entry = `<string name="debug_http_host">${hostPort}</string>`;
+  const trimmed = existingXml.trim();
+  if (!trimmed || !trimmed.includes("<map")) {
+    return `<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n    ${entry}\n</map>`;
+  }
+  const keyRe = /<string name="debug_http_host">[^<]*<\/string>/;
+  if (keyRe.test(trimmed)) return trimmed.replace(keyRe, entry);
+  return trimmed.replace("</map>", `    ${entry}\n</map>`);
 }
 
 /**

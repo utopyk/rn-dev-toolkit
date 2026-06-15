@@ -50,6 +50,19 @@ export interface DeviceAdapter {
   installApp?(udid: string, path: string): Promise<void>;
 
   uninstallApp(udid: string, appId: string): Promise<void>;
+
+  /**
+   * Point the installed app at a specific Metro dev-server host:port so it
+   * connects over Wi-Fi instead of the USB `adb reverse` tunnel, surviving
+   * brief USB drops. Android writes the RN `debug_http_host`
+   * SharedPreference; iOS is a no-op (physical devices already use the LAN
+   * IP baked into `ip.txt` at build time). Returns whether anything was
+   * applied + a human-readable detail.
+   */
+  setBundler(
+    udid: string,
+    opts: { appId: string; host: string; port: number },
+  ): Promise<{ applied: boolean; detail: string }>;
 }
 
 export type ListOutcome =

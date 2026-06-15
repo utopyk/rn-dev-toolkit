@@ -39,6 +39,15 @@ export interface Profile {
    * installed package rather than the base applicationId. iOS ignores it.
    */
   appIdSuffix?: string;
+  /**
+   * Auto-bundler opt-out for Android device builds. When a debug build
+   * installs on a physical Android device, rn-dev points the app at the
+   * daemon's Metro over Wi-Fi (LAN IP:port) so a brief USB disconnect
+   * doesn't drop the `adb reverse` tunnel. Default on (undefined →
+   * enabled); set `false` to rely solely on adb reverse. iOS bakes the
+   * LAN IP into `ip.txt` at build time, so this never applies there.
+   */
+  autoBundler?: boolean;
 }
 
 export interface PreflightConfig {

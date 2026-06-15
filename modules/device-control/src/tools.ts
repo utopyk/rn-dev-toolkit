@@ -220,6 +220,28 @@ export async function uninstallApp(
   return { ok: true };
 }
 
+export interface SetBundlerArgs {
+  udid: string;
+  applicationId?: string;
+  bundleId?: string;
+  host: string;
+  port: number;
+}
+
+export async function setBundler(
+  args: SetBundlerArgs,
+  deps: ToolDeps,
+): Promise<{ ok: true; applied: boolean; detail: string }> {
+  const adapter = await adapterFor(args.udid, deps);
+  const appId = resolveAppId(adapter, args, "set-bundler");
+  const result = await adapter.setBundler(args.udid, {
+    appId,
+    host: args.host,
+    port: args.port,
+  });
+  return { ok: true, ...result };
+}
+
 /**
  * Pick the right app identifier field for the adapter's platform and
  * throw a platform-specific error when it's missing. Shared between

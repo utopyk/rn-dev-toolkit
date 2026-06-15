@@ -4,6 +4,12 @@ import { EventEmitter } from "events";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "child_process";
 import { parseXcodebuildErrors, parseGradleErrors, parseXcresultErrors } from "./build-parser.js";
+import {
+  applyAndroidBundler,
+  extractAndroidPackage,
+  type AutoBundlerOptions,
+  type AutoBundlerResult,
+} from "./android-bundler.js";
 
 function resolveRnBin(projectRoot: string): [string, ...string[]] {
   const localBin = path.join(projectRoot, "node_modules", ".bin", "react-native");
@@ -145,6 +151,15 @@ export interface BuildOptions {
    * ignores this field.
    */
   appIdSuffix?: string;
+  /**
+   * Auto-bundler opt-out (Android device builds only). When a debug
+   * build installs+launches on a physical Android device, the Builder
+   * points the app at the daemon's Metro over Wi-Fi (LAN IP:port) so a
+   * brief USB blip doesn't drop the `adb reverse` tunnel. Default on
+   * (undefined → enabled); set `false` in the profile to skip it and
+   * rely solely on adb reverse. No effect on iOS or release builds.
+   */
+  autoBundler?: boolean;
 }
 
 export interface BuildResult {
@@ -224,11 +239,27 @@ export interface BuildHandle {
  * Override-hook events (source: "override") are synthesized by
  * `BuildHostCapability` in Phase H4; consumers can already discriminate.
  */
+/** Injected by the Builder to point an Android device at Metro post-build. */
+export type AutoBundlerFn = (
+  opts: AutoBundlerOptions,
+) => Promise<AutoBundlerResult>;
+
 export class Builder extends EventEmitter {
   private process: ChildProcess | null = null;
   private rawOutput = "";
   private xcresultPath: string | null = null;
   private detectedXcresultPath: string | null = null;
+  // Android package the RN CLI launch step reported (`am start ... cmp=`),
+  // captured from streamed output. Feeds the post-install auto-bundler.
+  private detectedAndroidPackage: string | null = null;
+  // Post-install auto-bundler hook. Default shells real `adb`; tests
+  // inject a fake to assert the call without touching a device.
+  private readonly applyBundler: AutoBundlerFn;
+
+  constructor(deps: { applyBundler?: AutoBundlerFn } = {}) {
+    super();
+    this.applyBundler = deps.applyBundler ?? ((opts) => applyAndroidBundler(opts));
+  }
   /**
    * Phase D3 — per-build promise plumbing. `activeBuildId` and the
    * matching resolver are set when a build's subprocess spawns and
@@ -297,6 +328,7 @@ export class Builder extends EventEmitter {
     const args = composeRunArgs(options);
 
     this.detectedXcresultPath = null;
+    this.detectedAndroidPackage = null;
 
     const [cmd, ...cmdPrefix] = resolveRnBin(projectRoot);
 
@@ -352,6 +384,13 @@ export class Builder extends EventEmitter {
         const xcresultMatch = text.match(/(?:Writing|Wrote)\s+(?:error\s+)?result\s+bundle\s+to\s+(.+?\.xcresult)/i);
         if (xcresultMatch) {
           this.detectedXcresultPath = xcresultMatch[1].trim();
+        }
+
+        // Detect the launched Android package (`am start ... cmp=<pkg>/`)
+        // for the post-install auto-bundler. Sticks once found.
+        if (this.detectedAndroidPackage === null) {
+          const pkg = extractAndroidPackage(text);
+          if (pkg) this.detectedAndroidPackage = pkg;
         }
 
         buffer += text;
@@ -479,11 +518,31 @@ export class Builder extends EventEmitter {
       this.emitBuiltin("done", { success, errors, platform, buildId });
       const resolver = this.activeResolver;
       const result: BuildResult = { success, errors, rawOutput: this.rawOutput };
+      // Capture before cleanup — a follow-on build() could reset
+      // detectedAndroidPackage while the detached bundler is in flight.
+      const androidPackage = this.detectedAndroidPackage;
       this.process = null;
       this.activeBuildId = null;
       this.activeResolver = null;
       this.activePromise = null;
       resolver?.(result);
+
+      // Post-install auto-bundler: Android device debug builds only,
+      // detached so it never blocks `done`/the resolver. Best-effort —
+      // failures are surfaced as a line but never fail the build (adb
+      // reverse remains the fallback transport).
+      if (
+        success &&
+        platform === "android" &&
+        options.deviceId &&
+        options.autoBundler !== false
+      ) {
+        void this.runAutoBundler({
+          deviceId: options.deviceId,
+          port: options.port,
+          appId: androidPackage,
+        });
+      }
     });
 
     return {
@@ -491,6 +550,44 @@ export class Builder extends EventEmitter {
       promise,
       cancel: () => this.cancel(),
     };
+  }
+
+  /**
+   * Post-install hook — point an Android device at the daemon's Metro
+   * over Wi-Fi so a USB blip doesn't drop the connection. Emits a single
+   * informational line; swallows all failures (the build is already
+   * done and adb reverse is still in place).
+   */
+  private async runAutoBundler(args: {
+    deviceId: string;
+    port: number;
+    appId: string | null;
+  }): Promise<void> {
+    if (!args.appId) {
+      this.emitBuiltin("line", {
+        text: "  ℹ️ Auto-bundler skipped: couldn't read the installed package from build output (adb reverse still active)",
+        stream: "stdout",
+      });
+      return;
+    }
+    try {
+      const r = await this.applyBundler({
+        deviceId: args.deviceId,
+        appId: args.appId,
+        port: args.port,
+      });
+      this.emitBuiltin("line", {
+        text: r.applied
+          ? `  📡 Auto-bundler: pointed device at Metro over Wi-Fi — ${r.detail}`
+          : `  ℹ️ Auto-bundler skipped: ${r.detail}`,
+        stream: "stdout",
+      });
+    } catch (err) {
+      this.emitBuiltin("line", {
+        text: `  ⚠️ Auto-bundler failed (kept adb reverse): ${err instanceof Error ? err.message : String(err)}`,
+        stream: "stderr",
+      });
+    }
   }
 
   cancel(): void {

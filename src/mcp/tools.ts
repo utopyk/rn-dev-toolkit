@@ -855,6 +855,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
           scheme: { type: "string", description: "iOS scheme; falls back to the session profile's value." },
           configuration: { type: "string", description: "Build configuration / variant, maps to RN CLI --mode (iOS Xcode configuration e.g. Debug; Android Gradle variant e.g. betaDebug). Falls back to the profile or variant default." },
           appIdSuffix: { type: "string", description: "Android applicationId suffix (e.g. beta → com.acme.beta), passed as --appIdSuffix. Falls back to the session profile's value." },
+          autoBundler: { type: "boolean", description: "Android device builds only: after install, point the app at the daemon's Metro over Wi-Fi (LAN IP:port) so a USB blip doesn't drop the connection. Default on; set false to rely solely on adb reverse. Falls back to the session profile's value." },
         },
       }),
       handler: async (args) => {
@@ -872,6 +873,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const scheme = (args.scheme as string | undefined) ?? profile.scheme ?? undefined;
         const configuration = (args.configuration as string | undefined) ?? profile.configuration ?? undefined;
         const appIdSuffix = (args.appIdSuffix as string | undefined) ?? profile.appIdSuffix ?? undefined;
+        const autoBundler = (args.autoBundler as boolean | undefined) ?? profile.autoBundler ?? undefined;
         const port = profile.metroPort;
 
         const payload: Record<string, unknown> = {
@@ -885,6 +887,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         if (scheme) payload.scheme = scheme;
         if (configuration) payload.configuration = configuration;
         if (appIdSuffix) payload.appIdSuffix = appIdSuffix;
+        if (autoBundler !== undefined) payload.autoBundler = autoBundler;
 
         const resp = await resolved.record.session.client.send(
           makeIpcMessage("builder/build", payload),

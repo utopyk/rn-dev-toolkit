@@ -552,9 +552,20 @@ function parseBuildOptions(
     appIdSuffix = p.appIdSuffix;
   }
 
+  let autoBundler: boolean | undefined;
+  if (p.autoBundler !== undefined) {
+    if (typeof p.autoBundler !== "boolean") {
+      return fail(
+        "E_RPC_INVALID_PAYLOAD",
+        "builder/build.autoBundler must be a boolean when present",
+      );
+    }
+    autoBundler = p.autoBundler;
+  }
+
   return {
     ok: true,
-    opts: { projectRoot, platform, port, variant, deviceId, env, scheme, configuration, appIdSuffix },
+    opts: { projectRoot, platform, port, variant, deviceId, env, scheme, configuration, appIdSuffix, autoBundler },
   };
 }
 

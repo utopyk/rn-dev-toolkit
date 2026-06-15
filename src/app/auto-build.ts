@@ -50,7 +50,14 @@ export function triggerBuildsIfNeeded(
         ...(profile.configuration ? { configuration: profile.configuration } : {}),
         ...(plat === "ios"
           ? { ...(profile.scheme ? { scheme: profile.scheme } : {}) }
-          : { ...(profile.appIdSuffix ? { appIdSuffix: profile.appIdSuffix } : {}) }),
+          : {
+              ...(profile.appIdSuffix ? { appIdSuffix: profile.appIdSuffix } : {}),
+              // Forward the auto-bundler opt-out only when set; undefined
+              // means "default on" at the Builder (Android device builds).
+              ...(profile.autoBundler !== undefined
+                ? { autoBundler: profile.autoBundler }
+                : {}),
+            }),
       });
     }
   }, 200);

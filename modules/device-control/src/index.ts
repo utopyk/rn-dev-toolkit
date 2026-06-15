@@ -31,6 +31,7 @@ import {
   list,
   logsTail,
   screenshot,
+  setBundler,
   swipe,
   tap,
   typeText,
@@ -40,6 +41,7 @@ import {
   type ListArgs,
   type LogsTailArgs,
   type ScreenshotArgs,
+  type SetBundlerArgs,
   type SwipeArgs,
   type TapArgs,
   type TypeTextArgs,
@@ -140,6 +142,19 @@ function toUninstallAppArgs(args: Args): UninstallAppArgs {
   return out;
 }
 
+function toSetBundlerArgs(args: Args): SetBundlerArgs {
+  const out: SetBundlerArgs = {
+    udid: requireStr(args, "udid", "set-bundler"),
+    host: requireStr(args, "host", "set-bundler"),
+    port: requireNum(args, "port", "set-bundler"),
+  };
+  const applicationId = str(args, "applicationId");
+  const bundleId = str(args, "bundleId");
+  if (applicationId !== undefined) out.applicationId = applicationId;
+  if (bundleId !== undefined) out.bundleId = bundleId;
+  return out;
+}
+
 // Only run when invoked as a subprocess (`node dist/index.js`). Importing
 // the module for tests bypasses the runModule() call. Canonical Node-ESM
 // idiom: compare the file:// URL of our own module against the
@@ -177,6 +192,8 @@ if (invokedAsEntry) {
         installApk(toInstallApkArgs(args), deps),
       "device-control__uninstall-app": (args) =>
         uninstallApp(toUninstallAppArgs(args), deps),
+      "device-control__set-bundler": (args) =>
+        setBundler(toSetBundlerArgs(args), deps),
     },
     activate: (ctx) => {
       ctx.log.info("device-control activated", {

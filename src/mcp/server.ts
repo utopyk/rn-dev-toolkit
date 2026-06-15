@@ -10,9 +10,11 @@ import type {
   McpContext,
   McpFlags,
   McpSessionRecord,
+  OpenProjectResult,
   ToolDefinition,
   ToolResult,
 } from "./tools.js";
+import { recordOpenedProject } from "../core/recent-projects.js";
 import { discoverModuleContributedTools } from "./module-proxy.js";
 import { ProfileStore } from "../core/profile.js";
 import { ArtifactStore } from "../core/artifact.js";
@@ -111,8 +113,12 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
     { capabilities: { tools: { listChanged: true } } }
   );
 
-  // Build context from the current working directory
-  const projectRoot = detectProjectRoot(process.cwd()) ?? process.cwd();
+  // Build context from the current working directory. `projectRoot` is a
+  // `let`, not a `const`: `rn-dev/open-project` re-scopes the server to a
+  // different project at runtime (the MCP analogue of the Electron picker),
+  // and `connectSession` below reads it live so post-switch boots target
+  // the new project.
+  let projectRoot = detectProjectRoot(process.cwd()) ?? process.cwd();
   const rnDevDir = path.join(projectRoot, ".rn-dev");
 
   const profileStore = new ProfileStore(path.join(rnDevDir, "profiles"));
@@ -345,6 +351,76 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
     // Pick up any module the new session contributes that wasn't
     // present in the previous snapshot, and notify connected clients.
     void refreshModuleTools();
+  };
+
+  // Project switching — the MCP analogue of the Electron picker. One active
+  // project at a time: switching tears down the current sessions, re-scopes
+  // the context to the new project, and boots its default profile. Mirrors
+  // the GUI's "switch = relaunch the window" model. `connectSession` reads
+  // the `projectRoot` `let` live, so post-switch boots target the new root.
+  ctx.openProject = async (rawPath: string): Promise<OpenProjectResult> => {
+    const root = detectProjectRoot(rawPath);
+    if (!root) {
+      return {
+        ok: false,
+        error:
+          "That path is not a React Native project (no react-native dependency found in package.json walking up from it).",
+      };
+    }
+    recordOpenedProject(root);
+
+    // Tear down the current project's sessions (switch replaces). The
+    // daemon refcount-releases each session when our subscribe socket
+    // drops; other clients attached to the same session stay running.
+    for (const record of ctx.sessions.values()) {
+      try {
+        record.session.disconnect();
+      } catch {
+        // best-effort
+      }
+    }
+    ctx.sessions.clear();
+    ctx.defaultSessionId = null;
+
+    // Re-scope every project-derived dependency to the new root.
+    projectRoot = root;
+    ctx.projectRoot = root;
+    const nextRnDevDir = path.join(root, ".rn-dev");
+    ctx.profileStore = new ProfileStore(path.join(nextRnDevDir, "profiles"));
+    ctx.artifactStore = new ArtifactStore(path.join(nextRnDevDir, "artifacts"));
+    ctx.preflightEngine = createDefaultPreflightEngine(root);
+
+    const nextProfiles = ctx.profileStore.list();
+    const nextProfile =
+      nextProfiles.find((p) => p.isDefault) ?? nextProfiles[0] ?? null;
+    ctx.bootProfile = nextProfile;
+
+    let bootedSessionId: string | null = null;
+    if (nextProfile) {
+      try {
+        const session = await connectSession(nextProfile);
+        const record: McpSessionRecord = { session, profile: nextProfile };
+        ctx.sessions.set(session.sessionId, record);
+        ctx.defaultSessionId = session.sessionId;
+        wireSessionEvents(record);
+        wireSessionReconnect(record);
+        bootedSessionId = session.sessionId;
+      } catch {
+        // Daemon unreachable for the new project — degrade to
+        // built-ins-only (same posture as startup). The agent can retry
+        // via rn-dev/start-session once the daemon is reachable.
+      }
+    }
+    // Refresh the tool snapshot for the new session's modules + notify.
+    await refreshModuleTools();
+
+    return {
+      ok: true,
+      projectRoot: root,
+      name: path.basename(root),
+      profileName: nextProfile?.name ?? null,
+      bootedSessionId,
+    };
   };
 
   for (const record of ctx.sessions.values()) {

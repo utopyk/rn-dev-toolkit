@@ -26,6 +26,7 @@ import { registerInstanceHandlers } from './instance.js';
 import { registerMetroHandlers } from './metro.js';
 import { registerToolsHandlers } from './tools.js';
 import { registerProfileHandlers } from './profile.js';
+import { registerProjectHandlers } from './project.js';
 import { registerWizardHandlers } from './wizard.js';
 import { registerDevtoolsHandlers } from './devtools.js';
 import { installPanelBridge } from '../panel-bridge-electron.js';
@@ -253,6 +254,7 @@ export function setupIpcBridge(window: BrowserWindow, initialProjectRoot?: strin
   registerMetroHandlers();
   registerToolsHandlers();
   registerProfileHandlers();
+  registerProjectHandlers();
   registerWizardHandlers();
   registerDevtoolsHandlers();
   registerModulePanelsHandlers(window);

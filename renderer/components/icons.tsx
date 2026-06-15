@@ -5,7 +5,7 @@ import {
   Search, Smartphone, Package, RefreshCw, Menu,
   Trash2, Eye, X, Plus, Play, Square, ChevronLeft,
   ChevronRight, ChevronDown, AlertTriangle, CheckCircle2,
-  Gauge, Box, History, type LucideIcon,
+  Gauge, Box, History, FolderOpen, type LucideIcon,
 } from 'lucide-react';
 
 export const Icons = {
@@ -16,7 +16,7 @@ export const Icons = {
   eye: Eye, close: X, plus: Plus, play: Play, stop: Square,
   chevronLeft: ChevronLeft, chevronRight: ChevronRight, chevronDown: ChevronDown,
   alert: AlertTriangle, check: CheckCircle2, gauge: Gauge, box: Box,
-  history: History,
+  history: History, folder: FolderOpen,
 } satisfies Record<string, LucideIcon>;
 
 /** Map legacy emoji/string icon identifiers to lucide components. */

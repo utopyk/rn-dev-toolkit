@@ -126,9 +126,9 @@ function makeMockSession(
 // ---------------------------------------------------------------------------
 
 describe("createToolDefinitions()", () => {
-  it("returns 36 tool definitions (devtools-reconnect joins the M5 set of 35)", () => {
+  it("returns 38 tool definitions (36 + list-projects/open-project parity tools)", () => {
     const tools = createToolDefinitions(makeMockContext());
-    expect(tools).toHaveLength(36);
+    expect(tools).toHaveLength(38);
   });
 
   it("each tool has name, description, inputSchema, and handler", () => {

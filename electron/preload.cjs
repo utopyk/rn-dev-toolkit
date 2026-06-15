@@ -15,6 +15,12 @@
 //   rg "useIpcOn\('" renderer/      → ON_EXACT
 
 const INVOKE_EXACT = Object.freeze([
+  // Project selection (WelcomeScreen / project picker)
+  'project:state',
+  'project:list',
+  'project:openDialog',
+  'project:open',
+
   // Profiles
   'profiles:list',
   'profiles:delete',

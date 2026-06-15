@@ -114,6 +114,54 @@
   box-shadow: var(--glow-medium);
 }
 
+.sidebar .sidebar-project { -webkit-app-region: no-drag; }
+.sidebar-project {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  background: var(--surface);
+  border-radius: var(--radius-item);
+  border: 1px solid var(--accent-border);
+  color: var(--muted);
+  cursor: pointer;
+  box-shadow: var(--neu-raised-xs);
+  transition: color 160ms ease, box-shadow 220ms ease;
+  text-align: left;
+}
+.sidebar-project:hover {
+  color: var(--ink);
+  box-shadow: var(--neu-raised-xs), var(--glow-medium);
+}
+.sidebar-project-icon {
+  flex-shrink: 0;
+  color: var(--glow);
+  display: flex;
+  align-items: center;
+}
+.sidebar-project-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.sidebar-project-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--muted-2);
+}
+.sidebar-project-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .sidebar-top {
   display: flex;
   justify-content: flex-end;

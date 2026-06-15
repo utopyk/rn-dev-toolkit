@@ -1,13 +1,38 @@
 import { app, BrowserWindow } from 'electron';
+import { existsSync } from 'node:fs';
 import path from 'path';
 import { setupIpcBridge, startRealServices } from './ipc/index.js';
 import { setElectronQuitting } from './ipc/services.js';
 import { SessionsWatcher } from './ipc/sessions.js';
 import { state } from './ipc/state.js';
 import { detectProjectRoot } from '../src/core/project.js';
+import { getLastProject } from '../src/core/recent-projects.js';
 import { serviceBus } from '../src/app/service-bus.js';
 
 const isDev = !app.isPackaged;
+
+/**
+ * Resolve which RN project this window binds to, or null to show the
+ * project picker. The root is a boot-time constant (threaded into the IPC
+ * bridge + daemon connect), so a window opens exactly one project;
+ * switching relaunches the window — see electron/ipc/project.ts.
+ *
+ * Precedence:
+ *   1. `RN_DEV_PROJECT_ROOT` — explicit override. The Playwright smoke
+ *      suite points Electron at a tmpdir fixture; always committed.
+ *   2. The last project the user explicitly opened, if it still resolves
+ *      to a real RN project on disk.
+ *   3. Nothing committed → null → WelcomeScreen. We no longer silently
+ *      auto-detect-and-open: that was the gap where a user couldn't tell
+ *      which project was active or how to change it.
+ */
+function resolveCommittedProjectRoot(): string | null {
+  const override = process.env.RN_DEV_PROJECT_ROOT;
+  if (override) return override;
+  const last = getLastProject();
+  if (last && existsSync(last) && detectProjectRoot(last)) return last;
+  return null;
+}
 
 let mainWindow: BrowserWindow | null = null;
 
@@ -87,20 +112,33 @@ async function createWindow() {
     mainWindow = null;
   });
 
-  // Detect the RN project root BEFORE setting up IPC so wizard handlers work.
-  // `RN_DEV_PROJECT_ROOT` env override skips detection — used by the
-  // Playwright smoke suite to point Electron at a tmpdir fixture without
-  // depending on detectProjectRoot's auto-discovery walk.
+  // Resolve which RN project this window binds to BEFORE setting up IPC so
+  // wizard handlers work. See `resolveCommittedProjectRoot` for precedence.
   const cwd = process.cwd();
   console.log(`[electron] CWD: ${cwd}`);
-  const projectRoot = process.env.RN_DEV_PROJECT_ROOT
-    ?? await detectProjectRoot(cwd)
-    ?? await detectProjectRoot('/Users/martincouso/Documents/GitHub/acme-mobile-app')
-    ?? cwd;
-  console.log(`[electron] Project root: ${projectRoot}`);
+  const committedRoot = resolveCommittedProjectRoot();
+  console.log(
+    committedRoot
+      ? `[electron] Project root (committed): ${committedRoot}`
+      : '[electron] No committed project — showing the project picker.',
+  );
 
-  // Pass projectRoot to IPC bridge so wizard handlers have it immediately
-  setupIpcBridge(mainWindow, projectRoot);
+  // Pass the committed root to the IPC bridge so wizard handlers have it
+  // immediately. When undefined, project:* handlers still register (the
+  // picker needs them) but the per-project handlers no-op until a project
+  // is committed via the WelcomeScreen.
+  setupIpcBridge(mainWindow, committedRoot ?? undefined);
+
+  if (!committedRoot) {
+    // No project committed — the renderer shows WelcomeScreen. Fast-fail any
+    // module IPC the renderer fires on mount (panel list + saved-theme load)
+    // so it doesn't hang 30s on `awaitModulesClient` against a daemon we
+    // never connect to. The picker itself doesn't depend on the daemon.
+    serviceBus.abortModulesClient(
+      'Select a project to start working. Open one from the welcome screen.',
+    );
+    return;
+  }
 
   // Start watching the shared daemon for sessions started by OTHER
   // clients (an LLM over MCP, the CLI/TUI). Any session this Electron
@@ -118,7 +156,7 @@ async function createWindow() {
   mainWindow.webContents.on('did-finish-load', () => {
     console.log('[electron] Renderer loaded, starting services...');
     setTimeout(() => {
-      startRealServices(projectRoot)
+      startRealServices(committedRoot)
         .then((session) => {
           if (session) {
             console.log(

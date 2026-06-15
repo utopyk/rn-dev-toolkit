@@ -1,7 +1,8 @@
 import { execSync } from "child_process";
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { basename, join } from "path";
+import { listRecentProjects } from "../core/recent-projects.js";
 import type { ProfileStore } from "../core/profile.js";
 import type { ArtifactStore } from "../core/artifact.js";
 import type { MetroManager } from "../core/metro.js";
@@ -107,6 +108,31 @@ export interface McpContext {
    * { profileName }` don't need to provide it.
    */
   attachSession?: (record: McpSessionRecord) => void;
+  /**
+   * Switch the whole server to a different RN project — the MCP analogue
+   * of the Electron project picker (one active project, switch replaces).
+   * Validates the path, records it in the shared recents store, tears down
+   * the current sessions, re-scopes `projectRoot`/`profileStore`/
+   * `artifactStore`/`preflightEngine` to the new project, and boots its
+   * default profile (if any). Wired by `server.ts`; optional because
+   * unit-test contexts that never call `rn-dev/open-project` don't need it.
+   */
+  openProject?: (path: string) => Promise<OpenProjectResult>;
+}
+
+/** Result of `ctx.openProject` / the `rn-dev/open-project` tool. */
+export interface OpenProjectResult {
+  ok: boolean;
+  /** Resolved project root (the RN package.json dir), on success. */
+  projectRoot?: string;
+  /** `basename(projectRoot)`, on success. */
+  name?: string;
+  /** Default profile booted for the new project, or null if none existed. */
+  profileName?: string | null;
+  /** SessionId of the auto-booted session, or null if the daemon was unreachable / no profile. */
+  bootedSessionId?: string | null;
+  /** Failure reason, on `ok: false`. */
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,6 +1031,83 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const checkId = args.check as string;
         const success = await ctx.preflightEngine.fix(checkId);
         return { check: checkId, fixed: success };
+      },
+    },
+    // Project selection — the MCP analogue of the Electron project picker.
+    // The server's project is auto-detected from its launch directory at
+    // startup; these tools let an agent SEE that choice and CHANGE it
+    // explicitly instead of being pinned to the launch cwd.
+    {
+      name: "rn-dev/list-projects",
+      description:
+        "List the current RN project and recently-opened ones. `current` is the project this MCP server is scoped to right now (auto-detected from its launch directory unless changed via `rn-dev/open-project`). `recents` is the shared most-recent-first list (the same store the Electron GUI picker reads/writes), each `{ path, name, lastOpenedAt, exists }`. Pass a `recents[].path` (or any other RN project path) to `rn-dev/open-project` to switch.",
+      inputSchema: { type: "object", properties: {} },
+      handler: async () => {
+        const current = {
+          path: ctx.projectRoot,
+          name: basename(ctx.projectRoot),
+        };
+        const recents = listRecentProjects().map((r) => ({
+          path: r.path,
+          name: r.name,
+          lastOpenedAt: r.lastOpenedAt,
+          exists: existsSync(r.path),
+        }));
+        return { current, recents };
+      },
+    },
+    {
+      name: "rn-dev/open-project",
+      description:
+        "Switch this MCP server to a different React Native project (one active project at a time — switching replaces the current one, mirroring the Electron picker). Validates that `path` is an RN project, records it in the shared recents store, disconnects the current sessions, re-scopes the server (profiles, artifacts, preflight) to the new project, and boots its default profile if one exists. Returns `{ ok, projectRoot, name, profileName, bootedSessionId }` on success or `{ ok: false, error }` on a bad path. After this, project-scoped tools (build, clean, list-profiles, preflight, worktrees) operate on the new project.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description:
+              "Absolute path to the RN project (or any directory inside it — the server walks up to the package.json that declares react-native).",
+          },
+        },
+        required: ["path"],
+      },
+      handler: async (args) => {
+        const path = args.path;
+        if (typeof path !== "string" || path.length === 0) {
+          return {
+            structuredContent: {
+              kind: "error",
+              code: "E_INVALID_PATH",
+              message: "open-project requires a non-empty `path`.",
+            },
+            isError: true,
+          };
+        }
+        if (!ctx.openProject) {
+          // Defensive — server.ts wires this. Unit-test contexts that
+          // don't exercise project switching won't provide it.
+          return {
+            structuredContent: {
+              kind: "error",
+              code: "E_NOT_WIRED",
+              message:
+                "MCP server has no openProject callback wired — this build cannot switch projects.",
+            },
+            isError: true,
+          };
+        }
+        const result = await ctx.openProject(path);
+        if (!result.ok) {
+          return {
+            structuredContent: {
+              kind: "error",
+              code: "E_NOT_A_PROJECT",
+              message: result.error ?? "Could not open that project.",
+            },
+            isError: true,
+          };
+        }
+        return { structuredContent: { kind: "ok", ...result } };
       },
     },
     // Worktree

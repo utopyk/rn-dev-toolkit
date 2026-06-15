@@ -16,6 +16,7 @@ import { MetroLogs } from './views/MetroLogs';
 import { Settings } from './views/Settings';
 import { Wizard } from './views/Wizard';
 import { NewInstanceDialog } from './views/NewInstanceDialog';
+import { WelcomeScreen } from './views/WelcomeScreen';
 import { useIpcOn, useIpcInvoke } from './hooks/useIpc';
 import { useSimulatedLogs } from './hooks/useSimulatedLogs';
 import { useSidebarCollapsed } from './hooks/useSidebarCollapsed.js';
@@ -50,6 +51,12 @@ export function App() {
   const [modulePanels, setModulePanels] = useState<ModulePanelListEntry[]>([]);
   const [showWizard, setShowWizard] = useState(false);
   const [showNewInstanceDialog, setShowNewInstanceDialog] = useState(false);
+  // Project picker (WelcomeScreen). `showWelcome` starts false; the mount
+  // effect flips it on when the main process reports no committed project,
+  // and the sidebar's "Switch Project" button re-opens it. `projectName`
+  // is the committed project's display name, shown in the sidebar footer.
+  const [showWelcome, setShowWelcome] = useState(false);
+  const [projectName, setProjectName] = useState<string | null>(null);
   const { collapsed: sidebarCollapsed, toggle: toggleSidebar } = useSidebarCollapsed();
   const { expanded: notifExpanded, toggle: toggleNotifications } = useNotificationsPanelExpanded();
   const [promptModal, setPromptModal] = useState<{
@@ -137,44 +144,67 @@ export function App() {
     tryLoadSavedTheme();
   }, [fetchPanels, tryLoadSavedTheme]));
 
-  // On mount: fetch existing instances; if none exist and no profile, show wizard
+  // On mount: gate on whether a project is committed. When none is, show
+  // the project picker (WelcomeScreen) and stop — main.ts started no
+  // services. When one is, record its name for the sidebar and resume the
+  // existing instances → profiles → wizard boot flow. Browser preview (no
+  // Electron bridge) skips the gate and keeps its simulated-logs flow.
   useEffect(() => {
-    invoke<InstanceInfo[]>('instances:list').then((list) => {
-      if (list && list.length > 0) {
-        setInstances(list);
-        setActiveId(list[0].id);
-        // Fetch logs for all instances
-        for (const inst of list) {
-          invoke<{ serviceLines: string[]; metroLines: string[] }>(
-            'instances:getLogs',
-            inst.id,
-          ).then((logs) => {
-            // `sections` defaults to [] — the daemon-flipped Electron
-            // doesn't emit `instance:section:*` events anymore (Phase
-            // 13.4.1 collapsed services.ts), so persisted log
-            // snapshots only carry flat lines. DevSpace reads
-            // `sections.some(...)` to drive its error-summary banner;
-            // an undefined here would crash the whole renderer.
-            instanceLogsRef.current.set(inst.id, {
-              serviceLines: logs?.serviceLines ?? [],
-              metroLines: logs?.metroLines ?? [],
-              sections: [],
+    const runBootFlow = () => {
+      invoke<InstanceInfo[]>('instances:list').then((list) => {
+        if (list && list.length > 0) {
+          setInstances(list);
+          setActiveId(list[0].id);
+          // Fetch logs for all instances
+          for (const inst of list) {
+            invoke<{ serviceLines: string[]; metroLines: string[] }>(
+              'instances:getLogs',
+              inst.id,
+            ).then((logs) => {
+              // `sections` defaults to [] — the daemon-flipped Electron
+              // doesn't emit `instance:section:*` events anymore (Phase
+              // 13.4.1 collapsed services.ts), so persisted log
+              // snapshots only carry flat lines. DevSpace reads
+              // `sections.some(...)` to drive its error-summary banner;
+              // an undefined here would crash the whole renderer.
+              instanceLogsRef.current.set(inst.id, {
+                serviceLines: logs?.serviceLines ?? [],
+                metroLines: logs?.metroLines ?? [],
+                sections: [],
+              });
+              setLogVersion(v => v + 1);
             });
-            setLogVersion(v => v + 1);
+          }
+        } else {
+          // No instances yet — check if any profiles exist
+          invoke<unknown[]>('profiles:list').then((profiles) => {
+            if (!profiles || profiles.length === 0) {
+              // No profiles at all — go straight to wizard
+              setShowWizard(true);
+            }
+            // If profiles exist, startRealServices in main will create one
+            // from the default profile, and we'll get it via instance:created event
           });
         }
-      } else {
-        // No instances yet — check if any profiles exist
-        invoke<unknown[]>('profiles:list').then((profiles) => {
-          if (!profiles || profiles.length === 0) {
-            // No profiles at all — go straight to wizard
-            setShowWizard(true);
-          }
-          // If profiles exist, startRealServices in main will create one
-          // from the default profile, and we'll get it via instance:created event
-        });
-      }
-    });
+      });
+    };
+
+    // Browser preview (no Electron bridge): keep the simulated-logs flow.
+    if (!window.rndev) {
+      runBootFlow();
+      return;
+    }
+
+    invoke<{ name: string | null; committed: boolean }>('project:state').then(
+      (st) => {
+        setProjectName(st?.name ?? null);
+        if (!st?.committed) {
+          setShowWelcome(true);
+          return;
+        }
+        runBootFlow();
+      },
+    );
   }, [invoke]);
 
   // Helper to append a line to an instance's log buffer
@@ -624,11 +654,30 @@ export function App() {
     }
   };
 
+  // Project picker. Takes precedence over every other view: until a project
+  // is committed there are no instances, profiles, or modules to show. When
+  // a project IS committed (the user opened the picker from the sidebar to
+  // switch), WelcomeScreen offers a Cancel back to the running app.
+  if (showWelcome) {
+    return (
+      <div className={`app-root${sidebarCollapsed ? ' collapsed' : ''}`}>
+        <div className="app-drag-strip" />
+        <div className="app-main">
+          <div className="app-content">
+            <WelcomeScreen
+              onCancel={projectName ? () => setShowWelcome(false) : undefined}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (showNewInstanceDialog) {
     return (
       <div className={`app-root${sidebarCollapsed ? ' collapsed' : ''}${notifExpanded ? ' notifications-expanded' : ''}`}>
         <div className="app-drag-strip" />
-        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} modulePanels={sidebarPanels} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
+        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} onSwitchProject={() => setShowWelcome(true)} projectName={projectName} modulePanels={sidebarPanels} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
         <div className="app-main">
           {instances.length > 0 && (
             <InstanceTabs
@@ -656,7 +705,7 @@ export function App() {
     return (
       <div className={`app-root${sidebarCollapsed ? ' collapsed' : ''}${notifExpanded ? ' notifications-expanded' : ''}`}>
         <div className="app-drag-strip" />
-        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} modulePanels={sidebarPanels} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
+        <Sidebar activeTab={activeTab} onTabChange={setActiveTab} onShortcut={handleShortcut} onOpenWizard={() => setShowWizard(true)} onSwitchProject={() => setShowWelcome(true)} projectName={projectName} modulePanels={sidebarPanels} collapsed={sidebarCollapsed} onToggleCollapse={toggleSidebar} />
         <div className="app-main">
           {instances.length > 0 && (
             <InstanceTabs

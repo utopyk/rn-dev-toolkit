@@ -45,6 +45,10 @@ interface SidebarProps {
   onTabChange: (tab: string) => void;
   onShortcut: (command: string) => void;
   onOpenWizard?: () => void;
+  /** Open the project picker (WelcomeScreen) to switch projects. */
+  onSwitchProject?: () => void;
+  /** Display name of the committed project, shown in the footer. */
+  projectName?: string | null;
   modulePanels?: SidebarModulePanel[];
   collapsed: boolean;
   onToggleCollapse: () => void;
@@ -55,6 +59,8 @@ export function Sidebar({
   onTabChange,
   onShortcut,
   onOpenWizard,
+  onSwitchProject,
+  projectName,
   modulePanels = [],
   collapsed,
   onToggleCollapse,
@@ -127,6 +133,21 @@ export function Sidebar({
 
       {/* Footer */}
       <div className="sidebar-footer">
+        {onSwitchProject && (
+          <button
+            className="sidebar-project"
+            onClick={onSwitchProject}
+            title={projectName ? `Project: ${projectName} — click to switch` : 'Select a project'}
+          >
+            <span className="sidebar-project-icon"><ModuleIcon hint="folder" size={14} /></span>
+            {!collapsed && (
+              <span className="sidebar-project-info">
+                <span className="sidebar-project-label">PROJECT</span>
+                <span className="sidebar-project-name">{projectName ?? 'Select a project…'}</span>
+              </span>
+            )}
+          </button>
+        )}
         {onOpenWizard && (
           <button className="sidebar-new-worktree" onClick={onOpenWizard}>
             Setup Wizard

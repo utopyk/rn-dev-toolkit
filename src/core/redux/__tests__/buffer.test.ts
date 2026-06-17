@@ -1,0 +1,172 @@
+import { describe, it, expect } from "vitest";
+import {
+  DEFAULT_BUFFER_CAPACITY,
+  MAX_LIST_LIMIT,
+  MAX_VALUE_BYTES,
+  ReduxStore,
+  navigatePath,
+} from "../buffer.js";
+
+const S = "sess-1";
+
+describe("ReduxStore — append + listActions", () => {
+  it("fresh session is empty", () => {
+    const store = new ReduxStore();
+    const status = store.status(S);
+    expect(status.bufferSize).toBe(0);
+    expect(status.bufferCapacity).toBe(DEFAULT_BUFFER_CAPACITY);
+    expect(status.meta.bufferEpoch).toBe(1);
+    expect(status.meta.oldestSequence).toBe(0);
+    expect(status.meta.lastEventSequence).toBe(0);
+    expect(status.meta.hasState).toBe(false);
+  });
+
+  it("assigns monotonic sequences from 1 and preserves order", () => {
+    const store = new ReduxStore();
+    const a = store.append(S, { type: "A" });
+    const b = store.append(S, { type: "B" });
+    expect(a.sequence).toBe(1);
+    expect(b.sequence).toBe(2);
+    const { entries, meta } = store.listActions(S);
+    expect(entries.map((e) => e.type)).toEqual(["A", "B"]);
+    expect(meta.lastEventSequence).toBe(2);
+    expect(meta.totalActionsReceived).toBe(2);
+  });
+
+  it("evicts oldest past capacity and counts evictions", () => {
+    const store = new ReduxStore({ capacity: 3 });
+    for (let i = 0; i < 5; i++) store.append(S, { type: `T${i}` });
+    const { entries, meta } = store.listActions(S);
+    expect(entries.map((e) => e.type)).toEqual(["T2", "T3", "T4"]);
+    expect(meta.evictedCount).toBe(2);
+    expect(meta.oldestSequence).toBe(3);
+    expect(meta.totalActionsReceived).toBe(5);
+  });
+
+  it("typeFilter is case-insensitive substring on the action type", () => {
+    const store = new ReduxStore();
+    store.append(S, { type: "auth/login" });
+    store.append(S, { type: "conversations/fetch" });
+    store.append(S, { type: "auth/logout" });
+    const { entries } = store.listActions(S, { typeFilter: "AUTH" });
+    expect(entries.map((e) => e.type)).toEqual(["auth/login", "auth/logout"]);
+  });
+
+  it("since cursor returns only newer actions; advances to last returned", () => {
+    const store = new ReduxStore();
+    store.append(S, { type: "A" });
+    store.append(S, { type: "B" });
+    const first = store.listActions(S);
+    store.append(S, { type: "C" });
+    const next = store.listActions(S, {
+      since: { bufferEpoch: first.meta.bufferEpoch, sequence: first.meta.lastEventSequence },
+    });
+    expect(next.entries.map((e) => e.type)).toEqual(["C"]);
+    expect(next.cursorDropped).toBe(false);
+  });
+
+  it("flags cursorDropped when the epoch bumped (clear)", () => {
+    const store = new ReduxStore();
+    store.append(S, { type: "A" });
+    const snap = store.listActions(S);
+    store.clear(S);
+    store.append(S, { type: "B" });
+    const after = store.listActions(S, {
+      since: { bufferEpoch: snap.meta.bufferEpoch, sequence: snap.meta.lastEventSequence },
+    });
+    expect(after.cursorDropped).toBe(true);
+    // Sequence stays monotonic across clear (not reset).
+    expect(after.entries[0]!.sequence).toBe(2);
+  });
+
+  it("clamps limit to MAX_LIST_LIMIT", () => {
+    const store = new ReduxStore({ capacity: MAX_LIST_LIMIT + 50 });
+    for (let i = 0; i < MAX_LIST_LIMIT + 10; i++) store.append(S, { type: "X" });
+    expect(store.listActions(S, { limit: 999999 }).entries.length).toBe(MAX_LIST_LIMIT);
+  });
+
+  it("getAction finds by sequence", () => {
+    const store = new ReduxStore();
+    store.append(S, { type: "A" });
+    const b = store.append(S, { type: "B", payload: { n: 2 } });
+    expect(store.getAction(S, b.sequence)?.type).toBe("B");
+    expect(store.getAction(S, 999)).toBeNull();
+  });
+});
+
+describe("ReduxStore — state snapshot", () => {
+  it("present=false until a frame carries stateAfter", () => {
+    const store = new ReduxStore();
+    store.append(S, { type: "A" }); // no stateAfter
+    const r = store.getState(S);
+    expect(r.present).toBe(false);
+    expect(r.meta.hasState).toBe(false);
+  });
+
+  it("keeps the latest snapshot and navigates by path", () => {
+    const store = new ReduxStore();
+    store.append(S, { type: "INIT", stateAfter: { auth: { user: { id: "u1" } }, ui: { theme: "dark" } } });
+    expect(store.getState(S, "ui.theme").value).toBe("dark");
+    expect(store.getState(S, "auth.user.id").value).toBe("u1");
+    expect(store.getState(S).present).toBe(true);
+  });
+
+  it("missing path → present=false, not a thrown error", () => {
+    const store = new ReduxStore();
+    store.append(S, { type: "INIT", stateAfter: { a: 1 } });
+    const r = store.getState(S, "a.b.c");
+    expect(r.present).toBe(false);
+    expect(r.value).toBeNull();
+  });
+
+  it("clear() drops state + actions and bumps epoch", () => {
+    const store = new ReduxStore();
+    store.append(S, { type: "A", stateAfter: { x: 1 } });
+    const meta = store.clear(S);
+    expect(meta.bufferEpoch).toBe(2);
+    expect(store.getState(S).present).toBe(false);
+    expect(store.size(S)).toBe(0);
+  });
+});
+
+describe("ReduxStore — size caps + isolation", () => {
+  it("replaces an oversized payload with a marker and counts it", () => {
+    const store = new ReduxStore();
+    const huge = "x".repeat(MAX_VALUE_BYTES + 10);
+    store.append(S, { type: "BIG", payload: huge });
+    const { entries, meta } = store.listActions(S);
+    expect(String(entries[0]!.payload)).toMatch(/^<oversized:\d+bytes>$/);
+    expect(meta.truncatedCount).toBe(1);
+  });
+
+  it("handles a non-serializable (circular) payload without throwing", () => {
+    const store = new ReduxStore();
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    store.append(S, { type: "CYC", payload: circular });
+    expect(store.listActions(S).entries[0]!.payload).toBe("<unserializable>");
+  });
+
+  it("sessions are isolated (no cross-talk)", () => {
+    const store = new ReduxStore();
+    store.append("a", { type: "A" });
+    store.append("b", { type: "B1" });
+    store.append("b", { type: "B2" });
+    expect(store.size("a")).toBe(1);
+    expect(store.size("b")).toBe(2);
+    expect(store.listActions("a").entries.map((e) => e.type)).toEqual(["A"]);
+  });
+});
+
+describe("navigatePath", () => {
+  it("empty path returns the whole tree", () => {
+    expect(navigatePath({ a: 1 }, "").value).toEqual({ a: 1 });
+  });
+  it("dot + bracket indexing", () => {
+    const root = { routes: [{ name: "Home" }, { name: "Profile" }] };
+    expect(navigatePath(root, "routes[1].name").value).toBe("Profile");
+  });
+  it("missing key → present=false", () => {
+    expect(navigatePath({ a: 1 }, "b").present).toBe(false);
+  });
+});

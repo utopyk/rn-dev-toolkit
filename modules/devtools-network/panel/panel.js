@@ -75,10 +75,21 @@ function renderEntries(result) {
   if (entries.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent =
-      meta?.proxyStatus === "connected"
-        ? "Waiting for network activity\u2026"
-        : "No captures yet.";
+    const refusal = captureRefusalText(meta);
+    if (refusal) {
+      // Connected target that ACCEPTED the socket but REFUSED the
+      // capture domain \u2014 without this the panel showed "Waiting for
+      // network activity\u2026" forever with no hint (2026-06-11 acme iOS:
+      // react-native-worklets registers a second RN host, so RN refuses
+      // Network.enable). Tell the human why it will never fill.
+      empty.className = "empty error";
+      empty.textContent = refusal;
+    } else {
+      empty.textContent =
+        meta?.proxyStatus === "connected"
+          ? "Waiting for network activity\u2026"
+          : "No captures yet.";
+    }
     contentEl.replaceChildren(empty);
     return;
   }
@@ -182,8 +193,39 @@ function renderStatus(meta, entryCount) {
     labelSpan("Bodies:"),
     valueSpan(meta.bodyCapture || "unknown"),
   ];
+  // A connected proxy can still be refusing the capture domain — surface
+  // it inline so the status line never reads healthy while empty.
+  if (Array.isArray(meta.enableErrors) && meta.enableErrors.length > 0) {
+    children.push(
+      labelSpan("Capture:"),
+      valueSpan("refused", "status-value status-value--warn"),
+    );
+  }
   statusEl.replaceChildren(...children);
   statusEl.hidden = false;
+}
+
+/**
+ * Human-facing explanation when the target accepted the inspector socket
+ * but a capture enable command was refused (CaptureMeta.enableErrors).
+ * Returns null when capture is healthy. The Network.enable multi-hosts
+ * case gets a worklets hint because that is the one that bites Acme
+ * iOS (react-native-worklets registering a second RN host).
+ */
+function captureRefusalText(meta) {
+  const errs = Array.isArray(meta?.enableErrors) ? meta.enableErrors : [];
+  if (errs.length === 0) return null;
+  const net = errs.find((e) => e && e.method === "Network.enable");
+  if (net && /multiple React Native hosts/i.test(net.message || "")) {
+    return (
+      "Network capture refused: the app registers multiple React Native " +
+      "hosts, so RN disables the Network domain. On Acme iOS this is " +
+      "react-native-worklets — apply patches/react-native-worklets*.patch " +
+      "(or upgrade worklets ≥ 0.9) and rebuild."
+    );
+  }
+  const first = errs[0];
+  return `Capture refused: ${first.method} — ${first.message || "enable command rejected"}`;
 }
 
 function labelSpan(text) {

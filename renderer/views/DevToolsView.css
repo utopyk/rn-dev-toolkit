@@ -35,6 +35,13 @@
   font-style: italic;
 }
 
+.devtools-toolbar-warn {
+  color: var(--warn, #fb923c);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: help;
+}
+
 .devtools-toolbar-btn {
   padding: 6px 12px;
   border: 1px solid transparent;

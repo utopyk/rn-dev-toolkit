@@ -24,11 +24,38 @@ interface Target {
   devtoolsFrontendUrl?: string;
 }
 
+interface EnableCommandError {
+  method: string;
+  message: string;
+}
+
 interface StatusPayload {
-  meta: { proxyStatus: string; selectedTargetId: string | null };
+  meta: {
+    proxyStatus: string;
+    selectedTargetId: string | null;
+    /**
+     * Present only when the target accepted the inspector socket but
+     * refused a capture enable command (e.g. RN disabling the Network
+     * domain when multiple React Native hosts are registered). Surfaced
+     * as a toolbar chip so a "connected" Fusebox view doesn't hide a
+     * dead capture pipe. Mirrors CaptureMeta.enableErrors.
+     */
+    enableErrors?: EnableCommandError[];
+  };
   targets: Target[];
   proxyPort: number | null;
   sessionNonce: string | null;
+}
+
+/** Compact, human-facing capture-refusal summary, or null when healthy. */
+function refusalSummary(meta: StatusPayload['meta'] | undefined): string | null {
+  const errs = meta?.enableErrors;
+  if (!Array.isArray(errs) || errs.length === 0) return null;
+  const net = errs.find((e) => e.method === 'Network.enable');
+  if (net && /multiple React Native hosts/i.test(net.message)) {
+    return 'Network capture refused: app registers multiple RN hosts (Acme iOS: react-native-worklets — apply the worklets patch and rebuild).';
+  }
+  return `Capture refused: ${errs[0].method} — ${errs[0].message}`;
 }
 
 type ConnectionState = 'connecting' | 'no-target' | 'connected' | 'error';
@@ -88,6 +115,7 @@ export function DevToolsView({ metroPort, readOnly = false }: DevToolsViewProps)
   const [errorMsg, setErrorMsg] = useState('');
   const [targets, setTargets] = useState<Target[]>([]);
   const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
+  const [captureRefused, setCaptureRefused] = useState<string | null>(null);
   const invoke = useIpcInvoke();
   const cancelledRef = useRef(false);
 
@@ -132,6 +160,7 @@ export function DevToolsView({ metroPort, readOnly = false }: DevToolsViewProps)
         setErrorMsg('DevTools manager returned no status');
         return;
       }
+      setCaptureRefused(refusalSummary(status.meta));
       setTargets(status.targets);
       buildAndSetUrl(
         status.targets,
@@ -169,6 +198,7 @@ export function DevToolsView({ metroPort, readOnly = false }: DevToolsViewProps)
         setErrorMsg('DevTools manager returned no status');
         return;
       }
+      setCaptureRefused(refusalSummary(status.meta));
       setTargets(status.targets);
       buildAndSetUrl(
         status.targets,
@@ -206,6 +236,7 @@ export function DevToolsView({ metroPort, readOnly = false }: DevToolsViewProps)
           setErrorMsg('DevTools proxy went away after target switch');
           return;
         }
+        setCaptureRefused(refusalSummary(status.meta));
         setTargets(status.targets);
         buildAndSetUrl(status.targets, targetId, status.proxyPort, status.sessionNonce);
       } catch (err: any) {
@@ -228,6 +259,7 @@ export function DevToolsView({ metroPort, readOnly = false }: DevToolsViewProps)
         .then((s) => {
           if (cancelledRef.current || !s) return;
           setTargets(s.targets);
+          setCaptureRefused(refusalSummary(s.meta));
         })
         .catch(() => {});
     },
@@ -298,6 +330,11 @@ export function DevToolsView({ metroPort, readOnly = false }: DevToolsViewProps)
         {readOnly && (
           <span className="devtools-toolbar-readonly" title="Observing an agent session — read-only">
             👁 read-only
+          </span>
+        )}
+        {captureRefused && (
+          <span className="devtools-toolbar-warn" title={captureRefused}>
+            ⚠ capture refused
           </span>
         )}
         {!readOnly && targets.length > 1 && (

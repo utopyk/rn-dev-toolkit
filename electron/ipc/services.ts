@@ -46,6 +46,7 @@ import {
   appendLog,
   toSummary,
   findFreePort,
+  getSessionRecordForInstance,
   type InstanceState,
   type SessionRecord,
 } from './state.js';
@@ -249,6 +250,18 @@ export function setElectronQuitting(flag: boolean): void {
 }
 
 /**
+ * Backoff schedule for GUI-owned session reconnect (parity with the MCP
+ * server's auto-reconnect, src/mcp/server.ts). ~2.5 min total: a daemon
+ * blip self-heals; a daemon that stays down stops retrying and the tab
+ * is left for the user to recreate.
+ */
+const GUI_RECONNECT_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 30_000, 30_000, 30_000];
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Phase E1 — connect to (or cold-spawn) the per-worktree daemon for
  * `profile`, publish every adapter on the serviceBus, wire per-session
  * disconnect listeners, and register a SessionRecord in `state.sessions`.
@@ -339,13 +352,6 @@ export async function attachDaemonSession(
       return;
     }
 
-    const message = err instanceof Error ? err.message : 'unknown';
-    if (state.mainWindow && !state.mainWindow.isDestroyed()) {
-      state.mainWindow.webContents.send(
-        'service:log',
-        `⚠ Daemon disconnected (${surface}): ${message}`,
-      );
-    }
     // Phase E1 — only clear the modules client when the LAST session
     // disconnects; per-session clients are tracked by sessionId on the
     // serviceBus consumer side. Pre-multi-session, a single disconnect
@@ -354,7 +360,76 @@ export async function attachDaemonSession(
     if (state.sessions.size === 0) {
       serviceBus.clearModulesClient();
     }
+
+    const message = err instanceof Error ? err.message : 'unknown';
+    // A GUI-owned (non-observed) session whose record was still present
+    // means an UNEXPECTED disconnect (daemon died / crashed / upgraded).
+    // A user-closed tab pre-deletes its record in `instances:remove`, so
+    // we never reach here for those. Self-heal — parity with the MCP
+    // server (5ba82d1), which otherwise leaves the GUI as the only
+    // client that needs a manual recreate after a daemon blip. Requires
+    // the boot profile to re-attach; without it (shouldn't happen for
+    // owned sessions) fall back to the old cosmetic notice.
+    if (profile && !electronQuittingFlag) {
+      if (state.mainWindow && !state.mainWindow.isDestroyed()) {
+        state.mainWindow.webContents.send(
+          'service:log',
+          `⚠ Daemon disconnected (${surface}): ${message} — reconnecting…`,
+        );
+      }
+      void reconnectOwnedSession();
+      return;
+    }
+
+    if (state.mainWindow && !state.mainWindow.isDestroyed()) {
+      state.mainWindow.webContents.send(
+        'service:log',
+        `⚠ Daemon disconnected (${surface}): ${message}`,
+      );
+    }
   };
+
+  /**
+   * Re-attach a GUI-owned session after an unexpected daemon disconnect,
+   * reusing the SAME `instanceId` so the user's tab persists (the
+   * InstanceState is never deleted on a non-observed disconnect). Boot-
+   * or-join by the session's profile: `connectElectronToDaemon` cold-
+   * spawns a fresh daemon if it's gone, or rejoins the running session if
+   * only our socket dropped. Bounded backoff; bails if the user removed
+   * the tab, the app is quitting, or another path already re-attached.
+   */
+  const reconnectOwnedSession = async (): Promise<void> => {
+    if (!profile) return;
+    for (const delayMs of GUI_RECONNECT_DELAYS_MS) {
+      await delay(delayMs);
+      if (electronQuittingFlag) return;
+      const inst = instances.get(instanceId);
+      if (!inst) return; // user removed the tab during the backoff
+      if (getSessionRecordForInstance(instanceId)) return; // already reconnected
+      try {
+        const fresh = await attachDaemonSession({ projectRoot, instanceId, profile });
+        const liveInst = instances.get(instanceId);
+        if (!liveInst) {
+          // Removed mid-attach — tear the just-made session back down.
+          fresh.daemonSession.disconnect();
+          return;
+        }
+        wireInstanceEvents(liveInst, fresh.daemonSession);
+        send('service:log', `✓ Daemon reconnected (${liveInst.id}).`);
+        send('instance:status', { instanceId: liveInst.id, ...toSummary(liveInst) });
+        return;
+      } catch {
+        // Daemon still unreachable — keep backing off.
+      }
+    }
+    if (state.mainWindow && !state.mainWindow.isDestroyed()) {
+      state.mainWindow.webContents.send(
+        'service:log',
+        `⚠ Daemon reconnect for ${instanceId} gave up after retries — close and recreate the tab to try again.`,
+      );
+    }
+  };
+
   session.metro.on('disconnected', (err) => surfaceDisconnect('metro', err));
   session.devtools.on('disconnected', (err) => surfaceDisconnect('devtools', err));
   session.builder.on('disconnected', (err) => surfaceDisconnect('builder', err));

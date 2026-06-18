@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { MetroLogsStore } from "../core/metro-logs/buffer.js";
+import { ReduxStore } from "../core/redux/buffer.js";
 import { CapabilityRegistry } from "../core/module-host/capabilities.js";
 import { registerModulesIpc } from "../app/modules-ipc.js";
 import { ModuleConfigStore } from "../modules/config-store.js";
@@ -122,6 +123,7 @@ export async function fakeBootSessionServices(
   const capabilities = new CapabilityRegistry();
   const moduleHost = makeFakeModuleHost(capabilities);
   const metroLogsStore = new MetroLogsStore();
+  const reduxStore = new ReduxStore();
   const moduleRegistry = opts.moduleRegistry;
 
   // Register the four built-in modules so `modules/list` returns them
@@ -278,6 +280,7 @@ export async function fakeBootSessionServices(
     moduleRegistry,
     worktreeKey,
     metroLogsStore,
+    reduxStore,
     capabilities,
     moduleEvents,
     hookManager,

@@ -77,6 +77,7 @@ function makeServices(
     moduleRegistry: undefined as never,
     worktreeKey: "wt-test",
     metroLogsStore: undefined as never,
+    reduxStore: undefined as never,
     capabilities: undefined as never,
     moduleEvents: undefined as never,
     hookManager,

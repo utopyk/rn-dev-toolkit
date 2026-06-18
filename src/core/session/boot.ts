@@ -18,6 +18,8 @@ import { isSensitivePermission } from "../../modules/index.js";
 import { MetroManager } from "../metro.js";
 import { DevToolsManager } from "../devtools.js";
 import { MetroLogsStore } from "../metro-logs/buffer.js";
+import { ReduxStore } from "../redux/buffer.js";
+import { ReduxIngestServer, reduxPortForMetroPort } from "../redux/ingest.js";
 import {
   METRO_LOGS_CAPABILITY_ID,
   METRO_LOGS_CAPABILITY_READ_PERMISSION,
@@ -104,6 +106,9 @@ export interface SessionServices {
   moduleRegistry: ModuleRegistry;
   worktreeKey: string;
   metroLogsStore: MetroLogsStore;
+  /** Per-session Redux action/state ring, fed by the WS ingest. Read by
+   *  the `redux` host capability (P3) + the redux module (P4). */
+  reduxStore: ReduxStore;
   capabilities: CapabilityRegistry;
   /**
    * Bus that fans out module lifecycle events (state-changed / crashed /
@@ -377,6 +382,26 @@ export async function bootSessionServices(
   metro.on("status", (event: { worktreeKey: string; status: string }) => {
     metroLogsStore.setMetroStatus(event.worktreeKey, event.status);
   });
+
+  // 7b. Redux ingest. Per-session WS server on a Metro-paired port; the
+  // app's vendored enhancer streams dispatched actions + state here. Best-
+  // effort: a bind failure (port already in use) must not block the rest
+  // of boot — the session is fully usable without redux capture.
+  const reduxStore = new ReduxStore();
+  const reduxIngest = new ReduxIngestServer({
+    port: reduxPortForMetroPort(port),
+    store: reduxStore,
+    sessionKey: worktreeKey,
+    onLog: emit,
+  });
+  try {
+    await reduxIngest.start();
+  } catch (err) {
+    emit(
+      `ℹ Redux ingest: deferred (${err instanceof Error ? err.message : String(err)})`,
+    );
+  }
+
   metro.start({
     sessionId,
     worktreeKey,
@@ -571,6 +596,11 @@ export async function bootSessionServices(
       /* best-effort */
     }
     try {
+      await reduxIngest.stop();
+    } catch {
+      /* best-effort */
+    }
+    try {
       watcher?.stop();
     } catch {
       /* best-effort */
@@ -593,6 +623,7 @@ export async function bootSessionServices(
     moduleRegistry,
     worktreeKey,
     metroLogsStore,
+    reduxStore,
     capabilities,
     moduleEvents: modulesIpc.moduleEvents,
     hookManager,

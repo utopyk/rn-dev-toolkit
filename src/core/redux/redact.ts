@@ -40,18 +40,18 @@ export const MAX_NODES = 10_000;
 export const DEFAULT_BLACKLIST: readonly string[] = [
   "*token*",
   "*password*",
+  "*passwd*",
   "*secret*",
-  "*auth*",
   "*credential*",
-  "*card*",
-  "*cvv*",
-  "*pan*",
-  "*ssn*",
   "*apikey*",
   "*api_key*",
-  "email",
+  "authorization", // exact: catch the header field WITHOUT nuking the
+  // common `auth` reducer slice (an `*auth*` glob would redact the whole
+  // slice wholesale; `*token*` already catches `authToken`).
+  "*card*",
+  "*cvv*",
+  "*ssn*",
   "*email*",
-  "phone",
   "*phone*",
 ];
 

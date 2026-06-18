@@ -1,22 +1,27 @@
 /**
  * Host capability for the `@rn-dev-modules/redux` 3p module. Registered in
- * `registerHostCapabilities` (boot.ts). Mirrors the metro-logs capability:
- * `redux:read` baseline, `clear()` upgrades to `redux:mutate`.
+ * `registerHostCapabilities` (boot.ts). `redux:read` baseline; `clear()`
+ * upgrades to `redux:mutate`.
  *
- * Returns data RAW. Redaction (black/white list) is applied by the MODULE
- * at the MCP boundary (`modules/redux/src/dto.ts`, P4) using the module's
- * own config — same split as devtools-network (host returns bodies; the
- * module's dto applies the `mcp-redacted` gate). Raw values crossing the
- * host→subprocess RPC are both the developer's local processes under the
- * daemon; they never reach an agent un-redacted.
+ * REDACTION RUNS HERE, host-side (P4 decision, stronger than the
+ * devtools-network "module redacts" split). The module owns the POLICY —
+ * it reads its config and passes `whitelist` / `extraBlacklist` / `mode`
+ * in — but the host applies it via `redactValue` BEFORE returning, so raw
+ * Redux state/payloads never cross the host→subprocess boundary. The
+ * default (no `redaction` arg) is the strictest posture: structure-only,
+ * empty whitelist, full DEFAULT_BLACKLIST. `DEFAULT_BLACKLIST` lives
+ * host-side and is ALWAYS unioned in, so a module config can extend but
+ * never drop it.
  *
- * Worktree scoping mirrors metro-logs: always resolve against the
- * session's `defaultWorktreeKey`; a caller-supplied key is honored only
- * when on the host-known allowlist, else silently coerced to the default.
+ * Worktree scoping mirrors metro-logs: resolve against the session's
+ * `defaultWorktreeKey`; an unknown caller key coerces to the default.
  */
 
 import type { ReduxStore } from "./buffer.js";
+import { DEFAULT_BLACKLIST, redactValue } from "./redact.js";
 import type {
+  RedactionConfig,
+  RedactionMode,
   ReduxActionRecord,
   ReduxActionsFilter,
   ReduxActionsResult,
@@ -38,17 +43,39 @@ export const REDUX_METHOD_PERMISSIONS: Readonly<Record<string, string>> = {
   clear: REDUX_CAPABILITY_MUTATE_PERMISSION,
 };
 
+/**
+ * Redaction policy the module supplies. `extraBlacklist` EXTENDS the
+ * host's `DEFAULT_BLACKLIST` (never replaces it). Omitting the whole
+ * object ⇒ strictest defaults.
+ */
+export interface ReduxRedactionInput {
+  whitelist?: readonly string[];
+  extraBlacklist?: readonly string[];
+  mode?: RedactionMode;
+}
+
+function effectiveConfig(input?: ReduxRedactionInput): RedactionConfig {
+  return {
+    whitelist: input?.whitelist ?? [],
+    blacklist: [...DEFAULT_BLACKLIST, ...(input?.extraBlacklist ?? [])],
+    mode: input?.mode ?? "mcp-redacted",
+  };
+}
+
 export interface ReduxListActionsArgs {
   worktreeKey?: string;
   filter?: ReduxActionsFilter;
+  redaction?: ReduxRedactionInput;
 }
 export interface ReduxGetActionArgs {
   worktreeKey?: string;
   sequence: number;
+  redaction?: ReduxRedactionInput;
 }
 export interface ReduxGetStateArgs {
   worktreeKey?: string;
   path?: string;
+  redaction?: ReduxRedactionInput;
 }
 export interface ReduxClearArgs {
   worktreeKey?: string;
@@ -78,18 +105,34 @@ export function createReduxHostCapability(
     return allowedSet().has(wk) ? wk : defaultWorktreeKey;
   };
 
+  const redactAction = (a: ReduxActionRecord, cfg: RedactionConfig): ReduxActionRecord => ({
+    ...a,
+    payload: redactValue(a.payload, cfg).value,
+    diff: a.diff === null ? null : redactValue(a.diff, cfg).value,
+  });
+
   return {
     async status(wk) {
       return store.status(resolve(wk));
     },
-    async listActions({ worktreeKey, filter }) {
-      return store.listActions(resolve(worktreeKey), filter);
+    async listActions({ worktreeKey, filter, redaction }) {
+      const cfg = effectiveConfig(redaction);
+      const res = store.listActions(resolve(worktreeKey), filter);
+      return { ...res, entries: res.entries.map((a) => redactAction(a, cfg)) };
     },
-    async getAction({ worktreeKey, sequence }) {
-      return { action: store.getAction(resolve(worktreeKey), sequence) };
+    async getAction({ worktreeKey, sequence, redaction }) {
+      const cfg = effectiveConfig(redaction);
+      const action = store.getAction(resolve(worktreeKey), sequence);
+      return { action: action === null ? null : redactAction(action, cfg) };
     },
-    async getState({ worktreeKey, path }) {
-      return store.getState(resolve(worktreeKey), path ?? "");
+    async getState({ worktreeKey, path, redaction }) {
+      const cfg = effectiveConfig(redaction);
+      const res = store.getState(resolve(worktreeKey), path ?? "");
+      // rootPath = the queried path so whitelist/blacklist evaluate
+      // against the FULL state path (reading `auth.session` still sees
+      // `auth.session.token` as blacklisted).
+      const value = res.present ? redactValue(res.value, cfg, res.path).value : res.value;
+      return { ...res, value };
     },
     async clear({ worktreeKey }) {
       return { status: "cleared", meta: store.clear(resolve(worktreeKey)) };

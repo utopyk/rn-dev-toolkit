@@ -14,8 +14,17 @@ import { spawnMcpServer, type McpHarnessHandle } from "../../../test/helpers/spa
 //     (src/dev/rn-dev-redux-enhancer.ts) and running on the device/emulator;
 //   - `adb reverse tcp:<metroPort+4000>` is set for an emulator over adb.
 //
-// Run:  REAL_BOOT_SMOKE=1 npx vitest run src/mcp/__tests__/probe-real-redux-mcp.spec.ts
-const ENABLED = process.env.REAL_BOOT_SMOKE === "1";
+// Run:  PROBE=1 npx vitest run src/mcp/__tests__/probe-real-redux-mcp.spec.ts
+//
+// PROBE-gated like its sibling MCP probes (probe-real-android-multi,
+// probe-cold-start-mcp): the `it` is `.skipIf(!ENABLED)` so it is INERT in
+// the normal `npx vitest run` gate and only runs when explicitly enabled.
+// Without the gate it would poll for 90s and fail whenever no live app is
+// streaming — turning an env-dependent probe into a flaky suite failure.
+const ENABLED =
+  process.env.PROBE === "1" ||
+  process.env.PROBE_ACME === "1" ||
+  process.env.REAL_BOOT_SMOKE === "1";
 const ACME =
   process.env.RN_DEV_REAL_BOOT_TARGET ?? "/Users/martincouso/Documents/GitHub/acme-mobile-app";
 
@@ -37,7 +46,7 @@ describe("MCP real-boot probe — redux capture", () => {
     for (const m of live.splice(0)) await m.stop();
   });
 
-  it(
+  it.skipIf(!ENABLED)(
     "redux__* returns the live app's actions + state, redacted",
     async () => {
       const mcp = await spawnMcpServer({ cwd: ACME });

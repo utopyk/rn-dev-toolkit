@@ -82,6 +82,10 @@ export const KNOWN_PERMISSIONS: ReadonlyArray<string> = [
   "metro:logs:read",
   "metro:logs:mutate",
   "network:outbound",
+  // Phase: redux module — the WS ingest binds a port (inbound).
+  "network:inbound",
+  "redux:read",
+  "redux:mutate",
 ];
 
 const KNOWN_PERMISSION_SET = new Set<string>(KNOWN_PERMISSIONS);
@@ -106,6 +110,7 @@ export const KNOWN_CAPABILITIES: ReadonlyArray<string> = [
   "devtools",
   "metro",
   "metro-logs",
+  "redux",
   "modules",
   // Phase H2d — built-in build module's hook-host capability surface.
   // The factory binds the `build/` slot prefix; gated by

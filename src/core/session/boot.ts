@@ -26,6 +26,12 @@ import {
   METRO_LOGS_METHOD_PERMISSIONS,
   createMetroLogsHostCapability,
 } from "../metro-logs/host-capability.js";
+import {
+  REDUX_CAPABILITY_ID,
+  REDUX_CAPABILITY_READ_PERMISSION,
+  REDUX_METHOD_PERMISSIONS,
+  createReduxHostCapability,
+} from "../redux/host-capability.js";
 import { CleanManager } from "../clean.js";
 import { FileWatcher } from "../watcher.js";
 import { IpcServer } from "../ipc.js";
@@ -444,6 +450,7 @@ export async function bootSessionServices(
     artifactStore,
     devtools,
     metroLogsStore,
+    reduxStore,
     worktreeKey,
     sessionId,
   });
@@ -642,6 +649,7 @@ interface HostCapabilityDeps {
   artifactStore: ArtifactStore;
   devtools: DevToolsManager;
   metroLogsStore: MetroLogsStore;
+  reduxStore: ReduxStore;
   worktreeKey: string;
   sessionId: SessionId;
 }
@@ -668,6 +676,14 @@ function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry 
     {
       requiredPermission: METRO_LOGS_CAPABILITY_READ_PERMISSION,
       methodPermissions: METRO_LOGS_METHOD_PERMISSIONS,
+    },
+  );
+  capabilities.register(
+    REDUX_CAPABILITY_ID,
+    createReduxHostCapability(deps.reduxStore, deps.worktreeKey),
+    {
+      requiredPermission: REDUX_CAPABILITY_READ_PERMISSION,
+      methodPermissions: REDUX_METHOD_PERMISSIONS,
     },
   );
   return capabilities;

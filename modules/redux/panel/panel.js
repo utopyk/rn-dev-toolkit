@@ -9,6 +9,14 @@
 
 /* global window, document, setInterval, clearInterval */
 
+// IIFE wrap: the preload exposes `window.rnDev` via
+// `contextBridge.exposeInMainWorld`, which defines `rnDev` as a
+// NON-CONFIGURABLE global property. A top-level `const rnDev` in a classic
+// <script> would then hit the "restricted global property" rule and throw
+// `SyntaxError: Identifier 'rnDev' has already been declared` at parse time,
+// aborting the whole script (panel stuck on "Loading…"). Function scope makes
+// `const rnDev` a local binding that shadows the global property — no clash.
+(() => {
 const rnDev = /** @type {any} */ (window).rnDev;
 const statusEl = document.getElementById("status");
 const actionsEl = document.getElementById("actions");
@@ -199,3 +207,4 @@ document.addEventListener("visibilitychange", () => {
 
 refresh({ force: true });
 startPolling();
+})();

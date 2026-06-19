@@ -374,10 +374,10 @@ function renderNode(keyStr, value, depth, expandDepth, tab, path, ancInc) {
   const keyMatch = keyStr !== null && f.hi(keyStr);
   const stateKey = tab + path;
   const expanded = f.active ? true : (expandState.has(stateKey) ? expandState.get(stateKey) : depth < expandDepth);
-  return container(keyStr, isArr, entries.length, childWrap, expanded, keyMatch, (next) => expandState.set(stateKey, next));
+  return container(keyStr, isArr, entries.length, childWrap, expanded, keyMatch, (next) => expandState.set(stateKey, next), value);
 }
 
-function container(keyStr, isArr, count, childWrap, expanded, keyMatch, onToggle) {
+function container(keyStr, isArr, count, childWrap, expanded, keyMatch, onToggle, copyValue) {
   const node = el("div", "tnode");
   const row = el("div", "trow");
   const toggle = el("span", "ttoggle");
@@ -390,6 +390,7 @@ function container(keyStr, isArr, count, childWrap, expanded, keyMatch, onToggle
     row.appendChild(span("tcolon", ":"));
   }
   row.appendChild(span("tsummary", isArr ? `[ ${count} ]` : `{ ${count} }`));
+  if (copyValue !== undefined) row.appendChild(makeCopyIcon(() => copyValue));
   node.appendChild(row);
   childWrap.style.display = expanded ? "" : "none";
   node.appendChild(childWrap);
@@ -406,6 +407,53 @@ function container(keyStr, isArr, count, childWrap, expanded, keyMatch, onToggle
     if (keyEl) keyEl.addEventListener("click", fn);
   }
   return node;
+}
+
+// Per-row copy: small clipboard icon that copies the value at this key.
+// Objects/arrays → 2-space JSON. Primitives → raw stringified form. The
+// redaction modes ("[redacted]", "<symbol>") copy as-is; turn on Reveal
+// values to grab the real underlying data.
+function makeCopyIcon(getValue) {
+  const btn = el("span", "tcopy");
+  btn.title = "Copy value to clipboard";
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "11");
+  svg.setAttribute("height", "11");
+  svg.setAttribute("aria-hidden", "true");
+  // Two rounded rectangles: back sheet + front sheet (standard clipboard).
+  const back = document.createElementNS(svgNS, "rect");
+  back.setAttribute("x", "5"); back.setAttribute("y", "2");
+  back.setAttribute("width", "9"); back.setAttribute("height", "11");
+  back.setAttribute("rx", "1.5");
+  back.setAttribute("fill", "none"); back.setAttribute("stroke", "currentColor"); back.setAttribute("stroke-width", "1.2");
+  const front = document.createElementNS(svgNS, "rect");
+  front.setAttribute("x", "2"); front.setAttribute("y", "4");
+  front.setAttribute("width", "9"); front.setAttribute("height", "11");
+  front.setAttribute("rx", "1.5");
+  front.setAttribute("fill", "none"); front.setAttribute("stroke", "currentColor"); front.setAttribute("stroke-width", "1.2");
+  svg.appendChild(back);
+  svg.appendChild(front);
+  btn.appendChild(svg);
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const v = getValue();
+    let text;
+    if (v === null) text = "null";
+    else if (v === undefined) text = "undefined";
+    else if (typeof v === "string") text = v;
+    else if (typeof v === "object") {
+      try { text = JSON.stringify(v, null, 2); } catch { text = String(v); }
+    } else text = String(v);
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(() => {
+        btn.classList.add("copied");
+        setTimeout(() => btn.classList.remove("copied"), 700);
+      }, () => { /* clipboard denied — silent */ });
+    }
+  });
+  return btn;
 }
 
 function makeLeaf(keyStr, value, ancInc) {
@@ -427,6 +475,7 @@ function makeLeaf(keyStr, value, ancInc) {
   const v = el("span", info.cls + (f.hi(info.text) ? " thit" : ""));
   v.textContent = info.text;
   row.appendChild(v);
+  row.appendChild(makeCopyIcon(() => value));
   node.appendChild(row);
   return node;
 }
@@ -467,7 +516,10 @@ function renderDiff(keyStr, before, after, op, path, ancInc) {
     }
     if (!anyChild && !thisInc && !ancInc && f.active) return null;
     if (!anyChild) return null; // no nested changes
-    return container(keyStr, false, childWrap.childElementCount, childWrap, true, f.hi(keyStr), () => {});
+    // Copy target on a changed container: the new (after) subtree — that's
+    // "what the state looks like now," which is what you usually want to
+    // paste into a bug report.
+    return container(keyStr, false, childWrap.childElementCount, childWrap, true, f.hi(keyStr), () => {}, after);
   }
   return diffLeaf(keyStr, before, after, op, ancInc);
 }
@@ -488,6 +540,9 @@ function diffLeaf(keyStr, before, after, op, ancInc) {
   if (op === "remove") { row.appendChild(valSpan(before, "tdel")); }
   else if (op === "add") { row.appendChild(valSpan(after, "tadd")); }
   else { row.appendChild(valSpan(before, "tdel")); row.appendChild(span("tarrow", " → ")); row.appendChild(valSpan(after, "tadd")); }
+  // Remove ops have no `after` — fall back to `before`. Otherwise prefer
+  // the new value (the post-action state).
+  row.appendChild(makeCopyIcon(() => (op === "remove" ? before : after)));
   node.appendChild(row);
   return node;
 }

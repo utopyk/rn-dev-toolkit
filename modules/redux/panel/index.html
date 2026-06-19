@@ -115,6 +115,20 @@
       .tredacted { color: var(--error); font-style: italic; }
       .ttype { color: var(--muted); font-style: italic; }
       .thit { background: rgba(204,151,204,0.18); border-radius: 3px; }
+      .tcopy {
+        opacity: 0;
+        margin-left: 6px;
+        cursor: pointer;
+        color: var(--muted-2);
+        padding: 0 2px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        transition: opacity 0.12s ease, color 0.12s ease;
+      }
+      .trow:hover .tcopy { opacity: 0.7; }
+      .tcopy:hover { opacity: 1 !important; color: var(--glow); }
+      .tcopy.copied { opacity: 1 !important; color: var(--ready); }
       /* diff (old → new) */
       .trow-diff .ttoggle { color: var(--muted); font-weight: 700; }
       .tdel { text-decoration: line-through; opacity: 0.7; color: var(--error) !important; }

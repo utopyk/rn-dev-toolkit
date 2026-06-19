@@ -47,6 +47,34 @@ function applyThemeToRoot(colors: ThemeColors) {
   root.style.setProperty('--panel-focus', colors.surfaceHi);
 }
 
+/**
+ * Push the current theme's tokens to module panels. Panels are isolated
+ * WebContentsViews that do NOT inherit the renderer's CSS, so without this
+ * they'd be stuck on their hardcoded fallback palette. Best-effort and
+ * guarded: `window.rndev` is absent under jsdom tests, so this no-ops there.
+ */
+function reportThemeToPanels(colors: ThemeColors) {
+  const bridge = (window as unknown as {
+    rndev?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> };
+  }).rndev;
+  if (!bridge?.invoke) return;
+  const vars: Record<string, string> = {
+    '--bg': colors.bg,
+    '--bg-soft': colors.bgSoft,
+    '--surface': colors.surface,
+    '--surface-hi': colors.surfaceHi,
+    '--ink': colors.ink,
+    '--ink-soft': colors.inkSoft,
+    '--muted': colors.muted,
+    '--muted-2': colors.muted2,
+    '--glow': colors.glow,
+    '--ready': colors.ready,
+    '--booting': colors.booting,
+    '--error': colors.error,
+  };
+  try { void bridge.invoke('modules:report-theme', vars).catch(() => {}); } catch { /* ignore */ }
+}
+
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(softDark);
 
@@ -57,6 +85,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       'data-theme',
       t.name.toLowerCase().replace(/\s+/g, '-'),
     );
+    reportThemeToPanels(t.colors);
   }, []);
 
   useEffect(() => {
@@ -66,6 +95,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       'data-theme',
       theme.name.toLowerCase().replace(/\s+/g, '-'),
     );
+    reportThemeToPanels(theme.colors);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps -- intentional mount-only
 
   return (

@@ -24,6 +24,20 @@ import {
   type SetPanelBoundsPayload,
 } from "./modules-panels.js";
 import type { PanelSenderRegistry } from "../panel-sender-registry.js";
+import { setPanelTheme } from "../panel-bridge-electron.js";
+
+/** Keep only `--css-var` string entries (bounded), so a spoofed renderer
+ *  payload can't inject arbitrary keys/values into the panels' inline style. */
+function sanitizeThemeVars(payload: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!payload || typeof payload !== "object") return out;
+  for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+    if (k.startsWith("--") && k.length <= 40 && typeof v === "string" && v.length <= 200) {
+      out[k] = v;
+    }
+  }
+  return out;
+}
 
 /**
  * Installs the Electron `ipcMain.handle` channels for module panels. Each
@@ -292,6 +306,17 @@ export function registerModulesPanelsIpc(
     },
   );
 
+  // Theme sync — renderer pushes its current theme tokens; forward to panels.
+  // Host-UI sender only (a sandboxed panel must not be able to restyle peers).
+  ipcMain.handle("modules:report-theme", (event, payload: unknown) => {
+    const senderReg = getSenderRegistry?.();
+    if (senderReg && senderReg.resolve(event.sender)?.kind !== "host") {
+      return { ok: false as const };
+    }
+    setPanelTheme(sanitizeThemeVars(payload));
+    return { ok: true as const };
+  });
+
   return {
     dispose: () => {
       ipcMain.removeHandler("modules:list-panels");
@@ -301,6 +326,7 @@ export function registerModulesPanelsIpc(
       ipcMain.removeHandler("modules:set-panel-bounds");
       ipcMain.removeHandler("modules:call-tool");
       ipcMain.removeHandler("modules:host-call");
+      ipcMain.removeHandler("modules:report-theme");
     },
     getActiveBounds: () => {
       return activeKey && lastDeps ? lastDeps.bounds.get(activeKey) : undefined;

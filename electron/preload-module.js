@@ -114,4 +114,20 @@ api.callTool = async function callTool(tool, args, opts) {
   });
 };
 
+// Theme sync — the host (main process) forwards the renderer's current theme
+// tokens here so this isolated panel matches the app's selected theme. The
+// preload shares the page DOM, so setting CSS vars on <html> overrides the
+// panel stylesheet's :root fallbacks. Keys/values are bounded host-side.
+ipcRenderer.on('modules:panel-theme', (_event, vars) => {
+  if (!vars || typeof vars !== 'object') return;
+  const root = document.documentElement;
+  if (!root) return;
+  for (const key of Object.keys(vars)) {
+    const v = vars[key];
+    if (typeof key === 'string' && key.startsWith('--') && typeof v === 'string') {
+      root.style.setProperty(key, v);
+    }
+  }
+});
+
 contextBridge.exposeInMainWorld('rnDev', api);

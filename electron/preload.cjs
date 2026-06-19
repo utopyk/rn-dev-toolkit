@@ -50,6 +50,7 @@ const INVOKE_EXACT = Object.freeze([
   'modules:list',
   'modules:config-get',
   'modules:config-set',
+  'modules:report-theme', // renderer → main: push current theme tokens to panels
 
   // Module-system install flow (Phase 6)
   'modules:install',

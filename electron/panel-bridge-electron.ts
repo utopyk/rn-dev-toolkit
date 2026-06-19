@@ -6,7 +6,7 @@
 // process — it is NOT imported by vitest (tests use the fakes in
 // `__tests__/panel-bridge.test.ts`).
 
-import { BrowserWindow, WebContentsView } from "electron";
+import { BrowserWindow, WebContentsView, type WebContents } from "electron";
 import path from "node:path";
 import {
   createPanelBridge,
@@ -107,6 +107,22 @@ function viewToWCV(view: PanelView): WebContentsView {
   return wcv;
 }
 
+// Live panel webContents + the latest theme tokens the renderer reported.
+// Panels are isolated WebContentsViews that don't inherit the renderer's CSS,
+// so the host pushes the current theme to them (on load + on theme change)
+// and they apply it as CSS vars in `preload-module.js`.
+const livePanelWcs = new Set<WebContents>();
+let latestPanelTheme: Record<string, string> | null = null;
+
+/** Push theme tokens to every open panel + remember them for panels opened
+ *  later. Called by the `modules:report-theme` IPC handler. */
+export function setPanelTheme(vars: Record<string, string>): void {
+  latestPanelTheme = vars;
+  for (const wc of livePanelWcs) {
+    try { if (!wc.isDestroyed()) wc.send("modules:panel-theme", vars); } catch { /* ignore */ }
+  }
+}
+
 export function createElectronPanelViewFactory(
   preloadPath: string,
   senderRegistry?: PanelSenderRegistry,
@@ -131,6 +147,15 @@ export function createElectronPanelViewFactory(
       // Phase 5b hardening — bind this webContents to its moduleId so
       // ipcMain handlers can reject spoofed payloads via _event.sender.
       senderRegistry?.registerPanel(wcv.webContents, opts.moduleId);
+      // Theme sync: track this panel + push the current theme once it loads
+      // (and drop it from the live set when it goes away).
+      livePanelWcs.add(wcv.webContents);
+      wcv.webContents.on("destroyed", () => livePanelWcs.delete(wcv.webContents));
+      wcv.webContents.on("did-finish-load", () => {
+        if (latestPanelTheme && !wcv.webContents.isDestroyed()) {
+          try { wcv.webContents.send("modules:panel-theme", latestPanelTheme); } catch { /* ignore */ }
+        }
+      });
       void wcv.webContents.loadFile(path.resolve(opts.entryPath));
 
       const view: PanelView = {

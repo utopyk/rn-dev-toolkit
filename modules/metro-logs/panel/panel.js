@@ -323,9 +323,43 @@ function render() {
   }, { passive: true });
 }
 
+// Conservative level classifier — only flags lines whose level is signaled
+// at the start (bracketed `[ERROR]`, RN-style `ERROR `, `Error:` prefix,
+// emoji marker). Returns null for ordinary lines so the panel doesn't
+// turn into a sea of red just because the word "error" appears mid-line.
+function classifyLine(text) {
+  const t = String(text);
+  if (
+    /^\s*\[(?:ERROR|FATAL)\]/i.test(t) ||
+    /^\s*(?:ERROR|FATAL)\s/.test(t) ||
+    /^\s*Error:/.test(t) ||
+    /^\s*(?:❌|🛑|🚨)/.test(t)
+  ) return "error";
+  if (
+    /^\s*\[WARN(?:ING)?\]/i.test(t) ||
+    /^\s*WARN\s/.test(t) ||
+    /^\s*Warning:/.test(t) ||
+    /^\s*⚠️?/.test(t)
+  ) return "warn";
+  if (
+    /^\s*\[INFO\]/i.test(t) ||
+    /^\s*INFO\s/.test(t) ||
+    /^\s*LOG\s/.test(t)
+  ) return "info";
+  if (
+    /^\s*\[(?:DEBUG|VERBOSE|TRACE)\]/i.test(t) ||
+    /^\s*DEBUG\s/.test(t)
+  ) return "debug";
+  // Stack-frame continuation lines ("    at fn (file:line:col)").
+  if (/^\s{2,}at\s/.test(t)) return "trace";
+  return null;
+}
+
 function renderRow(entry) {
   const row = document.createElement("div");
-  row.className = `log-row ${entry.stream === "stderr" ? "stderr" : "stdout"}`;
+  const level = classifyLine(entry.line ?? "");
+  const streamCls = entry.stream === "stderr" ? "stderr" : "stdout";
+  row.className = `log-row ${streamCls}${level ? ` log-${level}` : ""}`;
 
   const seq = document.createElement("span");
   seq.className = "seq";

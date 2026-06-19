@@ -86,7 +86,13 @@ function createChipFilter(container, opts) {
     segInc.classList.toggle("active", addMode === "include");
     segExc.classList.toggle("active", addMode === "exclude");
   };
-  const setMode = (m) => { addMode = m; renderSeg(); input.value = ""; closeDropdown(); input.focus(); };
+  const setMode = (m) => { addMode = m; renderSeg(); input.value = ""; closeDropdown(); };
+  // preventDefault on mousedown keeps focus on the input instead of moving it
+  // to the button — without it the input blurs then refocuses, and the
+  // focus-handler reopens the dropdown, so it flashes closed→open. With it,
+  // toggling just closes the dropdown cleanly (the input stays ready to type).
+  segInc.addEventListener("mousedown", (e) => e.preventDefault());
+  segExc.addEventListener("mousedown", (e) => e.preventDefault());
   segInc.addEventListener("click", () => setMode("include"));
   segExc.addEventListener("click", () => setMode("exclude"));
   renderSeg();
@@ -94,7 +100,8 @@ function createChipFilter(container, opts) {
   // Clear-all: wipe every term in one click (shown only when terms exist).
   const clearBtn = el("button", "cf-clear");
   clearBtn.type = "button"; clearBtn.textContent = "clear"; clearBtn.title = "Clear all filter terms";
-  clearBtn.addEventListener("click", () => { terms.length = 0; recompute(); renderChips(); input.focus(); opts.onChange(); });
+  clearBtn.addEventListener("mousedown", (e) => e.preventDefault());
+  clearBtn.addEventListener("click", () => { terms.length = 0; recompute(); renderChips(); closeDropdown(); opts.onChange(); });
 
   const recompute = () => {
     incM = terms.filter((t) => t.mode === "include").map((t) => makeMatcher(t.value));

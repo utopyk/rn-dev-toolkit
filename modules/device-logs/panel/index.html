@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Device Logs \u2014 device-logs</title>
+    <style>
+      /* Fallback palette — the host pushes the renderer's theme vars over
+         `modules:panel-theme` (see electron/preload-module.js), so the
+         panel automatically matches the app's selected theme. These :root
+         values are only used until that broadcast arrives. */
+      :root {
+        --bg:         #0f1115;
+        --bg-soft:    #0b0d11;
+        --surface:    #1f2937;
+        --surface-hi: #374151;
+        --ink:        #e5e7eb;
+        --ink-soft:   #d1d5db;
+        --muted:      #9ca3af;
+        --muted-2:    #6b7280;
+        --glow:       #60a5fa;
+        --ready:      #34d399;
+        --booting:    #fb923c;
+        --error:      #f87171;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        padding: 12px;
+        font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', ui-monospace, SFMono-Regular, monospace;
+        background: var(--bg);
+        color: var(--ink);
+        font-size: 12.5px;
+        line-height: 1.5;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+      }
+      ::-webkit-scrollbar { width: 7px; height: 7px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--muted-2); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+      h1 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+      .bar {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+      .bar-right {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      button {
+        background: var(--surface);
+        color: var(--ink-soft);
+        border: 1px solid var(--surface-hi);
+        padding: 5px 11px;
+        border-radius: 7px;
+        cursor: pointer;
+        font-size: 11.5px;
+        font-family: inherit;
+      }
+      button:hover { background: var(--surface-hi); color: var(--ink); }
+      button:disabled { opacity: 0.5; cursor: default; }
+      label.toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11.5px;
+        color: var(--muted);
+        cursor: pointer;
+        user-select: none;
+      }
+      label.toggle input { accent-color: var(--glow); cursor: pointer; }
+      select {
+        background: var(--bg-soft);
+        color: var(--ink);
+        border: 1px solid var(--surface-hi);
+        padding: 4px 8px;
+        border-radius: 7px;
+        font-size: 11.5px;
+        font-family: inherit;
+      }
+      select:focus { border-color: var(--glow); outline: none; }
+      .status {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-bottom: 10px;
+        padding: 7px 12px;
+        background: var(--bg-soft);
+        border: 1px solid var(--surface-hi);
+        border-radius: 8px;
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .status-label { color: var(--muted-2); }
+      .status-value { color: var(--ink-soft); margin-right: 12px; }
+      .status-value--ok { color: var(--ready); }
+      .status-value--warn { color: var(--booting); }
+      .status-value--muted { color: var(--muted-2); }
+      #content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+      .log-list {
+        font-family: inherit;
+        font-size: 12px;
+        background: var(--bg-soft);
+        border: 1px solid var(--surface-hi);
+        border-radius: 9px;
+        padding: 8px;
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .log-row {
+        padding: 2px 4px 2px 6px;
+        border-left: 2px solid transparent;
+      }
+      .log-row .seq {
+        color: var(--muted-2);
+        margin-right: 8px;
+        user-select: none;
+      }
+      .log-row.stderr { color: var(--ink); border-left-color: var(--error); }
+      .log-row.stdout { color: var(--ink); }
+      /* Conservative level-based highlighting (classifier in panel.js).
+         Only fires for lines that explicitly signal their level at the
+         start — keeps the panel from turning into a sea of red. */
+      .log-row.log-error { color: var(--error); border-left-color: var(--error); background: rgba(247,118,142,0.05); }
+      .log-row.log-error .seq { color: var(--error); opacity: 0.7; }
+      .log-row.log-warn { color: var(--booting); border-left-color: var(--booting); }
+      .log-row.log-warn .seq { color: var(--booting); opacity: 0.7; }
+      .log-row.log-info { color: var(--glow); }
+      .log-row.log-debug { color: var(--muted); }
+      .log-row.log-trace { color: var(--muted-2); font-style: italic; }
+
+      /* Per-row copy icon — same hover-revealed pattern as the redux
+         panel's per-key icon. Vendored CSS; keep in sync. */
+      .tcopy {
+        opacity: 0;
+        margin-left: 8px;
+        cursor: pointer;
+        color: var(--muted-2);
+        padding: 0 2px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        flex: 0 0 auto;
+        transition: opacity 0.12s ease, color 0.12s ease;
+      }
+      .log-row:hover .tcopy { opacity: 0.7; }
+      .tcopy:hover { opacity: 1 !important; color: var(--glow); }
+      .tcopy.copied { opacity: 1 !important; color: var(--ready); }
+      /* Wrap the line text in a span so user-select on the row excludes
+         the seq# (which is `user-select: none`) and the trailing copy
+         icon, giving clean multi-line text copies via Cmd+C. */
+      .log-row { display: flex; align-items: baseline; }
+      .log-text { flex: 1 1 auto; white-space: pre-wrap; word-break: break-all; min-width: 0; }
+      /* `.copied` flash on the toolbar copy button. */
+      button.copied { color: var(--ready); border-color: var(--ready); }
+
+      /* Trace grouping — fold consecutive stack-frame lines under their
+         preceding header. Default state is collapsed (see panel.js). */
+      .trace-group { display: block; }
+      .log-row.trace-header { cursor: pointer; }
+      .log-row.trace-header:hover { background: var(--surface); }
+      .trace-pill {
+        margin-left: 8px;
+        background: transparent;
+        border: 1px solid var(--surface-hi);
+        color: var(--muted);
+        border-radius: 9px;
+        padding: 0 7px;
+        font-size: 10px;
+        font-family: inherit;
+        cursor: pointer;
+        vertical-align: baseline;
+        user-select: none;
+      }
+      .trace-pill:hover { color: var(--ink); background: var(--surface); }
+      .trace-children {
+        padding-left: 18px;
+        border-left: 1px dashed var(--surface-hi);
+        margin: 0 0 0 12px;
+      }
+      .empty {
+        padding: 22px;
+        text-align: center;
+        color: var(--muted);
+        border: 1px dashed var(--surface-hi);
+        border-radius: 7px;
+      }
+      .error {
+        padding: 10px 12px;
+        background: rgba(247,118,142,0.08);
+        border: 1px solid rgba(247,118,142,0.3);
+        color: var(--error);
+        border-radius: 7px;
+        font-size: 12px;
+      }
+
+      /* chip filter (hybrid: autocomplete input + include/exclude chips) —
+         vendored from modules/redux; keep in sync. */
+      .cf { position: relative; flex: 1; }
+      .cf-row {
+        display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+        background: var(--bg-soft); border: 1px solid var(--surface-hi); border-radius: 7px;
+        padding: 5px 7px; min-height: 32px;
+      }
+      .cf-row:focus-within { border-color: var(--glow); }
+      .cf-input {
+        flex: 1; min-width: 80px; background: transparent; border: none; outline: none;
+        color: var(--ink); font: inherit; font-size: 11.5px; padding: 1px 2px;
+      }
+      .cf-chip {
+        display: inline-flex; align-items: center; gap: 5px; border-radius: 6px;
+        padding: 1px 4px 1px 7px; font-size: 11px; border: 1px solid;
+      }
+      .cf-chip.inc { color: var(--ready); border-color: rgba(52,211,153,0.45); background: rgba(52,211,153,0.10); }
+      .cf-chip.exc { color: var(--error); border-color: rgba(248,113,113,0.45); background: rgba(248,113,113,0.10); }
+      .cf-mode { cursor: pointer; font-size: 9px; letter-spacing: 0.03em; text-transform: uppercase; opacity: 0.85; user-select: none; }
+      .cf-mode:hover { opacity: 1; text-decoration: underline; }
+      .cf-x { cursor: pointer; opacity: 0.65; padding: 0 2px; }
+      .cf-x:hover { opacity: 1; }
+      .cf-dropdown {
+        position: absolute; left: 0; right: 0; top: 100%; margin-top: 3px; z-index: 30;
+        background: var(--surface); border: 1px solid var(--surface-hi); border-radius: 7px;
+        max-height: 190px; overflow: auto; box-shadow: 0 8px 22px rgba(0,0,0,0.35);
+      }
+      .cf-dropdown[hidden] { display: none; }
+      .cf-sug { padding: 5px 10px; cursor: pointer; font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; }
+      .cf-sug.active, .cf-sug:hover { background: var(--surface-hi); color: var(--ink); }
+      .cf-count { font-size: 10.5px; color: var(--muted); padding: 4px 2px 0; }
+      .cf-seg { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--surface-hi); border-radius: 6px; overflow: hidden; }
+      .cf-seg-btn {
+        font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.03em;
+        padding: 3px 8px; background: var(--bg); color: var(--muted-2); border: none; cursor: pointer;
+      }
+      .cf-seg-btn + .cf-seg-btn { border-left: 1px solid var(--surface-hi); }
+      .cf-seg-btn:hover { color: var(--ink-soft); }
+      .cf-seg-btn.incl.active { background: rgba(52,211,153,0.18); color: var(--ready); }
+      .cf-seg-btn.excl.active { background: rgba(248,113,113,0.18); color: var(--error); }
+      .cf-clear { flex: 0 0 auto; font-size: 10px; color: var(--muted); background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0 4px; }
+      .cf-clear:hover { color: var(--ink); }
+      .thit { background: rgba(96,165,250,0.22); border-radius: 3px; padding: 0 2px; }
+
+      .filter-row { display: flex; gap: 8px; align-items: stretch; margin-bottom: 10px; }
+      .filter-row .cf { flex: 1; min-width: 0; }
+      .filter-row .cf-count { padding: 0 4px; align-self: center; min-width: 120px; text-align: right; }
+
+      /* tap controls — the device-logs panel needs an opt-in start/stop
+         row because taps are not automatic. */
+      .taps-row {
+        display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+        padding: 8px 12px; margin-bottom: 10px;
+        background: var(--bg-soft);
+        border: 1px solid var(--surface-hi);
+        border-radius: 8px;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .taps-row label { color: var(--muted-2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+      .taps-row select, .taps-row input[type="text"] {
+        background: var(--bg);
+        color: var(--ink);
+        border: 1px solid var(--surface-hi);
+        border-radius: 6px;
+        padding: 3px 7px;
+        font-size: 11.5px;
+        font-family: inherit;
+      }
+      .taps-row select:focus, .taps-row input[type="text"]:focus { border-color: var(--glow); outline: none; }
+      .taps-row .tap-chip {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 2px 8px; border-radius: 999px;
+        background: var(--surface); color: var(--ink-soft);
+        font-size: 11px;
+      }
+      .taps-row .tap-chip.running { background: rgba(52,211,153,0.12); color: var(--ready); }
+      .taps-row .tap-chip.error { background: rgba(248,113,113,0.12); color: var(--error); }
+      .taps-row .tap-chip button {
+        background: transparent; border: none; color: inherit;
+        cursor: pointer; padding: 0 2px; font-size: 14px; opacity: 0.6;
+      }
+      .taps-row .tap-chip button:hover { opacity: 1; }
+      .tap-error-banner {
+        margin-top: 4px;
+        padding: 5px 10px;
+        background: rgba(248,113,113,0.06);
+        border: 1px solid rgba(248,113,113,0.25);
+        color: var(--error);
+        border-radius: 6px;
+        font-size: 11px;
+        flex-basis: 100%;
+      }
+      .source-ios { color: var(--glow); }
+      .source-android { color: var(--ready); }
+      .device-id-cell { color: var(--muted); font-size: 10px; padding-right: 8px; user-select: none; }
+    </style>
+  </head>
+  <body>
+    <div class="bar">
+      <h1>Device Logs</h1>
+      <div class="bar-right">
+        <select id="source">
+          <option value="">All sources</option>
+          <option value="ios">iOS</option>
+          <option value="android">Android</option>
+        </select>
+        <select id="level">
+          <option value="">All levels</option>
+          <option value="debug">≥ debug</option>
+          <option value="info">≥ info</option>
+          <option value="warn">≥ warn</option>
+          <option value="error">≥ error</option>
+          <option value="fault">fault only</option>
+        </select>
+        <label class="toggle">
+          <input id="follow" type="checkbox" checked />
+          Follow
+        </label>
+        <button id="copy-all" title="Copy all currently visible (post-filter) lines">Copy</button>
+        <button id="clear">Clear</button>
+        <button id="refresh">Refresh</button>
+      </div>
+    </div>
+    <div id="taps" class="taps-row">
+      <label>Tap</label>
+      <select id="tap-platform">
+        <option value="android">Android</option>
+        <option value="ios">iOS</option>
+      </select>
+      <input id="tap-device" type="text" placeholder="device id / serial" />
+      <input id="tap-package" type="text" placeholder="package / bundle id (optional)" />
+      <label class="toggle"><input id="tap-simulator" type="checkbox" /> Simulator</label>
+      <button id="tap-start" type="button">Start tap</button>
+      <span id="tap-active" class="tap-active"></span>
+    </div>
+    <div class="filter-row">
+      <div id="filter" class="cf"></div>
+      <div id="filter-count" class="cf-count"></div>
+    </div>
+    <div id="status" class="status" hidden></div>
+    <div id="content">
+      <div class="empty">Loading\u2026</div>
+    </div>
+    <script src="./panel.js"></script>
+  </body>
+</html>

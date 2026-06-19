@@ -145,6 +145,31 @@
       .log-row.log-debug { color: var(--muted); }
       .log-row.log-trace { color: var(--muted-2); font-style: italic; }
 
+      /* Per-row copy icon — same hover-revealed pattern as the redux
+         panel's per-key icon. Vendored CSS; keep in sync. */
+      .tcopy {
+        opacity: 0;
+        margin-left: 8px;
+        cursor: pointer;
+        color: var(--muted-2);
+        padding: 0 2px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        flex: 0 0 auto;
+        transition: opacity 0.12s ease, color 0.12s ease;
+      }
+      .log-row:hover .tcopy { opacity: 0.7; }
+      .tcopy:hover { opacity: 1 !important; color: var(--glow); }
+      .tcopy.copied { opacity: 1 !important; color: var(--ready); }
+      /* Wrap the line text in a span so user-select on the row excludes
+         the seq# (which is `user-select: none`) and the trailing copy
+         icon, giving clean multi-line text copies via Cmd+C. */
+      .log-row { display: flex; align-items: baseline; }
+      .log-text { flex: 1 1 auto; white-space: pre-wrap; word-break: break-all; min-width: 0; }
+      /* `.copied` flash on the toolbar copy button. */
+      button.copied { color: var(--ready); border-color: var(--ready); }
+
       /* Trace grouping — fold consecutive stack-frame lines under their
          preceding header. Default state is collapsed (see panel.js). */
       .trace-group { display: block; }
@@ -248,6 +273,7 @@
           <input id="follow" type="checkbox" checked />
           Follow
         </label>
+        <button id="copy-all" title="Copy all currently visible (post-filter) lines">Copy</button>
         <button id="clear">Clear</button>
         <button id="refresh">Refresh</button>
       </div>

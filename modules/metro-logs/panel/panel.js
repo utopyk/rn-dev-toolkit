@@ -21,6 +21,7 @@ const contentEl = document.getElementById("content");
 const statusEl = document.getElementById("status");
 const refreshBtn = document.getElementById("refresh");
 const clearBtn = document.getElementById("clear");
+const copyAllBtn = document.getElementById("copy-all");
 const streamEl = /** @type {HTMLSelectElement} */ (document.getElementById("stream"));
 const followEl = /** @type {HTMLInputElement} */ (document.getElementById("follow"));
 const filterCountEl = document.getElementById("filter-count");
@@ -265,6 +266,67 @@ function ingest(result) {
 // the header falls out of the ring buffer.
 const collapsedTraces = new Map();
 
+// Selection-aware render: the 1Hz poll's replaceChildren() blew away any
+// active user selection, and the browser tried to repair the selection by
+// extending it to the next surviving nodes — that's why selecting lines
+// 250-251 ended up highlighting lines 1-251, then vanishing on the next
+// poll. We now suppress the rebuild while either (a) a mouse button is
+// held inside the log list, or (b) a non-collapsed selection lives inside
+// the list. Status + counter updates still happen via the surrounding
+// flow (renderStatus is called from ingest, independent of render).
+let mouseHeldInList = false;
+contentEl.addEventListener("mousedown", (e) => {
+  if (e.target && /** @type {Element} */ (e.target).closest?.(".log-list")) {
+    mouseHeldInList = true;
+  }
+}, { passive: true });
+document.addEventListener("mouseup", () => { mouseHeldInList = false; }, { passive: true });
+
+function userIsInteractingWithList() {
+  if (mouseHeldInList) return true;
+  const list = contentEl.querySelector(".log-list");
+  if (!list) return false;
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed) return false;
+  return list.contains(sel.anchorNode) || list.contains(sel.focusNode);
+}
+
+// One-click copy icon (same shape as the redux panel's per-key icon).
+// `getText` is a thunk so the displayed value can be evaluated lazily —
+// useful when the row references a mutable entry. Click stops propagation
+// so a copy press doesn't toggle a trace-group header.
+function makeCopyIcon(getText, title = "Copy line to clipboard") {
+  const btn = document.createElement("span");
+  btn.className = "tcopy";
+  btn.title = title;
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "11"); svg.setAttribute("height", "11");
+  svg.setAttribute("aria-hidden", "true");
+  const back = document.createElementNS(svgNS, "rect");
+  back.setAttribute("x", "5"); back.setAttribute("y", "2");
+  back.setAttribute("width", "9"); back.setAttribute("height", "11"); back.setAttribute("rx", "1.5");
+  back.setAttribute("fill", "none"); back.setAttribute("stroke", "currentColor"); back.setAttribute("stroke-width", "1.2");
+  const front = document.createElementNS(svgNS, "rect");
+  front.setAttribute("x", "2"); front.setAttribute("y", "4");
+  front.setAttribute("width", "9"); front.setAttribute("height", "11"); front.setAttribute("rx", "1.5");
+  front.setAttribute("fill", "none"); front.setAttribute("stroke", "currentColor"); front.setAttribute("stroke-width", "1.2");
+  svg.appendChild(back); svg.appendChild(front);
+  btn.appendChild(svg);
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const text = String(getText() ?? "");
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(() => {
+        btn.classList.add("copied");
+        setTimeout(() => btn.classList.remove("copied"), 700);
+      }, () => { /* clipboard denied — silent */ });
+    }
+  });
+  return btn;
+}
+
 // Follow-scroll: replaceChildren() on every 1Hz poll was resetting scrollTop
 // to 0, which is why "follow off" couldn't stay at the bottom either. Two
 // fixes layered together:
@@ -281,6 +343,11 @@ function isAtBottom(el) {
 }
 
 function render() {
+  // Hard rule: don't blow away the DOM while the user is selecting or has
+  // a live selection inside it. Next poll will catch the new rows once the
+  // selection clears.
+  if (userIsInteractingWithList()) return;
+
   const matched = filter.active ? rows.filter((e) => filter.test(e.line ?? "")) : rows;
   filterCountEl.textContent = filter.active ? `showing ${matched.length} of ${rows.length}` : "";
 
@@ -415,7 +482,11 @@ function buildTraceGroup(headerRow, traces, headerSeq) {
     collapsedTraces.set(headerSeq, !isHidden);
   };
   pill.addEventListener("click", toggle);
-  headerRow.appendChild(pill);
+  // Slot the pill BEFORE the per-row copy icon so the right edge of the
+  // row stays: …text [pill] [copy].
+  const copyEl = headerRow.querySelector(".tcopy");
+  if (copyEl) headerRow.insertBefore(pill, copyEl);
+  else headerRow.appendChild(pill);
   headerRow.classList.add("trace-header");
   headerRow.addEventListener("click", toggle);
 
@@ -435,8 +506,12 @@ function renderRow(entry) {
   seq.textContent = `#${entry.sequence}`;
   row.appendChild(seq);
 
-  const text = document.createTextNode(entry.line ?? "");
+  const text = document.createElement("span");
+  text.className = "log-text";
+  text.textContent = entry.line ?? "";
   row.appendChild(text);
+
+  row.appendChild(makeCopyIcon(() => entry.line ?? ""));
   return row;
 }
 
@@ -509,6 +584,24 @@ refreshBtn.addEventListener("click", () => {
   refresh({ force: true });
 });
 clearBtn.addEventListener("click", doClear);
+copyAllBtn.addEventListener("click", () => {
+  // Copies all lines currently visible (after chip-filter + stream select).
+  // Doesn't go through the row-level copy icons so it's one click for the
+  // common "grab the slice I just filtered down to" case.
+  const matched = filter.active ? rows.filter((e) => filter.test(e.line ?? "")) : rows;
+  const text = matched.map((e) => e.line ?? "").join("\n");
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(() => {
+      const original = copyAllBtn.textContent;
+      copyAllBtn.classList.add("copied");
+      copyAllBtn.textContent = `Copied ${matched.length}`;
+      setTimeout(() => {
+        copyAllBtn.classList.remove("copied");
+        copyAllBtn.textContent = original;
+      }, 1100);
+    }, () => { /* denied */ });
+  }
+});
 streamEl.addEventListener("change", () => {
   cursor = null;
   rows.length = 0;

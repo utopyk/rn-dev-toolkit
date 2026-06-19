@@ -18,12 +18,22 @@
 // scope makes `const rnDev` a local binding that shadows the global property.
 (() => {
 const rnDev = /** @type {any} */ (window).rnDev;
-const contentEl = document.getElementById("content");
+const listHostEl = document.getElementById("list-host");
+const detailPaneEl = document.getElementById("detail-pane");
+const detailHostEl = document.getElementById("detail-host");
 const statusEl = document.getElementById("status");
 const refreshBtn = document.getElementById("refresh");
 const clearBtn = document.getElementById("clear");
 const followEl = /** @type {HTMLInputElement} */ (document.getElementById("follow"));
 const filterCountEl = document.getElementById("filter-count");
+
+// Selected request — the row the user clicked. Cleared on dismiss or when
+// the row falls out of the ring. The detail is fetched via the `get` tool
+// (separate call so the list result can stay light + bodies show even when
+// list reaped a request).
+let selectedRequestId = null;
+let selectedDetail = null;
+let detailLoading = false;
 
 // Follow-scroll mirror of the metro-logs panel. Newest entries render at
 // the TOP here (entries reversed before render), so "follow" snaps to top
@@ -232,6 +242,9 @@ async function refresh({ force = false } = {}) {
     lastEntries = Array.isArray(result?.entries) ? result.entries : [];
     lastMeta = result?.meta ?? null;
     renderEntries();
+    // If the selected request transitioned (pending → finished) re-fetch
+    // it so the detail pane reflects the final headers/body/timings.
+    void maybeRefreshSelectedDetail();
   } catch (err) {
     renderFatal(err instanceof Error ? err.message : String(err));
   } finally {
@@ -255,17 +268,17 @@ async function doClear() {
 function renderFatal(message) {
   lastError = message;
   statusEl.hidden = true;
-  contentEl.replaceChildren();
   const div = document.createElement("div");
   div.className = "error";
   div.textContent = message;
-  contentEl.appendChild(div);
+  listHostEl.replaceChildren(div);
 }
 
 function renderEntries() {
   const meta = lastMeta;
   const entries = lastEntries;
   renderStatus(meta, entries.length);
+  renderDetail();
 
   if (entries.length === 0) {
     filterCountEl.textContent = "";
@@ -286,7 +299,7 @@ function renderEntries() {
           ? "Waiting for network activity…"
           : "No captures yet.";
     }
-    contentEl.replaceChildren(empty);
+    listHostEl.replaceChildren(empty);
     return;
   }
 
@@ -299,7 +312,7 @@ function renderEntries() {
     const empty = document.createElement("div");
     empty.className = "empty";
     empty.textContent = "No requests match the filter.";
-    contentEl.replaceChildren(empty);
+    listHostEl.replaceChildren(empty);
     return;
   }
 
@@ -308,7 +321,7 @@ function renderEntries() {
 
   // Capture pre-rebuild scroll state from the existing wrapper (if any) so
   // a paused follow view keeps its position across 2 s polls.
-  const prev = contentEl.querySelector(".table-wrap");
+  const prev = listHostEl.querySelector(".table-wrap");
   const prevScrollTop = prev ? prev.scrollTop : 0;
   const prevAtTop = prev ? isAtTop(prev) : true;
 
@@ -336,7 +349,7 @@ function renderEntries() {
   table.appendChild(thead);
   table.appendChild(tbody);
   wrap.appendChild(table);
-  contentEl.replaceChildren(wrap);
+  listHostEl.replaceChildren(wrap);
 
   suppressAutoToggle++;
   if (followEl.checked || prevAtTop) {
@@ -356,6 +369,9 @@ function renderEntries() {
 
 function renderRow(entry) {
   const tr = document.createElement("tr");
+  if (entry.requestId && entry.requestId === selectedRequestId) {
+    tr.classList.add("selected");
+  }
 
   const method = document.createElement("td");
   method.className = "col-method";
@@ -378,7 +394,227 @@ function renderRow(entry) {
   tr.appendChild(status);
   tr.appendChild(dur);
   tr.appendChild(url);
+
+  tr.addEventListener("click", () => selectRequest(entry.requestId));
   return tr;
+}
+
+async function selectRequest(requestId) {
+  if (!requestId) return;
+  if (selectedRequestId === requestId) {
+    // Re-clicking the selected row dismisses the detail pane.
+    selectedRequestId = null;
+    selectedDetail = null;
+    detailLoading = false;
+    renderEntries();
+    return;
+  }
+  selectedRequestId = requestId;
+  selectedDetail = null;
+  detailLoading = true;
+  renderEntries();
+  try {
+    const reply = await rnDev.callTool("get", { requestId });
+    if (reply?.kind === "error") {
+      selectedDetail = { __error: `${reply.code}: ${reply.message}` };
+    } else {
+      const result = reply?.result ?? reply;
+      selectedDetail = result;
+    }
+  } catch (err) {
+    selectedDetail = { __error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    detailLoading = false;
+    // Only render the detail pane, not the whole list — re-rendering the
+    // list mid-poll fights with scroll restoration. Detail-only redraw is
+    // safe because the list's `.selected` class is already in sync.
+    renderDetail();
+  }
+}
+
+function renderDetail() {
+  if (!selectedRequestId) {
+    detailPaneEl.hidden = true;
+    detailHostEl.replaceChildren();
+    return;
+  }
+  detailPaneEl.hidden = false;
+  const head = detailHeader(selectedDetail && !selectedDetail.__error && selectedDetail.error !== "not-found" ? selectedDetail : null);
+  const body = el("div", "det-body");
+
+  if (detailLoading && !selectedDetail) {
+    body.appendChild(elText("det-empty", "Loading…"));
+  } else if (selectedDetail && selectedDetail.error === "not-found") {
+    body.appendChild(elText("det-empty", `Request ${selectedRequestId} fell out of the buffer.`));
+  } else if (selectedDetail && selectedDetail.__error) {
+    body.appendChild(elText("error", selectedDetail.__error));
+  } else if (!selectedDetail) {
+    body.appendChild(elText("det-empty", "No data."));
+  } else {
+    const e = selectedDetail;
+    body.appendChild(summarySection(e));
+    if (e.requestHeaders) body.appendChild(headersSection("Request Headers", e.requestHeaders));
+    if (e.requestBody) body.appendChild(bodySection("Request Body", e.requestBody));
+    if (e.responseHeaders) body.appendChild(headersSection("Response Headers", e.responseHeaders));
+    if (e.responseBody) body.appendChild(bodySection("Response Body", e.responseBody));
+    if (e.initiator) body.appendChild(initiatorSection(e.initiator));
+  }
+
+  detailHostEl.replaceChildren(head, body);
+}
+
+function detailHeader(entry) {
+  const head = el("div", "det-head");
+  const m = el("span", "det-method");
+  m.textContent = entry ? (entry.method || "").toUpperCase() : "…";
+  head.appendChild(m);
+  const u = el("span", "det-url");
+  u.textContent = entry ? (entry.url || "") : "";
+  u.title = entry ? (entry.url || "") : "";
+  head.appendChild(u);
+  const close = el("button", "det-close");
+  close.type = "button"; close.textContent = "×"; close.title = "Close detail";
+  close.addEventListener("click", () => {
+    selectedRequestId = null;
+    selectedDetail = null;
+    renderEntries();
+  });
+  head.appendChild(close);
+  return head;
+}
+
+function summarySection(e) {
+  const sec = el("div", "det-section");
+  const h = document.createElement("h3"); h.textContent = "Summary"; sec.appendChild(h);
+  const dl = el("dl", "det-kv");
+  appendKV(dl, "Status", String(e.status ?? e.terminalState ?? "—") + (e.statusText ? ` ${e.statusText}` : ""));
+  appendKV(dl, "Duration", durationText(e));
+  if (e.mimeType) appendKV(dl, "MIME", e.mimeType);
+  if (e.timings?.startedAt) appendKV(dl, "Started", new Date(e.timings.startedAt).toLocaleTimeString());
+  if (e.terminalState === "failed" && e.failureReason) appendKV(dl, "Failure", e.failureReason);
+  if (Array.isArray(e.redirectChain) && e.redirectChain.length > 0) {
+    appendKV(dl, "Redirects", `${e.redirectChain.length} hop${e.redirectChain.length === 1 ? "" : "s"}`);
+  }
+  appendKV(dl, "Request ID", e.requestId || "");
+  appendKV(dl, "Source", e.source || "cdp");
+  sec.appendChild(dl);
+  return sec;
+}
+
+function headersSection(title, headers) {
+  const sec = el("div", "det-section");
+  const h = document.createElement("h3"); h.textContent = title; sec.appendChild(h);
+  const keys = Object.keys(headers || {}).sort();
+  if (keys.length === 0) {
+    sec.appendChild(elText("det-empty", "(no headers)"));
+  } else {
+    const dl = el("dl", "det-kv det-headers");
+    for (const k of keys) appendKV(dl, k, String(headers[k]));
+    sec.appendChild(dl);
+  }
+  return sec;
+}
+
+function bodySection(title, capturedBody) {
+  const sec = el("div", "det-section");
+  const h = document.createElement("h3"); h.textContent = title; sec.appendChild(h);
+  sec.appendChild(renderCapturedBody(capturedBody));
+  return sec;
+}
+
+function renderCapturedBody(b) {
+  if (!b || typeof b !== "object") return elText("det-empty", "(no body)");
+  if (b.kind === "redacted") {
+    return elText("det-pre det-pre--redacted",
+      b.reason === "mcp-default"
+        ? "(redacted — enable `captureBodies: true` in the module config to see bodies)"
+        : `(redacted: ${b.reason})`);
+  }
+  if (b.kind === "absent") {
+    const why = b.reason === "204-or-304" ? "no content (204/304)"
+              : b.reason === "fetch-failed" ? "fetch failed"
+              : "not captured";
+    return elText("det-pre det-pre--absent", `(absent — ${why})`);
+  }
+  if (b.kind === "binary") {
+    return elText("det-pre det-pre--binary", `<${b.mimeType || "binary"}, ${formatBytes(b.byteLength)}>`);
+  }
+  if (b.kind === "text") {
+    const pre = el("pre", "det-pre");
+    pre.textContent = prettyJsonOrRaw(b.data);
+    const wrap = document.createDocumentFragment();
+    wrap.appendChild(pre);
+    if (b.truncated) {
+      const t = elText("det-truncated", `… truncated, ${formatBytes(b.droppedBytes)} dropped`);
+      wrap.appendChild(t);
+    }
+    return wrap;
+  }
+  return elText("det-empty", "(unknown body kind)");
+}
+
+function initiatorSection(initiator) {
+  const sec = el("div", "det-section");
+  const h = document.createElement("h3"); h.textContent = "Initiator"; sec.appendChild(h);
+  if (initiator.type === "script" && initiator.stack && Array.isArray(initiator.stack.callFrames)) {
+    const pre = el("pre", "det-pre");
+    pre.textContent = initiator.stack.callFrames.slice(0, 12)
+      .map((f) => `  at ${f.functionName || "(anonymous)"} (${f.url}:${f.lineNumber}:${f.columnNumber})`)
+      .join("\n");
+    sec.appendChild(pre);
+  } else if (initiator.type === "parser") {
+    const dl = el("dl", "det-kv");
+    appendKV(dl, "Type", "parser");
+    appendKV(dl, "URL", initiator.url || "");
+    sec.appendChild(dl);
+  } else {
+    const dl = el("dl", "det-kv");
+    appendKV(dl, "Type", String(initiator.type || "other"));
+    sec.appendChild(dl);
+  }
+  return sec;
+}
+
+function appendKV(dl, k, v) {
+  const dt = document.createElement("dt"); dt.textContent = k;
+  const dd = document.createElement("dd"); dd.textContent = v;
+  dl.appendChild(dt); dl.appendChild(dd);
+}
+
+function elText(cls, text) {
+  const d = document.createElement("div");
+  d.className = cls;
+  d.textContent = text;
+  return d;
+}
+
+function prettyJsonOrRaw(data) {
+  const s = String(data);
+  const trimmed = s.trim();
+  if (!trimmed) return s;
+  if (trimmed[0] !== "{" && trimmed[0] !== "[") return s;
+  try { return JSON.stringify(JSON.parse(trimmed), null, 2); } catch { return s; }
+}
+
+async function maybeRefreshSelectedDetail() {
+  if (!selectedRequestId || !selectedDetail) return;
+  const inList = lastEntries.find((e) => e.requestId === selectedRequestId);
+  if (!inList) return;
+  if (inList.terminalState === selectedDetail.terminalState) return;
+  try {
+    const reply = await rnDev.callTool("get", { requestId: selectedRequestId });
+    if (reply?.kind === "error") return;
+    selectedDetail = reply?.result ?? reply;
+    renderDetail();
+  } catch { /* swallow — next poll retries */ }
+}
+
+function formatBytes(n) {
+  const num = Number(n);
+  if (!Number.isFinite(num) || num < 0) return "?";
+  if (num < 1024) return `${num} B`;
+  if (num < 1024 * 1024) return `${(num / 1024).toFixed(1)} KB`;
+  return `${(num / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function statusClass(entry) {
@@ -508,6 +744,14 @@ followEl.addEventListener("change", () => {
       wrap.scrollTop = 0;
       requestAnimationFrame(() => requestAnimationFrame(() => { suppressAutoToggle = 0; }));
     }
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && selectedRequestId) {
+    selectedRequestId = null;
+    selectedDetail = null;
+    renderEntries();
   }
 });
 

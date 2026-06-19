@@ -155,6 +155,83 @@
         font-size: 12px;
       }
 
+      /* request row selection + detail pane */
+      tbody tr { cursor: pointer; }
+      tbody tr:hover td { background: var(--surface); }
+      tbody tr.selected td { background: var(--surface-hi); box-shadow: inset 2px 0 0 var(--glow); }
+      .net-split { display: flex; flex: 1; min-height: 0; gap: 10px; }
+      .net-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+      .net-pane-list { flex: 1; }
+      .net-pane-detail { flex: 0 0 44%; }
+      .net-pane-detail[hidden] { display: none; }
+      .det-head {
+        display: flex; align-items: center; gap: 8px;
+        padding: 6px 10px;
+        background: var(--bg-soft);
+        border: 1px solid var(--surface-hi);
+        border-radius: 8px 8px 0 0;
+        border-bottom: none;
+      }
+      .det-method { font-weight: 600; color: var(--glow); font-size: 11px; letter-spacing: 0.04em; }
+      .det-url {
+        flex: 1; min-width: 0;
+        color: var(--ink); font-size: 11.5px;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      .det-close {
+        background: transparent; border: 1px solid var(--surface-hi);
+        color: var(--muted); padding: 1px 7px; border-radius: 6px;
+        cursor: pointer; font-size: 12px; line-height: 1;
+      }
+      .det-close:hover { color: var(--ink); background: var(--surface); }
+      .det-body {
+        flex: 1; min-height: 0; overflow: auto;
+        background: var(--bg-soft);
+        border: 1px solid var(--surface-hi);
+        border-top: none;
+        border-radius: 0 0 8px 8px;
+        padding: 10px 12px;
+      }
+      .det-section { margin-bottom: 14px; }
+      .det-section:last-child { margin-bottom: 0; }
+      .det-section h3 {
+        margin: 0 0 6px;
+        font-size: 10px; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--muted);
+      }
+      .det-kv {
+        display: grid;
+        grid-template-columns: max-content 1fr;
+        gap: 2px 12px;
+        font-size: 11.5px;
+      }
+      .det-kv dt { color: var(--muted-2); white-space: nowrap; }
+      .det-kv dd { margin: 0; color: var(--ink-soft); word-break: break-all; }
+      .det-headers {
+        font-size: 11px; line-height: 1.45;
+      }
+      .det-headers dt { color: var(--glow); font-weight: 500; }
+      .det-headers dd { color: var(--ink-soft); }
+      .det-pre {
+        margin: 0;
+        padding: 8px 10px;
+        background: var(--bg);
+        border: 1px solid var(--surface);
+        border-radius: 6px;
+        font-size: 11.5px;
+        font-family: inherit;
+        white-space: pre-wrap;
+        word-break: break-all;
+        color: var(--ink-soft);
+        max-height: 380px;
+        overflow: auto;
+      }
+      .det-pre--redacted, .det-pre--absent { color: var(--muted); font-style: italic; }
+      .det-pre--binary { color: var(--booting); }
+      .det-truncated { color: var(--booting); font-size: 10.5px; margin-top: 4px; }
+      .det-empty { color: var(--muted); font-size: 11.5px; padding: 22px; text-align: center; }
+
       /* chip filter (hybrid: autocomplete input + include/exclude chips) —
          vendored from modules/redux; keep in sync. */
       .cf { position: relative; flex: 1; }
@@ -223,7 +300,14 @@
     </div>
     <div id="status" class="status" hidden></div>
     <div id="content">
-      <div class="empty">Loading\u2026</div>
+      <div class="net-split">
+        <div class="net-pane net-pane-list">
+          <div id="list-host"><div class="empty">Loading\u2026</div></div>
+        </div>
+        <div id="detail-pane" class="net-pane net-pane-detail" hidden>
+          <div id="detail-host"></div>
+        </div>
+      </div>
     </div>
     <script src="./panel.js"></script>
   </body>

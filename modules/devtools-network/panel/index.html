@@ -159,6 +159,50 @@
       tbody tr { cursor: pointer; }
       tbody tr:hover td { background: var(--surface); }
       tbody tr.selected td { background: var(--surface-hi); box-shadow: inset 2px 0 0 var(--glow); }
+      .col-url { position: relative; }
+      .col-url-text { user-select: text; }
+      .col-url .tcopy {
+        margin-left: 6px;
+        vertical-align: middle;
+      }
+      .tcopy {
+        opacity: 0;
+        cursor: pointer;
+        color: var(--muted-2);
+        padding: 0 2px;
+        line-height: 1;
+        display: inline-flex;
+        align-items: center;
+        transition: opacity 0.12s ease, color 0.12s ease;
+      }
+      tbody tr:hover .tcopy { opacity: 0.7; }
+      .tcopy:hover { opacity: 1 !important; color: var(--glow); }
+      .tcopy.copied { opacity: 1 !important; color: var(--ready); }
+      /* Action pills shared by the detail head (cURL, JSON, close) and
+         the per-section copy buttons. */
+      .det-action {
+        background: transparent;
+        border: 1px solid var(--surface-hi);
+        color: var(--muted);
+        padding: 2px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 10.5px;
+        font-family: inherit;
+        line-height: 1.3;
+        letter-spacing: 0.02em;
+      }
+      .det-action:hover { color: var(--ink); background: var(--surface); }
+      .det-action.copied { color: var(--ready); border-color: var(--ready); }
+      .det-action--mini { font-size: 9.5px; padding: 1px 6px; text-transform: uppercase; letter-spacing: 0.06em; }
+      .det-section-head {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 8px; margin-bottom: 6px;
+      }
+      .det-section-head h3 { margin: 0; }
+      .det-section-head .det-action { opacity: 0; transition: opacity 0.12s ease; }
+      .det-section:hover .det-section-head .det-action,
+      .det-section-head .det-action:focus-visible { opacity: 1; }
       .net-split { display: flex; flex: 1; min-height: 0; gap: 10px; }
       .net-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
       .net-pane-list { flex: 1; }

@@ -43,6 +43,37 @@ const AT_TOP_SLOP = 8;
 let suppressAutoToggle = 0;
 function isAtTop(el) { return el.scrollTop <= AT_TOP_SLOP; }
 
+// Selection-aware render — same logic as the metro-logs panel: don't
+// blow away the DOM while the user has a live selection (or a held
+// mouse button) inside the list or the detail body. The list rebuild
+// would otherwise eat the selection mid-drag and cancel Cmd+C copies.
+let mouseHeldInList = false;
+let mouseHeldInDetail = false;
+document.addEventListener("mousedown", (e) => {
+  const t = /** @type {Element|null} */ (e.target);
+  if (!t || !t.closest) return;
+  if (t.closest(".table-wrap")) mouseHeldInList = true;
+  if (t.closest(".det-body")) mouseHeldInDetail = true;
+}, { passive: true });
+document.addEventListener("mouseup", () => {
+  mouseHeldInList = false;
+  mouseHeldInDetail = false;
+}, { passive: true });
+
+function selectionLivesIn(rootSelector) {
+  const root = document.querySelector(rootSelector);
+  if (!root) return false;
+  const sel = document.getSelection();
+  if (!sel || sel.isCollapsed) return false;
+  return root.contains(sel.anchorNode) || root.contains(sel.focusNode);
+}
+function userIsInteractingWithList() {
+  return mouseHeldInList || selectionLivesIn(".table-wrap");
+}
+function userIsInteractingWithDetail() {
+  return mouseHeldInDetail || selectionLivesIn(".det-body");
+}
+
 const POLL_INTERVAL_MS = 2000;
 let pollTimer = null;
 let inFlight = false;
@@ -56,6 +87,73 @@ let lastMeta = null;
 // cross-module imports don't work — vendoring is the v1 story).
 
 function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+
+// Clipboard helper — copies text and pulses the calling element green
+// for 700ms via the "copied" class. Returns the promise so callers can
+// chain UI side-effects.
+function copyToClipboard(text, btn) {
+  if (!navigator.clipboard?.writeText) return Promise.resolve();
+  return navigator.clipboard.writeText(String(text)).then(() => {
+    if (btn) {
+      btn.classList.add("copied");
+      setTimeout(() => btn.classList.remove("copied"), 700);
+    }
+  }, () => { /* clipboard denied — silent */ });
+}
+
+function makeCopyIcon(getText, title = "Copy to clipboard") {
+  const btn = document.createElement("span");
+  btn.className = "tcopy";
+  btn.title = title;
+  const svgNS = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(svgNS, "svg");
+  svg.setAttribute("viewBox", "0 0 16 16");
+  svg.setAttribute("width", "11"); svg.setAttribute("height", "11");
+  svg.setAttribute("aria-hidden", "true");
+  const back = document.createElementNS(svgNS, "rect");
+  back.setAttribute("x", "5"); back.setAttribute("y", "2");
+  back.setAttribute("width", "9"); back.setAttribute("height", "11"); back.setAttribute("rx", "1.5");
+  back.setAttribute("fill", "none"); back.setAttribute("stroke", "currentColor"); back.setAttribute("stroke-width", "1.2");
+  const front = document.createElementNS(svgNS, "rect");
+  front.setAttribute("x", "2"); front.setAttribute("y", "4");
+  front.setAttribute("width", "9"); front.setAttribute("height", "11"); front.setAttribute("rx", "1.5");
+  front.setAttribute("fill", "none"); front.setAttribute("stroke", "currentColor"); front.setAttribute("stroke-width", "1.2");
+  svg.appendChild(back); svg.appendChild(front);
+  btn.appendChild(svg);
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void copyToClipboard(getText() ?? "", btn);
+  });
+  return btn;
+}
+
+// Build a curl command from a NetworkEntryDto. Body-quoting uses
+// single-quotes; embedded single-quotes are escaped via the common
+// `'\''` trick. Redacted/absent/binary bodies become a `# ...` comment
+// so the user knows why the command lacks a -d arg.
+function toCurl(entry) {
+  const lines = [];
+  const method = String(entry.method || "GET").toUpperCase();
+  lines.push(`curl -X ${method} ${shellQuote(entry.url || "")}`);
+  const headers = entry.requestHeaders || {};
+  for (const k of Object.keys(headers).sort()) {
+    lines.push(`  -H ${shellQuote(`${k}: ${headers[k]}`)}`);
+  }
+  const b = entry.requestBody;
+  if (b && b.kind === "text" && b.data) {
+    lines.push(`  --data-raw ${shellQuote(b.data)}`);
+    if (b.truncated) lines.push(`  # request body truncated, ${b.droppedBytes} bytes dropped`);
+  } else if (b && b.kind === "redacted") {
+    lines.push(`  # request body redacted — set captureBodies: true in module config to include`);
+  } else if (b && b.kind === "binary") {
+    lines.push(`  # request body is ${b.mimeType || "binary"}, ${b.byteLength} bytes — not inlined`);
+  }
+  return lines.join(" \\\n");
+}
+function shellQuote(s) {
+  // Single-quote everything, escape embedded single-quotes the POSIX way.
+  return `'${String(s).replace(/'/g, "'\\''")}'`;
+}
 
 /** `*` ⇒ anchored glob, else case-insensitive substring. */
 function makeMatcher(term) {
@@ -280,6 +378,10 @@ function renderEntries() {
   renderStatus(meta, entries.length);
   renderDetail();
 
+  // Don't rebuild the list while the user is selecting / copying. Next
+  // poll catches up.
+  if (userIsInteractingWithList()) return;
+
   if (entries.length === 0) {
     filterCountEl.textContent = "";
     const empty = document.createElement("div");
@@ -387,8 +489,13 @@ function renderRow(entry) {
 
   const url = document.createElement("td");
   url.className = "col-url";
-  url.textContent = truncate(entry.url || "", 160);
+  const urlText = document.createElement("span");
+  urlText.className = "col-url-text";
+  urlText.textContent = truncate(entry.url || "", 160);
+  url.appendChild(urlText);
   url.title = entry.url || "";
+  // Per-row copy → the full URL (most-asked-for one-click action).
+  url.appendChild(makeCopyIcon(() => entry.url || "", "Copy URL"));
 
   tr.appendChild(method);
   tr.appendChild(status);
@@ -438,6 +545,9 @@ function renderDetail() {
     detailHostEl.replaceChildren();
     return;
   }
+  // If the user is actively copying inside the detail body, don't rip
+  // it out from under them on the next poll.
+  if (userIsInteractingWithDetail() && detailHostEl.firstChild) return;
   detailPaneEl.hidden = false;
   const head = detailHeader(selectedDetail && !selectedDetail.__error && selectedDetail.error !== "not-found" ? selectedDetail : null);
   const body = el("div", "det-body");
@@ -472,6 +582,19 @@ function detailHeader(entry) {
   u.textContent = entry ? (entry.url || "") : "";
   u.title = entry ? (entry.url || "") : "";
   head.appendChild(u);
+  if (entry) {
+    // cURL is the killer one-click for network detail — most tools have
+    // this and the user gets a re-runnable command without hand-quoting.
+    const curlBtn = el("button", "det-action");
+    curlBtn.type = "button"; curlBtn.textContent = "cURL"; curlBtn.title = "Copy as curl command";
+    curlBtn.addEventListener("click", () => void copyToClipboard(toCurl(entry), curlBtn));
+    head.appendChild(curlBtn);
+    // Whole-entry JSON is the other useful bulk grab.
+    const jsonBtn = el("button", "det-action");
+    jsonBtn.type = "button"; jsonBtn.textContent = "JSON"; jsonBtn.title = "Copy entire entry as JSON";
+    jsonBtn.addEventListener("click", () => void copyToClipboard(JSON.stringify(entry, null, 2), jsonBtn));
+    head.appendChild(jsonBtn);
+  }
   const close = el("button", "det-close");
   close.type = "button"; close.textContent = "×"; close.title = "Close detail";
   close.addEventListener("click", () => {
@@ -483,28 +606,47 @@ function detailHeader(entry) {
   return head;
 }
 
+// Wraps an <h3> heading with a small copy button at the right edge —
+// click to copy the supplied text. The button reuses the .det-action
+// pill style so it lines up with the cURL/JSON buttons in the head.
+function sectionHead(label, getText) {
+  const head = el("div", "det-section-head");
+  const h = document.createElement("h3"); h.textContent = label;
+  head.appendChild(h);
+  const btn = el("button", "det-action det-action--mini");
+  btn.type = "button"; btn.textContent = "Copy"; btn.title = `Copy ${label}`;
+  btn.addEventListener("click", () => void copyToClipboard(getText(), btn));
+  head.appendChild(btn);
+  return head;
+}
+
 function summarySection(e) {
   const sec = el("div", "det-section");
-  const h = document.createElement("h3"); h.textContent = "Summary"; sec.appendChild(h);
-  const dl = el("dl", "det-kv");
-  appendKV(dl, "Status", String(e.status ?? e.terminalState ?? "—") + (e.statusText ? ` ${e.statusText}` : ""));
-  appendKV(dl, "Duration", durationText(e));
-  if (e.mimeType) appendKV(dl, "MIME", e.mimeType);
-  if (e.timings?.startedAt) appendKV(dl, "Started", new Date(e.timings.startedAt).toLocaleTimeString());
-  if (e.terminalState === "failed" && e.failureReason) appendKV(dl, "Failure", e.failureReason);
+  const kvPairs = [
+    ["Status", String(e.status ?? e.terminalState ?? "—") + (e.statusText ? ` ${e.statusText}` : "")],
+    ["Duration", durationText(e)],
+  ];
+  if (e.mimeType) kvPairs.push(["MIME", e.mimeType]);
+  if (e.timings?.startedAt) kvPairs.push(["Started", new Date(e.timings.startedAt).toLocaleTimeString()]);
+  if (e.terminalState === "failed" && e.failureReason) kvPairs.push(["Failure", e.failureReason]);
   if (Array.isArray(e.redirectChain) && e.redirectChain.length > 0) {
-    appendKV(dl, "Redirects", `${e.redirectChain.length} hop${e.redirectChain.length === 1 ? "" : "s"}`);
+    kvPairs.push(["Redirects", `${e.redirectChain.length} hop${e.redirectChain.length === 1 ? "" : "s"}`]);
   }
-  appendKV(dl, "Request ID", e.requestId || "");
-  appendKV(dl, "Source", e.source || "cdp");
+  kvPairs.push(["Request ID", e.requestId || ""]);
+  kvPairs.push(["Source", e.source || "cdp"]);
+  sec.appendChild(sectionHead("Summary", () => kvPairs.map(([k, v]) => `${k}: ${v}`).join("\n")));
+  const dl = el("dl", "det-kv");
+  for (const [k, v] of kvPairs) appendKV(dl, k, v);
   sec.appendChild(dl);
   return sec;
 }
 
 function headersSection(title, headers) {
   const sec = el("div", "det-section");
-  const h = document.createElement("h3"); h.textContent = title; sec.appendChild(h);
   const keys = Object.keys(headers || {}).sort();
+  // Copy format: HTTP header style (`Name: value` lines) — pastes
+  // straight into curl/Postman/etc.
+  sec.appendChild(sectionHead(title, () => keys.map((k) => `${k}: ${headers[k]}`).join("\n")));
   if (keys.length === 0) {
     sec.appendChild(elText("det-empty", "(no headers)"));
   } else {
@@ -517,9 +659,30 @@ function headersSection(title, headers) {
 
 function bodySection(title, capturedBody) {
   const sec = el("div", "det-section");
-  const h = document.createElement("h3"); h.textContent = title; sec.appendChild(h);
+  // Copy format for bodies: text bodies copy as-is (pretty-printed if
+  // JSON, like the rendered pre); binary/redacted/absent copy the same
+  // human-readable placeholder the panel shows.
+  sec.appendChild(sectionHead(title, () => capturedBodyToText(capturedBody)));
   sec.appendChild(renderCapturedBody(capturedBody));
   return sec;
+}
+
+function capturedBodyToText(b) {
+  if (!b || typeof b !== "object") return "";
+  if (b.kind === "text") return prettyJsonOrRaw(b.data) + (b.truncated ? `\n… truncated, ${b.droppedBytes} bytes dropped` : "");
+  if (b.kind === "binary") return `<${b.mimeType || "binary"}, ${formatBytes(b.byteLength)}>`;
+  if (b.kind === "redacted") {
+    return b.reason === "mcp-default"
+      ? "(redacted — enable `captureBodies: true` in the module config to see bodies)"
+      : `(redacted: ${b.reason})`;
+  }
+  if (b.kind === "absent") {
+    const why = b.reason === "204-or-304" ? "no content (204/304)"
+              : b.reason === "fetch-failed" ? "fetch failed"
+              : "not captured";
+    return `(absent — ${why})`;
+  }
+  return "";
 }
 
 function renderCapturedBody(b) {
@@ -555,12 +718,20 @@ function renderCapturedBody(b) {
 
 function initiatorSection(initiator) {
   const sec = el("div", "det-section");
-  const h = document.createElement("h3"); h.textContent = "Initiator"; sec.appendChild(h);
+  let copyText = "";
   if (initiator.type === "script" && initiator.stack && Array.isArray(initiator.stack.callFrames)) {
-    const pre = el("pre", "det-pre");
-    pre.textContent = initiator.stack.callFrames.slice(0, 12)
+    copyText = initiator.stack.callFrames.slice(0, 12)
       .map((f) => `  at ${f.functionName || "(anonymous)"} (${f.url}:${f.lineNumber}:${f.columnNumber})`)
       .join("\n");
+  } else if (initiator.type === "parser") {
+    copyText = `parser\nURL: ${initiator.url || ""}`;
+  } else {
+    copyText = String(initiator.type || "other");
+  }
+  sec.appendChild(sectionHead("Initiator", () => copyText));
+  if (initiator.type === "script" && initiator.stack && Array.isArray(initiator.stack.callFrames)) {
+    const pre = el("pre", "det-pre");
+    pre.textContent = copyText;
     sec.appendChild(pre);
   } else if (initiator.type === "parser") {
     const dl = el("dl", "det-kv");

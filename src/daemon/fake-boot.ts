@@ -21,6 +21,8 @@ import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { MetroLogsStore } from "../core/metro-logs/buffer.js";
 import { ReduxStore } from "../core/redux/buffer.js";
+import { DeviceLogsStore } from "../core/device-logs/buffer.js";
+import { TapManager } from "../core/device-logs/tap-manager.js";
 import { CapabilityRegistry } from "../core/module-host/capabilities.js";
 import { registerModulesIpc } from "../app/modules-ipc.js";
 import { ModuleConfigStore } from "../modules/config-store.js";
@@ -124,6 +126,11 @@ export async function fakeBootSessionServices(
   const moduleHost = makeFakeModuleHost(capabilities);
   const metroLogsStore = new MetroLogsStore();
   const reduxStore = new ReduxStore();
+  // Fake boot: TapManager with the default NOT-yet-implemented adapter,
+  // so any start-tap call from a smoke spec errors cleanly rather than
+  // shelling out to adb. The store still works for read paths.
+  const deviceLogsStore = new DeviceLogsStore();
+  const deviceLogsTapManager = new TapManager(deviceLogsStore);
   const moduleRegistry = opts.moduleRegistry;
 
   // Register the four built-in modules so `modules/list` returns them
@@ -281,6 +288,8 @@ export async function fakeBootSessionServices(
     worktreeKey,
     metroLogsStore,
     reduxStore,
+    deviceLogsStore,
+    deviceLogsTapManager,
     capabilities,
     moduleEvents,
     hookManager,

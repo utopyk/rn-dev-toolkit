@@ -78,6 +78,8 @@ function makeServices(
     worktreeKey: "wt-test",
     metroLogsStore: undefined as never,
     reduxStore: undefined as never,
+    deviceLogsStore: undefined as never,
+    deviceLogsTapManager: undefined as never,
     capabilities: undefined as never,
     moduleEvents: undefined as never,
     hookManager,

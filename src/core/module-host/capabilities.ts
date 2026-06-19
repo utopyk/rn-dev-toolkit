@@ -81,6 +81,9 @@ export const KNOWN_PERMISSIONS: ReadonlyArray<string> = [
   "host:hooks:dispatch",
   "metro:logs:read",
   "metro:logs:mutate",
+  "device:logs:read",
+  "device:logs:mutate",
+  "device:logs:tap",
   "network:outbound",
   // Phase: redux module — the WS ingest binds a port (inbound).
   "network:inbound",
@@ -110,6 +113,7 @@ export const KNOWN_CAPABILITIES: ReadonlyArray<string> = [
   "devtools",
   "metro",
   "metro-logs",
+  "device-logs",
   "redux",
   "modules",
   // Phase H2d — built-in build module's hook-host capability surface.

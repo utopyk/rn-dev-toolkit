@@ -26,6 +26,15 @@ import {
   METRO_LOGS_METHOD_PERMISSIONS,
   createMetroLogsHostCapability,
 } from "../metro-logs/host-capability.js";
+import { DeviceLogsStore } from "../device-logs/buffer.js";
+import { TapManager } from "../device-logs/tap-manager.js";
+import { createDefaultSpawnAdapter } from "../device-logs/adapters/index.js";
+import {
+  DEVICE_LOGS_CAPABILITY_ID,
+  DEVICE_LOGS_CAPABILITY_READ_PERMISSION,
+  DEVICE_LOGS_METHOD_PERMISSIONS,
+  createDeviceLogsHostCapability,
+} from "../device-logs/host-capability.js";
 import {
   REDUX_CAPABILITY_ID,
   REDUX_CAPABILITY_READ_PERMISSION,
@@ -115,6 +124,11 @@ export interface SessionServices {
   /** Per-session Redux action/state ring, fed by the WS ingest. Read by
    *  the `redux` host capability (P3) + the redux module (P4). */
   reduxStore: ReduxStore;
+  /** Per-session device-log ring + tap manager. Each session owns its
+   *  own spawn lifecycle; daemon-singleton hoist is tracked as a
+   *  follow-up — see `code_fact_device_logs_per_session_tap` memory. */
+  deviceLogsStore: DeviceLogsStore;
+  deviceLogsTapManager: TapManager;
   capabilities: CapabilityRegistry;
   /**
    * Bus that fans out module lifecycle events (state-changed / crashed /
@@ -389,6 +403,15 @@ export async function bootSessionServices(
     metroLogsStore.setMetroStatus(event.worktreeKey, event.status);
   });
 
+  // 7a. Device-logs store + tap manager. No subprocesses spawn at boot —
+  // taps are opt-in via the `device-logs__start-tap` MCP tool / panel
+  // toggle. The DefaultSpawnAdapter dispatches by platform to
+  // idevicesyslog / simctl / adb logcat.
+  const deviceLogsStore = new DeviceLogsStore();
+  const deviceLogsTapManager = new TapManager(deviceLogsStore, {
+    spawnAdapter: createDefaultSpawnAdapter(),
+  });
+
   // 7b. Redux ingest. Per-session WS server on a Metro-paired port; the
   // app's vendored enhancer streams dispatched actions + state here. Best-
   // effort: a bind failure (port already in use) must not block the rest
@@ -451,6 +474,8 @@ export async function bootSessionServices(
     devtools,
     metroLogsStore,
     reduxStore,
+    deviceLogsStore,
+    deviceLogsTapManager,
     worktreeKey,
     sessionId,
   });
@@ -608,6 +633,15 @@ export async function bootSessionServices(
       /* best-effort */
     }
     try {
+      // Kill every running device-log tap (idevicesyslog / simctl / adb
+      // logcat subprocesses). Best-effort: a session shutdown that
+      // leaks one of these would respawn on the next start anyway,
+      // but the OS doesn't reclaim the FD until then.
+      await deviceLogsTapManager.shutdown();
+    } catch {
+      /* best-effort */
+    }
+    try {
       watcher?.stop();
     } catch {
       /* best-effort */
@@ -631,6 +665,8 @@ export async function bootSessionServices(
     worktreeKey,
     metroLogsStore,
     reduxStore,
+    deviceLogsStore,
+    deviceLogsTapManager,
     capabilities,
     moduleEvents: modulesIpc.moduleEvents,
     hookManager,
@@ -650,6 +686,8 @@ interface HostCapabilityDeps {
   devtools: DevToolsManager;
   metroLogsStore: MetroLogsStore;
   reduxStore: ReduxStore;
+  deviceLogsStore: DeviceLogsStore;
+  deviceLogsTapManager: TapManager;
   worktreeKey: string;
   sessionId: SessionId;
 }
@@ -684,6 +722,14 @@ function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry 
     {
       requiredPermission: REDUX_CAPABILITY_READ_PERMISSION,
       methodPermissions: REDUX_METHOD_PERMISSIONS,
+    },
+  );
+  capabilities.register(
+    DEVICE_LOGS_CAPABILITY_ID,
+    createDeviceLogsHostCapability(deps.deviceLogsStore, deps.deviceLogsTapManager),
+    {
+      requiredPermission: DEVICE_LOGS_CAPABILITY_READ_PERMISSION,
+      methodPermissions: DEVICE_LOGS_METHOD_PERMISSIONS,
     },
   );
   return capabilities;

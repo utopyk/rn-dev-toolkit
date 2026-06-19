@@ -20,6 +20,8 @@ import { ModuleHostManager } from "../../core/module-host/manager.js";
 import { CapabilityRegistry } from "../../core/module-host/capabilities.js";
 import { MetroLogsStore } from "../../core/metro-logs/buffer.js";
 import { ReduxStore } from "../../core/redux/buffer.js";
+import { DeviceLogsStore } from "../../core/device-logs/buffer.js";
+import { TapManager } from "../../core/device-logs/tap-manager.js";
 import { HookManager } from "../../core/hooks/manager.js";
 import { getDefaultAuditLog } from "../../core/audit-log.js";
 import type { RegisteredModule } from "../../modules/registry.js";
@@ -167,6 +169,8 @@ function makeRealHostBoot(): RealHostHarness {
       worktreeKey: bootOpts.artifactStore.worktreeHash(bootOpts.profile.worktree),
       metroLogsStore: new MetroLogsStore(),
       reduxStore: new ReduxStore(),
+      deviceLogsStore: new DeviceLogsStore(),
+      deviceLogsTapManager: new TapManager(new DeviceLogsStore()),
       capabilities,
       moduleEvents: new EventEmitter(),
       hookManager: new HookManager({

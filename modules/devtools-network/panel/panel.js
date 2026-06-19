@@ -7,7 +7,7 @@
 // `list` tool returns the current ring contents; drawing is idempotent
 // so we can re-render on every tick without flicker.
 
-/* global window, document, setInterval, clearInterval */
+/* global window, document, setInterval, clearInterval, URL */
 
 // IIFE wrap: the preload exposes `window.rnDev` via
 // `contextBridge.exposeInMainWorld`, which defines `rnDev` as a
@@ -22,15 +22,192 @@ const contentEl = document.getElementById("content");
 const statusEl = document.getElementById("status");
 const refreshBtn = document.getElementById("refresh");
 const clearBtn = document.getElementById("clear");
+const filterCountEl = document.getElementById("filter-count");
 
 const POLL_INTERVAL_MS = 2000;
 let pollTimer = null;
 let inFlight = false;
 let lastError = null;
+let lastEntries = [];
+let lastMeta = null;
+
+// ── Hybrid chip filter (vendored from modules/redux/panel/panel.js) ──────
+// Keep in sync with redux. If a 4th panel needs this, extract to a shared
+// file (panels are loaded by Electron file:// from their own module dir, so
+// cross-module imports don't work — vendoring is the v1 story).
+
+function el(tag, cls) { const e = document.createElement(tag); if (cls) e.className = cls; return e; }
+
+/** `*` ⇒ anchored glob, else case-insensitive substring. */
+function makeMatcher(term) {
+  const t = String(term).toLowerCase();
+  if (t.includes("*")) {
+    const re = new RegExp("^" + t.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*") + "$", "i");
+    return (s) => re.test(String(s));
+  }
+  return (s) => String(s).toLowerCase().includes(t);
+}
+
+function createChipFilter(container, opts) {
+  const terms = [];
+  let incM = [];
+  let excM = [];
+  let sugItems = [];
+  let sugIndex = -1;
+
+  container.classList.add("cf");
+  const row = el("div", "cf-row");
+  const input = document.createElement("input");
+  input.className = "cf-input";
+  input.placeholder = opts.placeholder || "";
+  const dropdown = el("div", "cf-dropdown");
+  dropdown.hidden = true;
+  container.replaceChildren(row, dropdown);
+
+  let addMode = "include";
+  const seg = el("div", "cf-seg");
+  const segInc = el("button", "cf-seg-btn incl");
+  segInc.type = "button"; segInc.textContent = "Include";
+  const segExc = el("button", "cf-seg-btn excl");
+  segExc.type = "button"; segExc.textContent = "Exclude";
+  seg.title = "Add new terms as include or exclude (or prefix a term with '-' to exclude)";
+  seg.append(segInc, segExc);
+  const renderSeg = () => {
+    segInc.classList.toggle("active", addMode === "include");
+    segExc.classList.toggle("active", addMode === "exclude");
+  };
+  const setMode = (m) => { addMode = m; renderSeg(); input.value = ""; closeDropdown(); };
+  segInc.addEventListener("mousedown", (e) => e.preventDefault());
+  segExc.addEventListener("mousedown", (e) => e.preventDefault());
+  segInc.addEventListener("click", () => setMode("include"));
+  segExc.addEventListener("click", () => setMode("exclude"));
+  renderSeg();
+
+  const clearBtn = el("button", "cf-clear");
+  clearBtn.type = "button"; clearBtn.textContent = "clear"; clearBtn.title = "Clear all filter terms";
+  clearBtn.addEventListener("mousedown", (e) => e.preventDefault());
+  clearBtn.addEventListener("click", () => { terms.length = 0; recompute(); renderChips(); closeDropdown(); opts.onChange(); });
+
+  const recompute = () => {
+    incM = terms.filter((t) => t.mode === "include").map((t) => makeMatcher(t.value));
+    excM = terms.filter((t) => t.mode === "exclude").map((t) => makeMatcher(t.value));
+  };
+  const renderChips = () => {
+    row.replaceChildren(seg);
+    for (const t of terms) {
+      const chip = el("span", "cf-chip " + (t.mode === "include" ? "inc" : "exc"));
+      chip.appendChild(Object.assign(el("span"), { textContent: t.value }));
+      const m = el("span", "cf-mode");
+      m.textContent = t.mode === "include" ? "inc" : "exc";
+      m.title = "Toggle include / exclude";
+      m.addEventListener("click", () => { t.mode = t.mode === "include" ? "exclude" : "include"; recompute(); renderChips(); opts.onChange(); });
+      chip.appendChild(m);
+      const x = el("span", "cf-x");
+      x.textContent = "×";
+      x.title = "Remove";
+      x.addEventListener("click", () => { const i = terms.indexOf(t); if (i >= 0) terms.splice(i, 1); recompute(); renderChips(); opts.onChange(); });
+      chip.appendChild(x);
+      row.appendChild(chip);
+    }
+    row.appendChild(input);
+    if (terms.length) row.appendChild(clearBtn);
+  };
+  const commit = (rawValue) => {
+    let v = String(rawValue).trim();
+    let m = addMode;
+    if (v.startsWith("-")) { m = "exclude"; v = v.slice(1).trim(); }
+    if (v && !terms.some((t) => t.value === v && t.mode === m)) terms.push({ value: v, mode: m });
+    input.value = "";
+    closeDropdown();
+    recompute();
+    renderChips();
+    input.focus();
+    opts.onChange();
+  };
+  const closeDropdown = () => { dropdown.hidden = true; sugItems = []; sugIndex = -1; };
+  const openDropdown = () => {
+    const q = input.value.trim().toLowerCase();
+    const taken = new Set(terms.map((t) => t.value.toLowerCase()));
+    const all = (opts.getSuggestions ? opts.getSuggestions() : []) || [];
+    sugItems = all.filter((s) => !taken.has(String(s).toLowerCase()) && (q === "" || String(s).toLowerCase().includes(q))).slice(0, 60);
+    if (sugItems.length === 0) { closeDropdown(); return; }
+    sugIndex = q ? 0 : -1;
+    dropdown.replaceChildren();
+    sugItems.forEach((s, i) => {
+      const d = el("div", "cf-sug" + (i === sugIndex ? " active" : ""));
+      d.textContent = s;
+      d.addEventListener("mousedown", (e) => { e.preventDefault(); commit(s); });
+      dropdown.appendChild(d);
+    });
+    dropdown.hidden = false;
+  };
+  const move = (i) => { sugIndex = i; [...dropdown.children].forEach((c, idx) => c.classList.toggle("active", idx === sugIndex)); };
+
+  input.addEventListener("input", openDropdown);
+  input.addEventListener("focus", openDropdown);
+  input.addEventListener("blur", () => setTimeout(closeDropdown, 130));
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); if (sugItems.length) move(Math.min(sugIndex + 1, sugItems.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); if (sugItems.length) move(Math.max(sugIndex - 1, 0)); }
+    else if (e.key === "Tab") { if (!dropdown.hidden && sugItems.length) { e.preventDefault(); commit(sugItems[Math.max(sugIndex, 0)]); } }
+    else if (e.key === "Enter") { e.preventDefault(); if (!dropdown.hidden && sugIndex >= 0) commit(sugItems[sugIndex]); else if (input.value.trim()) commit(input.value); }
+    else if (e.key === "Escape") { closeDropdown(); }
+    else if (e.key === "Backspace" && input.value === "" && terms.length) { terms.pop(); recompute(); renderChips(); opts.onChange(); }
+  });
+  renderChips();
+
+  return {
+    get active() { return terms.length > 0; },
+    get hasInc() { return incM.length > 0; },
+    test(text) { const s = String(text); if (excM.some((m) => m(s))) return false; if (!incM.length) return true; return incM.some((m) => m(s)); },
+    excluded(text) { const s = String(text); return excM.some((m) => m(s)); },
+    included(text) { const s = String(text); return incM.some((m) => m(s)); },
+    hi(text) { const s = String(text); return incM.some((m) => m(s)); },
+    sig() { return terms.map((t) => t.mode[0] + ":" + t.value).join("|"); },
+  };
+}
+
+// Suggestions: methods (closed set), distinct hosts + path tokens from URLs,
+// distinct status codes. Filter strings are matched against
+// "METHOD URL STATUS" (see entrySearchText), so any of these typed in
+// substring/glob form will work.
+function networkSuggestions() {
+  const methods = new Set();
+  const hosts = new Set();
+  const codes = new Set();
+  for (const e of lastEntries) {
+    if (e?.method) methods.add(String(e.method).toUpperCase());
+    if (e?.status !== undefined && e?.status !== null) codes.add(String(e.status));
+    const u = e?.url;
+    if (typeof u === "string") {
+      try { hosts.add(new URL(u).host); }
+      catch { /* relative / malformed — ignore */ }
+    }
+  }
+  return [...methods, ...hosts, ...codes].slice(0, 200);
+}
+
+function entrySearchText(entry) {
+  // Concatenate the filterable fields so a single chip filter can match
+  // any of METHOD, URL, STATUS, terminalState (`pending`/`failed`).
+  const parts = [
+    String(entry?.method ?? "").toUpperCase(),
+    String(entry?.url ?? ""),
+    String(entry?.status ?? ""),
+    String(entry?.terminalState ?? ""),
+  ];
+  return parts.join(" ");
+}
+
+const filter = createChipFilter(document.getElementById("filter"), {
+  placeholder: "filter requests… (method, host, status — Tab to add, '-foo' to exclude)",
+  getSuggestions: networkSuggestions,
+  onChange: () => renderEntries(),
+});
 
 async function refresh({ force = false } = {}) {
   if (!rnDev || typeof rnDev.callTool !== "function") {
-    renderFatal("Panel preload unavailable \u2014 open the Network panel from the sidebar.");
+    renderFatal("Panel preload unavailable — open the Network panel from the sidebar.");
     return;
   }
   if (inFlight && !force) return;
@@ -43,7 +220,9 @@ async function refresh({ force = false } = {}) {
     }
     const result = reply?.result ?? reply;
     lastError = null;
-    renderEntries(result);
+    lastEntries = Array.isArray(result?.entries) ? result.entries : [];
+    lastMeta = result?.meta ?? null;
+    renderEntries();
   } catch (err) {
     renderFatal(err instanceof Error ? err.message : String(err));
   } finally {
@@ -74,20 +253,20 @@ function renderFatal(message) {
   contentEl.appendChild(div);
 }
 
-function renderEntries(result) {
-  const entries = Array.isArray(result?.entries) ? result.entries : [];
-  const meta = result?.meta ?? null;
-
+function renderEntries() {
+  const meta = lastMeta;
+  const entries = lastEntries;
   renderStatus(meta, entries.length);
 
   if (entries.length === 0) {
+    filterCountEl.textContent = "";
     const empty = document.createElement("div");
     empty.className = "empty";
     const refusal = captureRefusalText(meta);
     if (refusal) {
       // Connected target that ACCEPTED the socket but REFUSED the
-      // capture domain \u2014 without this the panel showed "Waiting for
-      // network activity\u2026" forever with no hint (2026-06-11 acme iOS:
+      // capture domain — without this the panel showed "Waiting for
+      // network activity…" forever with no hint (2026-06-11 acme iOS:
       // react-native-worklets registers a second RN host, so RN refuses
       // Network.enable). Tell the human why it will never fill.
       empty.className = "empty error";
@@ -95,15 +274,28 @@ function renderEntries(result) {
     } else {
       empty.textContent =
         meta?.proxyStatus === "connected"
-          ? "Waiting for network activity\u2026"
+          ? "Waiting for network activity…"
           : "No captures yet.";
     }
     contentEl.replaceChildren(empty);
     return;
   }
 
+  const matched = filter.active
+    ? entries.filter((e) => filter.test(entrySearchText(e)))
+    : entries;
+  filterCountEl.textContent = filter.active ? `showing ${matched.length} of ${entries.length}` : "";
+
+  if (matched.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "No requests match the filter.";
+    contentEl.replaceChildren(empty);
+    return;
+  }
+
   // Newest last in the ring; render reversed so latest is at the top.
-  const rows = [...entries].reverse();
+  const rows = [...matched].reverse();
 
   const table = document.createElement("table");
   const thead = document.createElement("thead");
@@ -168,13 +360,13 @@ function statusClass(entry) {
 }
 
 function statusText(entry) {
-  if (entry.terminalState === "pending") return "\u2026";
+  if (entry.terminalState === "pending") return "…";
   if (entry.terminalState === "failed") return "err";
   return String(entry.status ?? "");
 }
 
 function durationText(entry) {
-  if (entry.terminalState === "pending") return "\u2014";
+  if (entry.terminalState === "pending") return "—";
   const ms = Math.round(entry?.timings?.durationMs ?? 0);
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(1)}s`;
@@ -254,8 +446,8 @@ function truncate(s, max) {
   if (s.length <= max) return s;
   const q = s.indexOf("?");
   const base = q >= 0 ? s.slice(0, q) : s;
-  if (base.length <= max) return `${base}\u2026`;
-  return `${base.slice(0, max - 1)}\u2026`;
+  if (base.length <= max) return `${base}…`;
+  return `${base.slice(0, max - 1)}…`;
 }
 
 function startPolling() {

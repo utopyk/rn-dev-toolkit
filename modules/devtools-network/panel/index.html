@@ -5,6 +5,22 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Network \u2014 devtools-network</title>
     <style>
+      /* CSS-var aliases for the shared `.cf*` chip-filter snippet (vendored
+         verbatim from modules/redux). Kept in sync by mirroring redux panel.
+         If we extract these into a shared file later, drop the aliases. */
+      :root {
+        --bg:         #0f1115;
+        --bg-soft:    #0b0d11;
+        --surface:    #1f2937;
+        --surface-hi: #374151;
+        --ink:        #e5e7eb;
+        --ink-soft:   #d1d5db;
+        --muted:      #9ca3af;
+        --muted-2:    #6b7280;
+        --glow:       #60a5fa;
+        --ready:      #34d399;
+        --error:      #f87171;
+      }
       * { box-sizing: border-box; }
       body {
         margin: 0;
@@ -101,6 +117,55 @@
         border-radius: 4px;
         font-size: 12px;
       }
+
+      /* chip filter (hybrid: autocomplete input + include/exclude chips) —
+         vendored from modules/redux; keep in sync. */
+      .cf { position: relative; flex: 1; }
+      .cf-row {
+        display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+        background: var(--bg-soft); border: 1px solid var(--surface-hi); border-radius: 7px;
+        padding: 5px 7px; min-height: 32px;
+      }
+      .cf-row:focus-within { border-color: var(--glow); }
+      .cf-input {
+        flex: 1; min-width: 80px; background: transparent; border: none; outline: none;
+        color: var(--ink); font: inherit; font-size: 11.5px; padding: 1px 2px;
+      }
+      .cf-chip {
+        display: inline-flex; align-items: center; gap: 5px; border-radius: 6px;
+        padding: 1px 4px 1px 7px; font-size: 11px; border: 1px solid;
+      }
+      .cf-chip.inc { color: var(--ready); border-color: rgba(52,211,153,0.45); background: rgba(52,211,153,0.10); }
+      .cf-chip.exc { color: var(--error); border-color: rgba(248,113,113,0.45); background: rgba(248,113,113,0.10); }
+      .cf-mode { cursor: pointer; font-size: 9px; letter-spacing: 0.03em; text-transform: uppercase; opacity: 0.85; user-select: none; }
+      .cf-mode:hover { opacity: 1; text-decoration: underline; }
+      .cf-x { cursor: pointer; opacity: 0.65; padding: 0 2px; }
+      .cf-x:hover { opacity: 1; }
+      .cf-dropdown {
+        position: absolute; left: 0; right: 0; top: 100%; margin-top: 3px; z-index: 30;
+        background: var(--surface); border: 1px solid var(--surface-hi); border-radius: 7px;
+        max-height: 190px; overflow: auto; box-shadow: 0 8px 22px rgba(0,0,0,0.35);
+      }
+      .cf-dropdown[hidden] { display: none; }
+      .cf-sug { padding: 5px 10px; cursor: pointer; font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; }
+      .cf-sug.active, .cf-sug:hover { background: var(--surface-hi); color: var(--ink); }
+      .cf-count { font-size: 10.5px; color: var(--muted); padding: 4px 2px 0; }
+      .cf-seg { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--surface-hi); border-radius: 6px; overflow: hidden; }
+      .cf-seg-btn {
+        font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.03em;
+        padding: 3px 8px; background: var(--bg); color: var(--muted-2); border: none; cursor: pointer;
+      }
+      .cf-seg-btn + .cf-seg-btn { border-left: 1px solid var(--surface-hi); }
+      .cf-seg-btn:hover { color: var(--ink-soft); }
+      .cf-seg-btn.incl.active { background: rgba(52,211,153,0.18); color: var(--ready); }
+      .cf-seg-btn.excl.active { background: rgba(248,113,113,0.18); color: var(--error); }
+      .cf-clear { flex: 0 0 auto; font-size: 10px; color: var(--muted); background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0 4px; }
+      .cf-clear:hover { color: var(--ink); }
+      .thit { background: rgba(96,165,250,0.22); border-radius: 3px; padding: 0 2px; }
+
+      .filter-row { display: flex; gap: 8px; align-items: stretch; margin-bottom: 10px; }
+      .filter-row .cf { flex: 1; min-width: 0; }
+      .filter-row .cf-count { padding: 0 4px; align-self: center; min-width: 120px; text-align: right; }
     </style>
   </head>
   <body>
@@ -110,6 +175,10 @@
         <button id="clear">Clear</button>
         <button id="refresh">Refresh</button>
       </div>
+    </div>
+    <div class="filter-row">
+      <div id="filter" class="cf"></div>
+      <div id="filter-count" class="cf-count"></div>
     </div>
     <div id="status" class="status" hidden></div>
     <div id="content">

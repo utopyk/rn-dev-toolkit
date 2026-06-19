@@ -70,12 +70,25 @@ function createChipFilter(container, opts) {
   dropdown.hidden = true;
   container.replaceChildren(row, dropdown);
 
+  // Add-mode toggle: governs whether newly committed terms are included or
+  // excluded (so you can add several excludes without flipping each chip).
+  // A leading "-" on a typed term also forces exclude.
+  let addMode = "include";
+  const modeBtn = el("span", "cf-addmode");
+  modeBtn.title = "New terms: include vs exclude. (Tip: prefix a term with '-' to exclude it.)";
+  const renderModeBtn = () => {
+    modeBtn.className = "cf-addmode " + (addMode === "include" ? "incl" : "excl");
+    modeBtn.textContent = addMode === "include" ? "+ incl" : "− excl";
+  };
+  modeBtn.addEventListener("click", () => { addMode = addMode === "include" ? "exclude" : "include"; renderModeBtn(); input.focus(); });
+  renderModeBtn();
+
   const recompute = () => {
     incM = terms.filter((t) => t.mode === "include").map((t) => makeMatcher(t.value));
     excM = terms.filter((t) => t.mode === "exclude").map((t) => makeMatcher(t.value));
   };
   const renderChips = () => {
-    row.replaceChildren();
+    row.replaceChildren(modeBtn);
     for (const t of terms) {
       const chip = el("span", "cf-chip " + (t.mode === "include" ? "inc" : "exc"));
       chip.appendChild(Object.assign(el("span"), { textContent: t.value }));
@@ -93,9 +106,11 @@ function createChipFilter(container, opts) {
     }
     row.appendChild(input);
   };
-  const commit = (value, mode2) => {
-    const v = String(value).trim();
-    if (v && !terms.some((t) => t.value === v)) terms.push({ value: v, mode: mode2 || "include" });
+  const commit = (rawValue) => {
+    let v = String(rawValue).trim();
+    let m = addMode;
+    if (v.startsWith("-")) { m = "exclude"; v = v.slice(1).trim(); } // "-foo" forces exclude
+    if (v && !terms.some((t) => t.value === v && t.mode === m)) terms.push({ value: v, mode: m });
     input.value = "";
     closeDropdown();
     recompute();
@@ -115,7 +130,7 @@ function createChipFilter(container, opts) {
     sugItems.forEach((s, i) => {
       const d = el("div", "cf-sug" + (i === sugIndex ? " active" : ""));
       d.textContent = s;
-      d.addEventListener("mousedown", (e) => { e.preventDefault(); commit(s, "include"); });
+      d.addEventListener("mousedown", (e) => { e.preventDefault(); commit(s); });
       dropdown.appendChild(d);
     });
     dropdown.hidden = false;
@@ -128,8 +143,8 @@ function createChipFilter(container, opts) {
   input.addEventListener("keydown", (e) => {
     if (e.key === "ArrowDown") { e.preventDefault(); if (sugItems.length) move(Math.min(sugIndex + 1, sugItems.length - 1)); }
     else if (e.key === "ArrowUp") { e.preventDefault(); if (sugItems.length) move(Math.max(sugIndex - 1, 0)); }
-    else if (e.key === "Tab") { if (!dropdown.hidden && sugItems.length) { e.preventDefault(); commit(sugItems[Math.max(sugIndex, 0)], "include"); } }
-    else if (e.key === "Enter") { e.preventDefault(); if (!dropdown.hidden && sugIndex >= 0) commit(sugItems[sugIndex], "include"); else if (input.value.trim()) commit(input.value, "include"); }
+    else if (e.key === "Tab") { if (!dropdown.hidden && sugItems.length) { e.preventDefault(); commit(sugItems[Math.max(sugIndex, 0)]); } }
+    else if (e.key === "Enter") { e.preventDefault(); if (!dropdown.hidden && sugIndex >= 0) commit(sugItems[sugIndex]); else if (input.value.trim()) commit(input.value); }
     else if (e.key === "Escape") { closeDropdown(); }
     else if (e.key === "Backspace" && input.value === "" && terms.length) { terms.pop(); recompute(); renderChips(); opts.onChange(); }
   });

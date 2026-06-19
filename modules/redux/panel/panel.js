@@ -70,25 +70,38 @@ function createChipFilter(container, opts) {
   dropdown.hidden = true;
   container.replaceChildren(row, dropdown);
 
-  // Add-mode toggle: governs whether newly committed terms are included or
-  // excluded (so you can add several excludes without flipping each chip).
+  // Add-mode segmented toggle: governs whether newly committed terms are
+  // included or excluded. Rendered as a 2-segment switch (both options
+  // visible, the active one highlighted) so it reads as a control, not a chip.
   // A leading "-" on a typed term also forces exclude.
   let addMode = "include";
-  const modeBtn = el("span", "cf-addmode");
-  modeBtn.title = "New terms: include vs exclude. (Tip: prefix a term with '-' to exclude it.)";
-  const renderModeBtn = () => {
-    modeBtn.className = "cf-addmode " + (addMode === "include" ? "incl" : "excl");
-    modeBtn.textContent = addMode === "include" ? "+ incl" : "− excl";
+  const seg = el("div", "cf-seg");
+  const segInc = el("button", "cf-seg-btn incl");
+  segInc.type = "button"; segInc.textContent = "Include";
+  const segExc = el("button", "cf-seg-btn excl");
+  segExc.type = "button"; segExc.textContent = "Exclude";
+  seg.title = "Add new terms as include or exclude (or prefix a term with '-' to exclude)";
+  seg.append(segInc, segExc);
+  const renderSeg = () => {
+    segInc.classList.toggle("active", addMode === "include");
+    segExc.classList.toggle("active", addMode === "exclude");
   };
-  modeBtn.addEventListener("click", () => { addMode = addMode === "include" ? "exclude" : "include"; renderModeBtn(); input.focus(); });
-  renderModeBtn();
+  const setMode = (m) => { addMode = m; renderSeg(); input.value = ""; closeDropdown(); input.focus(); };
+  segInc.addEventListener("click", () => setMode("include"));
+  segExc.addEventListener("click", () => setMode("exclude"));
+  renderSeg();
+
+  // Clear-all: wipe every term in one click (shown only when terms exist).
+  const clearBtn = el("button", "cf-clear");
+  clearBtn.type = "button"; clearBtn.textContent = "clear"; clearBtn.title = "Clear all filter terms";
+  clearBtn.addEventListener("click", () => { terms.length = 0; recompute(); renderChips(); input.focus(); opts.onChange(); });
 
   const recompute = () => {
     incM = terms.filter((t) => t.mode === "include").map((t) => makeMatcher(t.value));
     excM = terms.filter((t) => t.mode === "exclude").map((t) => makeMatcher(t.value));
   };
   const renderChips = () => {
-    row.replaceChildren(modeBtn);
+    row.replaceChildren(seg);
     for (const t of terms) {
       const chip = el("span", "cf-chip " + (t.mode === "include" ? "inc" : "exc"));
       chip.appendChild(Object.assign(el("span"), { textContent: t.value }));
@@ -105,6 +118,7 @@ function createChipFilter(container, opts) {
       row.appendChild(chip);
     }
     row.appendChild(input);
+    if (terms.length) row.appendChild(clearBtn);
   };
   const commit = (rawValue) => {
     let v = String(rawValue).trim();

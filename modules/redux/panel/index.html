@@ -153,13 +153,18 @@
       .cf-sug.active, .cf-sug:hover { background: var(--surface-hi); color: var(--ink); }
       .cf-sug .cf-sug-hint { color: var(--muted-2); font-size: 10px; margin-left: 8px; }
       .cf-count { font-size: 10.5px; color: var(--muted); padding: 4px 2px 0; }
-      .cf-addmode {
-        cursor: pointer; user-select: none; white-space: nowrap; font-size: 9px;
-        text-transform: uppercase; letter-spacing: 0.04em; padding: 2px 7px; border-radius: 6px; border: 1px solid;
+      /* add-mode segmented toggle (reads as a switch, not a chip) */
+      .cf-seg { display: inline-flex; flex: 0 0 auto; border: 1px solid var(--surface-hi); border-radius: 6px; overflow: hidden; }
+      .cf-seg-btn {
+        font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.03em;
+        padding: 3px 8px; background: var(--bg); color: var(--muted-2); border: none; cursor: pointer;
       }
-      .cf-addmode.incl { color: var(--ready); border-color: rgba(43,217,106,0.45); background: rgba(43,217,106,0.10); }
-      .cf-addmode.excl { color: var(--error); border-color: rgba(247,118,142,0.45); background: rgba(247,118,142,0.10); }
-      .cf-addmode:hover { filter: brightness(1.2); }
+      .cf-seg-btn + .cf-seg-btn { border-left: 1px solid var(--surface-hi); }
+      .cf-seg-btn:hover { color: var(--ink-soft); }
+      .cf-seg-btn.incl.active { background: rgba(43,217,106,0.18); color: var(--ready); }
+      .cf-seg-btn.excl.active { background: rgba(247,118,142,0.18); color: var(--error); }
+      .cf-clear { flex: 0 0 auto; font-size: 10px; color: var(--muted); background: none; border: none; cursor: pointer; text-decoration: underline; padding: 0 4px; }
+      .cf-clear:hover { color: var(--ink); }
 
       .empty { padding: 22px; text-align: center; color: var(--muted); }
       .error {

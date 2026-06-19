@@ -5,9 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Network \u2014 devtools-network</title>
     <style>
-      /* CSS-var aliases for the shared `.cf*` chip-filter snippet (vendored
-         verbatim from modules/redux). Kept in sync by mirroring redux panel.
-         If we extract these into a shared file later, drop the aliases. */
+      /* Fallback palette — the host pushes the renderer's theme vars over
+         `modules:panel-theme` (see electron/preload-module.js), so the
+         panel automatically matches the app's selected theme. These :root
+         values are only used until that broadcast arrives. */
       :root {
         --bg:         #0f1115;
         --bg-soft:    #0b0d11;
@@ -19,28 +20,39 @@
         --muted-2:    #6b7280;
         --glow:       #60a5fa;
         --ready:      #34d399;
+        --booting:    #fb923c;
         --error:      #f87171;
       }
       * { box-sizing: border-box; }
+      html, body { height: 100%; }
       body {
         margin: 0;
-        padding: 16px;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        background: #0f1115;
-        color: #e5e7eb;
-        font-size: 13px;
+        padding: 12px;
+        font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', ui-monospace, SFMono-Regular, monospace;
+        background: var(--bg);
+        color: var(--ink);
+        font-size: 12.5px;
+        line-height: 1.5;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
       }
+      ::-webkit-scrollbar { width: 7px; height: 7px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--muted-2); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
       h1 {
-        margin: 0 0 12px;
-        font-size: 15px;
+        margin: 0;
+        font-size: 14px;
         font-weight: 600;
+        letter-spacing: 0.02em;
       }
       .bar {
         display: flex;
         justify-content: space-between;
         align-items: center;
         gap: 8px;
-        margin-bottom: 12px;
+        margin-bottom: 10px;
       }
       .bar-right {
         display: flex;
@@ -48,29 +60,53 @@
         align-items: center;
       }
       button {
-        background: #1f2937;
-        color: #e5e7eb;
-        border: 1px solid #374151;
-        padding: 6px 12px;
-        border-radius: 4px;
+        background: var(--surface);
+        color: var(--ink-soft);
+        border: 1px solid var(--surface-hi);
+        padding: 5px 11px;
+        border-radius: 7px;
         cursor: pointer;
-        font-size: 12px;
+        font-size: 11.5px;
+        font-family: inherit;
       }
-      button:hover { background: #374151; }
+      button:hover { background: var(--surface-hi); color: var(--ink); }
       button:disabled { opacity: 0.5; cursor: default; }
-      .status {
-        font-size: 12px;
-        color: #9ca3af;
-        margin-bottom: 10px;
-        padding: 8px 12px;
-        background: #1a1d23;
-        border: 1px solid #2a2f38;
-        border-radius: 4px;
+      label.toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11.5px;
+        color: var(--muted);
+        cursor: pointer;
+        user-select: none;
       }
-      .status-label { color: #6b7280; }
-      .status-value { color: #e5e7eb; margin-right: 12px; }
-      .status-value--ok { color: #34d399; }
-      .status-value--warn { color: #fb923c; }
+      label.toggle input { accent-color: var(--glow); cursor: pointer; }
+      .status {
+        font-size: 11.5px;
+        color: var(--muted);
+        margin-bottom: 10px;
+        padding: 7px 12px;
+        background: var(--bg-soft);
+        border: 1px solid var(--surface-hi);
+        border-radius: 8px;
+        display: flex;
+        gap: 6px;
+        flex-wrap: wrap;
+        align-items: center;
+      }
+      .status-label { color: var(--muted-2); }
+      .status-value { color: var(--ink-soft); margin-right: 12px; }
+      .status-value--ok { color: var(--ready); }
+      .status-value--warn { color: var(--booting); }
+      #content { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+      .table-wrap {
+        flex: 1;
+        min-height: 0;
+        overflow: auto;
+        background: var(--bg-soft);
+        border: 1px solid var(--surface-hi);
+        border-radius: 9px;
+      }
       table {
         width: 100%;
         border-collapse: collapse;
@@ -79,42 +115,43 @@
       th, td {
         text-align: left;
         padding: 6px 8px;
-        border-bottom: 1px solid #1f2937;
-        font-family: ui-monospace, SFMono-Regular, monospace;
+        border-bottom: 1px solid var(--surface);
+        font-family: inherit;
       }
       th {
-        font-family: inherit;
-        color: #9ca3af;
+        color: var(--muted);
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0.03em;
         font-size: 10px;
-        border-bottom: 1px solid #374151;
+        border-bottom: 1px solid var(--surface-hi);
+        background: var(--bg-soft);
+        position: sticky; top: 0; z-index: 1;
       }
       .col-method { width: 64px; }
       .col-status { width: 64px; }
       .col-dur { width: 80px; text-align: right; }
       .col-url { word-break: break-all; }
       .dur { text-align: right; }
-      .status-pending { color: #9ca3af; }
-      .status-ok { color: #e5e7eb; }
-      .status-redir { color: #60a5fa; }
-      .status-4xx { color: #fb923c; }
-      .status-5xx { color: #f87171; }
-      .status-err { color: #f87171; font-weight: 600; }
+      .status-pending { color: var(--muted); }
+      .status-ok { color: var(--ink); }
+      .status-redir { color: var(--glow); }
+      .status-4xx { color: var(--booting); }
+      .status-5xx { color: var(--error); }
+      .status-err { color: var(--error); font-weight: 600; }
       .empty {
-        padding: 24px;
+        padding: 22px;
         text-align: center;
-        color: #9ca3af;
-        border: 1px dashed #374151;
-        border-radius: 6px;
+        color: var(--muted);
+        border: 1px dashed var(--surface-hi);
+        border-radius: 7px;
       }
       .error {
         padding: 10px 12px;
-        background: rgba(248, 113, 113, 0.08);
-        border: 1px solid rgba(248, 113, 113, 0.25);
-        color: #f87171;
-        border-radius: 4px;
+        background: rgba(247,118,142,0.08);
+        border: 1px solid rgba(247,118,142,0.3);
+        color: var(--error);
+        border-radius: 7px;
         font-size: 12px;
       }
 
@@ -172,6 +209,10 @@
     <div class="bar">
       <h1>Network</h1>
       <div class="bar-right">
+        <label class="toggle">
+          <input id="follow" type="checkbox" checked />
+          Follow
+        </label>
         <button id="clear">Clear</button>
         <button id="refresh">Refresh</button>
       </div>

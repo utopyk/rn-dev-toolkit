@@ -260,6 +260,21 @@ function ingest(result) {
   }
 }
 
+// Follow-scroll: replaceChildren() on every 1Hz poll was resetting scrollTop
+// to 0, which is why "follow off" couldn't stay at the bottom either. Two
+// fixes layered together:
+//   1. Capture scrollTop + wasAtBottom BEFORE rebuild, restore AFTER. So a
+//      paused (follow=off) view keeps whatever position the user picked.
+//   2. Auto-toggle follow based on user scroll. Scroll up → follow=off (you
+//      can read history without the next poll yanking you back to bottom).
+//      Scroll back to within `AT_BOTTOM_SLOP` of bottom → follow=on.
+const AT_BOTTOM_SLOP = 8; // px; treat anything within this as "at the bottom"
+
+let suppressAutoToggle = 0; // counter: ignore programmatic scroll events
+function isAtBottom(el) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_SLOP;
+}
+
 function render() {
   const matched = filter.active ? rows.filter((e) => filter.test(e.line ?? "")) : rows;
   filterCountEl.textContent = filter.active ? `showing ${matched.length} of ${rows.length}` : "";
@@ -273,15 +288,39 @@ function render() {
     contentEl.replaceChildren(empty);
     return;
   }
+
+  // Capture pre-rebuild scroll state from the existing log-list (if any).
+  const prev = contentEl.querySelector(".log-list");
+  const prevScrollTop = prev ? prev.scrollTop : 0;
+  const prevAtBottom = prev ? isAtBottom(prev) : true;
+
   const list = document.createElement("div");
   list.className = "log-list";
   for (const entry of matched) {
     list.appendChild(renderRow(entry));
   }
   contentEl.replaceChildren(list);
-  if (followEl.checked) {
+
+  // Restore scroll: follow-on (or user was already at the bottom) → snap to
+  // bottom. Otherwise restore the prior scrollTop so the user's reading
+  // position survives the rebuild.
+  suppressAutoToggle++;
+  if (followEl.checked || prevAtBottom) {
     list.scrollTop = list.scrollHeight;
+  } else {
+    list.scrollTop = prevScrollTop;
   }
+  // Use double-rAF so the suppress flag stays set through any scroll events
+  // the browser fires from the restore above. The handler resets on its own
+  // when it sees the flag.
+  requestAnimationFrame(() => requestAnimationFrame(() => { suppressAutoToggle = 0; }));
+
+  list.addEventListener("scroll", () => {
+    if (suppressAutoToggle > 0) return;
+    const atBottom = isAtBottom(list);
+    if (atBottom && !followEl.checked) followEl.checked = true;
+    else if (!atBottom && followEl.checked) followEl.checked = false;
+  }, { passive: true });
 }
 
 function renderRow(entry) {
@@ -371,6 +410,18 @@ streamEl.addEventListener("change", () => {
   cursor = null;
   rows.length = 0;
   refresh({ force: true });
+});
+followEl.addEventListener("change", () => {
+  // Manual check → snap to bottom now (next poll would too, but waiting
+  // up to a second feels broken). Uncheck just stays where they are.
+  if (followEl.checked) {
+    const list = contentEl.querySelector(".log-list");
+    if (list) {
+      suppressAutoToggle++;
+      list.scrollTop = list.scrollHeight;
+      requestAnimationFrame(() => requestAnimationFrame(() => { suppressAutoToggle = 0; }));
+    }
+  }
 });
 
 document.addEventListener("visibilitychange", () => {

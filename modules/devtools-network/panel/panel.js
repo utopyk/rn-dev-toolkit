@@ -22,7 +22,16 @@ const contentEl = document.getElementById("content");
 const statusEl = document.getElementById("status");
 const refreshBtn = document.getElementById("refresh");
 const clearBtn = document.getElementById("clear");
+const followEl = /** @type {HTMLInputElement} */ (document.getElementById("follow"));
 const filterCountEl = document.getElementById("filter-count");
+
+// Follow-scroll mirror of the metro-logs panel. Newest entries render at
+// the TOP here (entries reversed before render), so "follow" snaps to top
+// instead of bottom. User scroll auto-toggles follow on/off — scrolling
+// away from top pauses follow; scrolling back enables it.
+const AT_TOP_SLOP = 8;
+let suppressAutoToggle = 0;
+function isAtTop(el) { return el.scrollTop <= AT_TOP_SLOP; }
 
 const POLL_INTERVAL_MS = 2000;
 let pollTimer = null;
@@ -297,6 +306,14 @@ function renderEntries() {
   // Newest last in the ring; render reversed so latest is at the top.
   const rows = [...matched].reverse();
 
+  // Capture pre-rebuild scroll state from the existing wrapper (if any) so
+  // a paused follow view keeps its position across 2 s polls.
+  const prev = contentEl.querySelector(".table-wrap");
+  const prevScrollTop = prev ? prev.scrollTop : 0;
+  const prevAtTop = prev ? isAtTop(prev) : true;
+
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap";
   const table = document.createElement("table");
   const thead = document.createElement("thead");
   const headerRow = document.createElement("tr");
@@ -318,7 +335,23 @@ function renderEntries() {
   }
   table.appendChild(thead);
   table.appendChild(tbody);
-  contentEl.replaceChildren(table);
+  wrap.appendChild(table);
+  contentEl.replaceChildren(wrap);
+
+  suppressAutoToggle++;
+  if (followEl.checked || prevAtTop) {
+    wrap.scrollTop = 0;
+  } else {
+    wrap.scrollTop = prevScrollTop;
+  }
+  requestAnimationFrame(() => requestAnimationFrame(() => { suppressAutoToggle = 0; }));
+
+  wrap.addEventListener("scroll", () => {
+    if (suppressAutoToggle > 0) return;
+    const atTop = isAtTop(wrap);
+    if (atTop && !followEl.checked) followEl.checked = true;
+    else if (!atTop && followEl.checked) followEl.checked = false;
+  }, { passive: true });
 }
 
 function renderRow(entry) {
@@ -467,6 +500,16 @@ function stopPolling() {
 
 refreshBtn.addEventListener("click", () => refresh({ force: true }));
 clearBtn.addEventListener("click", doClear);
+followEl.addEventListener("change", () => {
+  if (followEl.checked) {
+    const wrap = contentEl.querySelector(".table-wrap");
+    if (wrap) {
+      suppressAutoToggle++;
+      wrap.scrollTop = 0;
+      requestAnimationFrame(() => requestAnimationFrame(() => { suppressAutoToggle = 0; }));
+    }
+  }
+});
 
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopPolling();

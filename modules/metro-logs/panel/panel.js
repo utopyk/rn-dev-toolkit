@@ -260,6 +260,11 @@ function ingest(result) {
   }
 }
 
+// Per-group collapse state for stack-trace blocks. Key = header line's
+// sequence (unique + monotonic). Persists across re-renders. Pruned when
+// the header falls out of the ring buffer.
+const collapsedTraces = new Map();
+
 // Follow-scroll: replaceChildren() on every 1Hz poll was resetting scrollTop
 // to 0, which is why "follow off" couldn't stay at the bottom either. Two
 // fixes layered together:
@@ -294,10 +299,41 @@ function render() {
   const prevScrollTop = prev ? prev.scrollTop : 0;
   const prevAtBottom = prev ? isAtBottom(prev) : true;
 
+  // Prune collapse state for headers that aged out of the ring.
+  if (rows.length > 0) {
+    const oldestSeq = rows[0].sequence;
+    for (const seq of collapsedTraces.keys()) {
+      if (seq < oldestSeq) collapsedTraces.delete(seq);
+    }
+  }
+
   const list = document.createElement("div");
   list.className = "log-list";
-  for (const entry of matched) {
-    list.appendChild(renderRow(entry));
+  // Walk + fold consecutive log-trace lines under their preceding header.
+  let i = 0;
+  while (i < matched.length) {
+    const entry = matched[i];
+    const level = classifyLine(entry.line ?? "");
+    if (level === "trace") {
+      // Standalone trace — no header above it in the filtered view.
+      list.appendChild(renderRow(entry));
+      i++;
+      continue;
+    }
+    const headerRow = renderRow(entry);
+    const traces = [];
+    let j = i + 1;
+    while (j < matched.length && classifyLine(matched[j].line ?? "") === "trace") {
+      traces.push(matched[j]);
+      j++;
+    }
+    if (traces.length === 0) {
+      list.appendChild(headerRow);
+      i++;
+      continue;
+    }
+    list.appendChild(buildTraceGroup(headerRow, traces, entry.sequence));
+    i = j;
   }
   contentEl.replaceChildren(list);
 
@@ -353,6 +389,39 @@ function classifyLine(text) {
   // Stack-frame continuation lines ("    at fn (file:line:col)").
   if (/^\s{2,}at\s/.test(t)) return "trace";
   return null;
+}
+
+function buildTraceGroup(headerRow, traces, headerSeq) {
+  const group = document.createElement("div");
+  group.className = "trace-group";
+  const collapsed = collapsedTraces.has(headerSeq) ? collapsedTraces.get(headerSeq) : true;
+
+  const pill = document.createElement("button");
+  pill.type = "button";
+  pill.className = "trace-pill";
+  const label = (col) => `${col ? "▶" : "▼"} ${traces.length} stack frame${traces.length === 1 ? "" : "s"}`;
+  pill.textContent = label(collapsed);
+
+  const children = document.createElement("div");
+  children.className = "trace-children";
+  children.style.display = collapsed ? "none" : "";
+  for (const t of traces) children.appendChild(renderRow(t));
+
+  const toggle = (e) => {
+    if (e) e.stopPropagation();
+    const isHidden = children.style.display === "none";
+    children.style.display = isHidden ? "" : "none";
+    pill.textContent = label(!isHidden);
+    collapsedTraces.set(headerSeq, !isHidden);
+  };
+  pill.addEventListener("click", toggle);
+  headerRow.appendChild(pill);
+  headerRow.classList.add("trace-header");
+  headerRow.addEventListener("click", toggle);
+
+  group.appendChild(headerRow);
+  group.appendChild(children);
+  return group;
 }
 
 function renderRow(entry) {

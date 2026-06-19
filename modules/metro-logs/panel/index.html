@@ -144,6 +144,31 @@
       .log-row.log-info { color: var(--glow); }
       .log-row.log-debug { color: var(--muted); }
       .log-row.log-trace { color: var(--muted-2); font-style: italic; }
+
+      /* Trace grouping — fold consecutive stack-frame lines under their
+         preceding header. Default state is collapsed (see panel.js). */
+      .trace-group { display: block; }
+      .log-row.trace-header { cursor: pointer; }
+      .log-row.trace-header:hover { background: var(--surface); }
+      .trace-pill {
+        margin-left: 8px;
+        background: transparent;
+        border: 1px solid var(--surface-hi);
+        color: var(--muted);
+        border-radius: 9px;
+        padding: 0 7px;
+        font-size: 10px;
+        font-family: inherit;
+        cursor: pointer;
+        vertical-align: baseline;
+        user-select: none;
+      }
+      .trace-pill:hover { color: var(--ink); background: var(--surface); }
+      .trace-children {
+        padding-left: 18px;
+        border-left: 1px dashed var(--surface-hi);
+        margin: 0 0 0 12px;
+      }
       .empty {
         padding: 22px;
         text-align: center;

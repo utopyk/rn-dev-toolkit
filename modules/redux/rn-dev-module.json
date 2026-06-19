@@ -28,6 +28,11 @@
               "path": {
                 "type": "string",
                 "description": "Dot/bracket path into the state tree. Omit for the whole tree."
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["full", "mcp-redacted"],
+                "description": "Redaction posture for THIS call. Omit (default) = operator config (structure-only for agents). 'full' reveals values but STILL hard-redacts blacklisted keys (tokens/email/cards/…). The local Electron panel uses 'full'."
               }
             }
           },
@@ -57,6 +62,11 @@
               "limit": {
                 "type": "number",
                 "description": "Max actions returned (clamped at 1000)."
+              },
+              "mode": {
+                "type": "string",
+                "enum": ["full", "mcp-redacted"],
+                "description": "Redaction posture for THIS call. Omit (default) = operator config (structure-only for agents). 'full' reveals values but STILL hard-redacts blacklisted keys (tokens/email/cards/…). The local Electron panel uses 'full'."
               }
             }
           },
@@ -71,7 +81,12 @@
             "additionalProperties": false,
             "properties": {
               "worktree": { "type": "string" },
-              "sequence": { "type": "number" }
+              "sequence": { "type": "number" },
+              "mode": {
+                "type": "string",
+                "enum": ["full", "mcp-redacted"],
+                "description": "Redaction posture for THIS call. Omit (default) = operator config (structure-only for agents). 'full' reveals values but STILL hard-redacts blacklisted keys (tokens/email/cards/…). The local Electron panel uses 'full'."
+              }
             }
           },
           "readOnlyHint": true

@@ -33,8 +33,15 @@ import {
   type StateArgs,
   type StatusArgs,
 } from "./tools.js";
+import type { RedactionMode } from "./types.js";
 
 export const MODULE_ID = "redux" as const;
+
+/** Narrow the optional per-call redaction `mode` arg (panel passes `"full"`). */
+function redactionMode(args: Args): RedactionMode | undefined {
+  const v = args["mode"];
+  return v === "full" || v === "mcp-redacted" ? v : undefined;
+}
 
 function toStatusArgs(args: Args): StatusArgs {
   return { worktree: str(args, "worktree") };
@@ -44,8 +51,10 @@ function toStateArgs(args: Args): StateArgs {
   const out: StateArgs = {};
   const wk = str(args, "worktree");
   const path = str(args, "path");
+  const mode = redactionMode(args);
   if (wk !== undefined) out.worktree = wk;
   if (path !== undefined) out.path = path;
+  if (mode !== undefined) out.mode = mode;
   return out;
 }
 
@@ -55,10 +64,12 @@ function toActionsArgs(args: Args): ActionsArgs {
   const tf = str(args, "typeFilter");
   const since = ringCursor(args);
   const limit = boundedInt(args, "limit", { min: 1, max: MAX_LIST_LIMIT });
+  const mode = redactionMode(args);
   if (wk !== undefined) out.worktree = wk;
   if (tf !== undefined) out.typeFilter = tf;
   if (since !== undefined) out.since = since;
   if (limit !== undefined) out.limit = limit;
+  if (mode !== undefined) out.mode = mode;
   return out;
 }
 
@@ -68,8 +79,10 @@ function toActionArgs(args: Args): ActionArgs {
   // nothing) if a caller somehow omits it, so the handler returns
   // `{ action: null }` rather than throwing.
   const seq = boundedInt(args, "sequence", { min: 0, max: Number.MAX_SAFE_INTEGER });
+  const mode = redactionMode(args);
   const out: ActionArgs = { sequence: seq ?? -1 };
   if (wk !== undefined) out.worktree = wk;
+  if (mode !== undefined) out.mode = mode;
   return out;
 }
 

@@ -120,3 +120,35 @@ describe("redux tools — redaction config is FAIL-CLOSED", () => {
     });
   });
 });
+
+describe("redux tools — per-call mode override (Electron panel)", () => {
+  it("state({mode:'full'}) overrides the config default (mcp-redacted)", async () => {
+    const { cap, calls } = makeCap();
+    await state({ mode: "full" }, makeCtx(cap, {})); // config has no mode ⇒ default mcp-redacted
+    expect(calls.getState.mock.calls[0]![0].redaction.mode).toBe("full");
+  });
+
+  it("per-call mode can also TIGHTEN: mode:'mcp-redacted' over a config of 'full'", async () => {
+    const { cap, calls } = makeCap();
+    await state({ mode: "mcp-redacted" }, makeCtx(cap, { mode: "full" }));
+    expect(calls.getState.mock.calls[0]![0].redaction.mode).toBe("mcp-redacted");
+  });
+
+  it("override changes ONLY the mode — whitelist/blacklist still come from config", async () => {
+    const { cap, calls } = makeCap();
+    await state({ mode: "full" }, makeCtx(cap, { whitelist: ["ui"], blacklist: ["*x*"] }));
+    expect(calls.getState.mock.calls[0]![0].redaction).toEqual({
+      whitelist: ["ui"],
+      extraBlacklist: ["*x*"],
+      mode: "full",
+    });
+  });
+
+  it("actions() and action() honor the per-call mode too", async () => {
+    const { cap, calls } = makeCap();
+    await actions({ limit: 10, mode: "full" }, makeCtx(cap, {}));
+    await action({ sequence: 1, mode: "full" }, makeCtx(cap, {}));
+    expect(calls.listActions.mock.calls[0]![0].redaction.mode).toBe("full");
+    expect(calls.getAction.mock.calls[0]![0].redaction.mode).toBe("full");
+  });
+});

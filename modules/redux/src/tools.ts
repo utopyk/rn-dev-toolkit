@@ -13,6 +13,7 @@ import {
   type ReduxRedactionInput,
 } from "./host-capability.js";
 import type {
+  RedactionMode,
   ReduxActionRecord,
   ReduxActionsResult,
   ReduxCursor,
@@ -35,8 +36,14 @@ function resolveCapability(ctx: ModuleToolContext): ReduxHostCapability {
  * only the literal `"full"` to loosen — anything else (missing, wrong
  * type, typo) stays `mcp-redacted`. So a corrupt config can never silently
  * widen exposure.
+ *
+ * `modeOverride` is a PER-CALL opt-in (the Electron panel passes `"full"`
+ * because it's a local human dev tool). It overrides the config mode but
+ * NEVER weakens the blacklist — `full` still hard-redacts blacklisted keys
+ * (tokens, email, …) host-side. Agents that omit `mode` get the config
+ * default (structure-only), so the safe default is unchanged.
  */
-function readRedaction(ctx: ModuleToolContext): ReduxRedactionInput {
+function readRedaction(ctx: ModuleToolContext, modeOverride?: RedactionMode): ReduxRedactionInput {
   const cfg = ctx.config as {
     whitelist?: unknown;
     blacklist?: unknown;
@@ -44,10 +51,11 @@ function readRedaction(ctx: ModuleToolContext): ReduxRedactionInput {
   };
   const stringArray = (v: unknown): string[] =>
     Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+  const configMode: RedactionMode = cfg.mode === "full" ? "full" : "mcp-redacted";
   return {
     whitelist: stringArray(cfg.whitelist),
     extraBlacklist: stringArray(cfg.blacklist),
-    mode: cfg.mode === "full" ? "full" : "mcp-redacted",
+    mode: modeOverride ?? configMode,
   };
 }
 
@@ -57,16 +65,20 @@ export interface StatusArgs {
 export interface StateArgs {
   worktree?: string;
   path?: string;
+  /** Per-call redaction override; the Electron panel passes `"full"`. */
+  mode?: RedactionMode;
 }
 export interface ActionsArgs {
   worktree?: string;
   typeFilter?: string;
   since?: ReduxCursor;
   limit?: number;
+  mode?: RedactionMode;
 }
 export interface ActionArgs {
   worktree?: string;
   sequence: number;
+  mode?: RedactionMode;
 }
 export interface ClearArgs {
   worktree?: string;
@@ -81,7 +93,7 @@ export async function state(args: StateArgs, ctx: ModuleToolContext): Promise<Re
   return resolveCapability(ctx).getState({
     worktreeKey: worktree,
     path,
-    redaction: readRedaction(ctx),
+    redaction: readRedaction(ctx, args.mode),
   });
 }
 
@@ -90,7 +102,7 @@ export async function actions(args: ActionsArgs, ctx: ModuleToolContext): Promis
   return resolveCapability(ctx).listActions({
     worktreeKey: worktree,
     filter: { typeFilter, since, limit },
-    redaction: readRedaction(ctx),
+    redaction: readRedaction(ctx, args.mode),
   });
 }
 
@@ -101,7 +113,7 @@ export async function action(
   return resolveCapability(ctx).getAction({
     worktreeKey: args.worktree,
     sequence: args.sequence,
-    redaction: readRedaction(ctx),
+    redaction: readRedaction(ctx, args.mode),
   });
 }
 

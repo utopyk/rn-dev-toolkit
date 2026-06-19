@@ -121,6 +121,39 @@
       .tadd { color: var(--ready) !important; }
       .tarrow { color: var(--muted); }
 
+      /* chip filter (hybrid: autocomplete input + include/exclude chips) */
+      .cf { position: relative; }
+      .cf-row {
+        display: flex; flex-wrap: wrap; gap: 5px; align-items: center;
+        background: var(--bg-soft); border: 1px solid var(--surface-hi); border-radius: 7px;
+        padding: 5px 7px; min-height: 32px;
+      }
+      .cf-row:focus-within { border-color: var(--glow); }
+      .cf-input {
+        flex: 1; min-width: 80px; background: transparent; border: none; outline: none;
+        color: var(--ink); font: inherit; font-size: 11.5px; padding: 1px 2px;
+      }
+      .cf-chip {
+        display: inline-flex; align-items: center; gap: 5px; border-radius: 6px;
+        padding: 1px 4px 1px 7px; font-size: 11px; border: 1px solid;
+      }
+      .cf-chip.inc { color: var(--ready); border-color: rgba(43,217,106,0.45); background: rgba(43,217,106,0.10); }
+      .cf-chip.exc { color: var(--error); border-color: rgba(247,118,142,0.45); background: rgba(247,118,142,0.10); }
+      .cf-mode { cursor: pointer; font-size: 9px; letter-spacing: 0.03em; text-transform: uppercase; opacity: 0.85; user-select: none; }
+      .cf-mode:hover { opacity: 1; text-decoration: underline; }
+      .cf-x { cursor: pointer; opacity: 0.65; padding: 0 2px; }
+      .cf-x:hover { opacity: 1; }
+      .cf-dropdown {
+        position: absolute; left: 0; right: 0; top: 100%; margin-top: 3px; z-index: 30;
+        background: var(--surface); border: 1px solid var(--surface-hi); border-radius: 7px;
+        max-height: 190px; overflow: auto; box-shadow: 0 8px 22px rgba(0,0,0,0.35);
+      }
+      .cf-dropdown[hidden] { display: none; }
+      .cf-sug { padding: 5px 10px; cursor: pointer; font-size: 11.5px; color: var(--ink-soft); white-space: nowrap; }
+      .cf-sug.active, .cf-sug:hover { background: var(--surface-hi); color: var(--ink); }
+      .cf-sug .cf-sug-hint { color: var(--muted-2); font-size: 10px; margin-left: 8px; }
+      .cf-count { font-size: 10.5px; color: var(--muted); padding: 4px 2px 0; }
+
       .empty { padding: 22px; text-align: center; color: var(--muted); }
       .error {
         margin: 8px; padding: 10px 12px; background: rgba(247,118,142,0.08);
@@ -142,7 +175,10 @@
     <div id="status" class="status" hidden></div>
     <div class="split">
       <div class="pane pane-list">
-        <div class="pane-head"><input id="action-search" class="search" placeholder="Filter actions by type…" /></div>
+        <div class="pane-head">
+          <div id="action-filter" class="cf"></div>
+          <div id="action-count" class="cf-count"></div>
+        </div>
         <div class="scroll" id="actions"><div class="empty">Loading…</div></div>
       </div>
       <div class="pane pane-detail">
@@ -151,7 +187,7 @@
           <button class="tab active" data-tab="state">State</button>
           <button class="tab" data-tab="diff">Diff</button>
         </div>
-        <div class="pane-head"><input id="detail-search" class="search" placeholder="Search keys / values…" /></div>
+        <div class="pane-head"><div id="detail-filter" class="cf"></div></div>
         <div class="scroll" id="detail"><div class="empty">Loading…</div></div>
       </div>
     </div>

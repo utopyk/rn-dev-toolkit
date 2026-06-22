@@ -270,13 +270,50 @@ function renderStatus(st) {
   const meta = st?.meta;
   if (!meta) { statusEl.hidden = true; return; }
   const stateClass = meta.hasState ? "status-value status-value--ok" : "status-value status-value--warn";
+  // Surface ingest lifecycle so the user can tell "buffer empty because
+  // ingest bind failed" from "buffer empty because the app hasn't
+  // dispatched yet". Older daemons that don't send ingestStatus default
+  // to "bound" for back-compat.
+  const ingestStatus = typeof meta.ingestStatus === "string" ? meta.ingestStatus : "bound";
+  const ingestCls =
+    ingestStatus === "bound" ? "status-value status-value--ok"
+    : ingestStatus === "deferred" ? "status-value status-value--err"
+    : "status-value status-value--warn";
   statusEl.replaceChildren(
     label("Actions:"), value(String(st.bufferSize ?? 0)),
     label("State:"), value(meta.hasState ? "captured" : "waiting", stateClass),
+    label("Capture:"), value(ingestStatus, ingestCls),
     label("Redaction:"), value(mode() === "full" ? "full (values shown)" : "structure-only"),
     label("Evicted:"), value(String(meta.evictedCount ?? 0)),
   );
   statusEl.hidden = false;
+
+  // Loud banner above the action list when ingest isn't bound — the
+  // panel can still serve stale data from a prior session's ring, so
+  // "no actions" alone isn't enough signal.
+  renderIngestBanner(meta);
+}
+
+function renderIngestBanner(meta) {
+  const status = typeof meta.ingestStatus === "string" ? meta.ingestStatus : "bound";
+  const host = document.getElementById("ingest-banner");
+  if (!host) return;
+  if (status === "bound") { host.hidden = true; host.replaceChildren(); return; }
+  host.hidden = false;
+  host.className = "ingest-banner " + (status === "deferred" ? "ingest-banner--err" : "ingest-banner--warn");
+  const title =
+    status === "deferred" ? "Redux capture is OFF for this session"
+    : status === "stopped" ? "Redux capture has stopped"
+    : "Redux capture is disabled";
+  const body =
+    status === "deferred"
+      ? `${meta.ingestError || "ingest bind failed"}. Any actions you see here are stale (from a sibling session's ring). Restart the daemon to re-bind.`
+      : status === "stopped"
+        ? "Session was torn down. New actions won't appear."
+        : "Capture was opted out for this session.";
+  const h = document.createElement("strong"); h.textContent = title;
+  const p = document.createElement("span"); p.textContent = " — " + body;
+  host.replaceChildren(h, p);
 }
 
 function renderActions() {

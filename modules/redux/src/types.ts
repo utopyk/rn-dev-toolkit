@@ -27,6 +27,8 @@ export interface ReduxActionsFilter {
   limit?: number;
 }
 
+export type IngestStatus = "bound" | "deferred" | "stopped" | "disabled";
+
 export interface ReduxMeta {
   readonly sessionKey: string;
   readonly bufferEpoch: number;
@@ -37,6 +39,8 @@ export interface ReduxMeta {
   readonly truncatedCount: number;
   readonly hasState: boolean;
   readonly redactionMode: RedactionMode;
+  readonly ingestStatus: IngestStatus;
+  readonly ingestError: string;
 }
 
 export interface ReduxActionsResult {

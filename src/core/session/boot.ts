@@ -425,10 +425,14 @@ export async function bootSessionServices(
   });
   try {
     await reduxIngest.start();
+    reduxStore.setIngestStatus("bound");
   } catch (err) {
-    emit(
-      `ℹ Redux ingest: deferred (${err instanceof Error ? err.message : String(err)})`,
-    );
+    const message = err instanceof Error ? err.message : String(err);
+    // Surface to the session log AND to the store's meta envelope, so
+    // the panel can show a loud "no capture" banner instead of silently
+    // serving stale data from a sibling session's ring.
+    emit(`⚠ Redux ingest: deferred on port ${reduxPortForMetroPort(port)} — ${message}`);
+    reduxStore.setIngestStatus("deferred", `bind ${reduxPortForMetroPort(port)} failed: ${message}`);
   }
 
   metro.start({
@@ -629,6 +633,7 @@ export async function bootSessionServices(
     }
     try {
       await reduxIngest.stop();
+      reduxStore.setIngestStatus("stopped", "session disposed");
     } catch {
       /* best-effort */
     }

@@ -73,6 +73,19 @@ export interface ReduxActionsFilter {
   limit?: number;
 }
 
+/**
+ * Lifecycle of the redux ingest WebSocket server for this session.
+ *
+ *   - `bound`    — listening + accepting enhancer connections.
+ *   - `deferred` — bind failed (typically EADDRINUSE because a previous
+ *                  session leaked the port). NO actions are being captured
+ *                  for this session, though the panel may still show
+ *                  stale data from a sibling session's ring.
+ *   - `stopped`  — explicit teardown at session shutdown.
+ *   - `disabled` — operator opted out (reserved; not used today).
+ */
+export type IngestStatus = "bound" | "deferred" | "stopped" | "disabled";
+
 export interface ReduxMeta {
   readonly sessionKey: string;
   /** Bumps on `clear()` or a fresh app/store connection. */
@@ -90,6 +103,13 @@ export interface ReduxMeta {
   /** Whether a state snapshot has been received yet. */
   readonly hasState: boolean;
   readonly redactionMode: RedactionMode;
+  /** Ingest server lifecycle. Lets the panel render a "no capture"
+   *  banner when bind failed so the user isn't misled by stale data
+   *  from another session's ring. */
+  readonly ingestStatus: IngestStatus;
+  /** Human-facing detail when ingestStatus !== "bound" — empty when
+   *  bound. Typically the EADDRINUSE message + the port we tried. */
+  readonly ingestError: string;
 }
 
 export interface ReduxActionsResult {

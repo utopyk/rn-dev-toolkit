@@ -83,9 +83,22 @@ export function navigatePath(root: unknown, path: string): { value: unknown; pre
 export class ReduxStore {
   private readonly rings = new Map<string, SessionRing>();
   private readonly capacity: number;
+  /** Ingest server lifecycle (defaults to "deferred" — the store exists
+   *  before the WS server attempts to bind, and stays deferred until
+   *  boot signals success via setIngestStatus("bound")). */
+  private ingestStatus: import("./types.js").IngestStatus = "deferred";
+  private ingestError = "ingest not yet started";
 
   constructor(options: ReduxStoreOptions = {}) {
     this.capacity = options.capacity ?? DEFAULT_BUFFER_CAPACITY;
+  }
+
+  /** Called by boot.ts after reduxIngest.start() resolves (or rejects).
+   *  The status is surfaced in every meta envelope so the panel can
+   *  render a "no capture" banner when bind failed. */
+  setIngestStatus(status: import("./types.js").IngestStatus, errorMessage = ""): void {
+    this.ingestStatus = status;
+    this.ingestError = status === "bound" ? "" : errorMessage;
   }
 
   /** Record a dispatched action (+ optional new state) for `sessionKey`. */
@@ -214,6 +227,8 @@ export class ReduxStore {
       // concern, so meta reports the strict default. Readers that reveal
       // (the panel) override this in their own DTO.
       redactionMode: "mcp-redacted",
+      ingestStatus: this.ingestStatus,
+      ingestError: this.ingestError,
     };
   }
 }

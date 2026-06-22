@@ -21,6 +21,13 @@ import type {
   MetroLogsMeta,
   MetroLogsStatus,
   MetroLogStream,
+  DeviceLogLevel,
+  DeviceLogSource,
+  DeviceLogsCursor,
+  DeviceLogsListResult,
+  DeviceLogsMeta,
+  DeviceLogsStatus,
+  DeviceLogsTap,
 } from "./types.js";
 
 /**
@@ -104,4 +111,71 @@ export async function clear(
 ): Promise<{ status: "cleared"; meta: MetroLogsMeta }> {
   const cap = resolveCapability(ctx);
   return cap.clear({ worktreeKey: args.worktree });
+}
+
+// ── Native-tap surface (folded from the deleted `device-logs` module) ───
+
+export interface NativeStatusArgs {}
+
+export interface NativeListArgs {
+  deviceId?: string;
+  source?: DeviceLogSource;
+  level?: DeviceLogLevel;
+  substring?: string;
+  since?: DeviceLogsCursor;
+  limit?: number;
+}
+
+export interface NativeClearArgs {
+  deviceId?: string;
+}
+
+export interface StartTapArgs {
+  platform: DeviceLogSource;
+  deviceId: string;
+  simulator?: boolean;
+  bundleId?: string;
+  packageName?: string;
+}
+
+export interface StopTapArgs {
+  tapId: string;
+}
+
+export async function nativeStatus(
+  _args: NativeStatusArgs,
+  ctx: ModuleToolContext,
+): Promise<DeviceLogsStatus> {
+  return resolveCapability(ctx).nativeStatus();
+}
+
+export async function nativeList(
+  args: NativeListArgs,
+  ctx: ModuleToolContext,
+): Promise<DeviceLogsListResult> {
+  const { deviceId, source, level, substring, since, limit } = args;
+  return resolveCapability(ctx).nativeList({
+    filter: { deviceId, source, level, substring, since, limit },
+  });
+}
+
+export async function nativeClear(
+  args: NativeClearArgs,
+  ctx: ModuleToolContext,
+): Promise<{ status: "cleared"; meta: DeviceLogsMeta }> {
+  return resolveCapability(ctx).nativeClear({ deviceId: args.deviceId });
+}
+
+export async function startTap(
+  args: StartTapArgs,
+  ctx: ModuleToolContext,
+): Promise<DeviceLogsTap> {
+  return resolveCapability(ctx).startTap(args);
+}
+
+export async function stopTap(
+  args: StopTapArgs,
+  ctx: ModuleToolContext,
+): Promise<{ status: "stopped" | "still-running" }> {
+  return resolveCapability(ctx).stopTap(args);
 }

@@ -28,12 +28,22 @@ import {
   MAX_LIST_LIMIT,
   clear,
   list,
+  nativeClear,
+  nativeList,
+  nativeStatus,
+  startTap,
   status,
+  stopTap,
   type ClearArgs,
   type ListArgs,
+  type NativeClearArgs,
+  type NativeListArgs,
+  type NativeStatusArgs,
+  type StartTapArgs,
   type StatusArgs,
+  type StopTapArgs,
 } from "./tools.js";
-import type { MetroLogStream } from "./types.js";
+import type { DeviceLogLevel, DeviceLogSource, MetroLogStream } from "./types.js";
 
 export const MODULE_ID = "metro-logs" as const;
 
@@ -76,6 +86,71 @@ function toClearArgs(args: Args): ClearArgs {
   return { worktree: str(args, "worktree") };
 }
 
+// ── Native-tap narrowers (folded from the deleted device-logs module) ──
+
+function source(args: Args): DeviceLogSource | undefined {
+  const v = args["source"];
+  if (v === "ios" || v === "android") return v;
+  return undefined;
+}
+function platform(args: Args): DeviceLogSource | undefined {
+  const v = args["platform"];
+  if (v === "ios" || v === "android") return v;
+  return undefined;
+}
+function level(args: Args): DeviceLogLevel | undefined {
+  const v = args["level"];
+  if (v === "debug" || v === "info" || v === "warn" || v === "error" || v === "fault") return v;
+  return undefined;
+}
+function bool(args: Args, key: string): boolean | undefined {
+  const v = args[key];
+  if (typeof v === "boolean") return v;
+  return undefined;
+}
+
+function toNativeStatusArgs(_args: Args): NativeStatusArgs {
+  return {};
+}
+function toNativeListArgs(args: Args): NativeListArgs {
+  const out: NativeListArgs = {};
+  const did = str(args, "deviceId");
+  const src = source(args);
+  const lvl = level(args);
+  const sub = str(args, "substring");
+  const since = ringCursor(args);
+  const limit = boundedInt(args, "limit", { min: 1, max: MAX_LIST_LIMIT });
+  if (did !== undefined) out.deviceId = did;
+  if (src !== undefined) out.source = src;
+  if (lvl !== undefined) out.level = lvl;
+  if (sub !== undefined) out.substring = sub;
+  if (since !== undefined) out.since = since;
+  if (limit !== undefined) out.limit = limit;
+  return out;
+}
+function toNativeClearArgs(args: Args): NativeClearArgs {
+  return { deviceId: str(args, "deviceId") };
+}
+function toStartTapArgs(args: Args): StartTapArgs {
+  const p = platform(args);
+  if (p === undefined) throw new Error("start-tap: 'platform' is required (\"ios\" | \"android\")");
+  const did = str(args, "deviceId");
+  if (did === undefined || did.length === 0) throw new Error("start-tap: 'deviceId' is required");
+  const out: StartTapArgs = { platform: p, deviceId: did };
+  const sim = bool(args, "simulator");
+  const bundle = str(args, "bundleId");
+  const pkg = str(args, "packageName");
+  if (sim !== undefined) out.simulator = sim;
+  if (bundle !== undefined) out.bundleId = bundle;
+  if (pkg !== undefined) out.packageName = pkg;
+  return out;
+}
+function toStopTapArgs(args: Args): StopTapArgs {
+  const tapId = str(args, "tapId");
+  if (tapId === undefined || tapId.length === 0) throw new Error("stop-tap: 'tapId' is required");
+  return { tapId };
+}
+
 async function loadManifest(entryDir: string): Promise<ModuleManifest> {
   const manifestPath = join(entryDir, "..", "rn-dev-module.json");
   const raw = await readFile(manifestPath, "utf-8");
@@ -105,6 +180,16 @@ if (invokedAsEntry) {
         list(toListArgs(args), ctx),
       "metro-logs__clear": (args: Args, ctx: ModuleToolContext) =>
         clear(toClearArgs(args), ctx),
+      "metro-logs__native-status": (args: Args, ctx: ModuleToolContext) =>
+        nativeStatus(toNativeStatusArgs(args), ctx),
+      "metro-logs__native-list": (args: Args, ctx: ModuleToolContext) =>
+        nativeList(toNativeListArgs(args), ctx),
+      "metro-logs__native-clear": (args: Args, ctx: ModuleToolContext) =>
+        nativeClear(toNativeClearArgs(args), ctx),
+      "metro-logs__start-tap": (args: Args, ctx: ModuleToolContext) =>
+        startTap(toStartTapArgs(args), ctx),
+      "metro-logs__stop-tap": (args: Args, ctx: ModuleToolContext) =>
+        stopTap(toStopTapArgs(args), ctx),
     },
     activate: (ctx) => {
       ctx.log.info("metro-logs activated");

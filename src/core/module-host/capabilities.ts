@@ -113,7 +113,6 @@ export const KNOWN_CAPABILITIES: ReadonlyArray<string> = [
   "devtools",
   "metro",
   "metro-logs",
-  "device-logs",
   "redux",
   "modules",
   // Phase H2d — built-in build module's hook-host capability surface.

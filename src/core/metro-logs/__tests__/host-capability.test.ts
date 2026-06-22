@@ -1,14 +1,23 @@
 import { describe, it, expect } from "vitest";
 import { MetroLogsStore } from "../buffer.js";
 import { createMetroLogsHostCapability } from "../host-capability.js";
+import { DeviceLogsStore } from "../../device-logs/buffer.js";
+import { TapManager } from "../../device-logs/tap-manager.js";
 
 const DEFAULT_WK = "wk-default";
 
 function buildCap(opts?: { allowedWorktreeKeys?: () => readonly string[] }) {
   const store = new MetroLogsStore({ capacity: 50 });
+  // Native-tap deps were folded into the metro-logs capability when the
+  // standalone device-logs module was sunset. These tests don't exercise
+  // them, but the factory now requires them as inputs.
+  const deviceLogsStore = new DeviceLogsStore({ capacity: 50 });
+  const tapManager = new TapManager(deviceLogsStore);
   const cap = createMetroLogsHostCapability(
     store,
     DEFAULT_WK,
+    deviceLogsStore,
+    tapManager,
     opts?.allowedWorktreeKeys,
   );
   return { store, cap };

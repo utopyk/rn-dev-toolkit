@@ -22,9 +22,19 @@ const statusEl = document.getElementById("status");
 const refreshBtn = document.getElementById("refresh");
 const clearBtn = document.getElementById("clear");
 const copyAllBtn = document.getElementById("copy-all");
+const sourceEl = /** @type {HTMLSelectElement} */ (document.getElementById("source"));
 const streamEl = /** @type {HTMLSelectElement} */ (document.getElementById("stream"));
+const levelEl = /** @type {HTMLSelectElement} */ (document.getElementById("level"));
 const followEl = /** @type {HTMLInputElement} */ (document.getElementById("follow"));
 const filterCountEl = document.getElementById("filter-count");
+
+// Tap controls (folded from the deleted device-logs panel)
+const tapPlatformEl = /** @type {HTMLSelectElement} */ (document.getElementById("tap-platform"));
+const tapDeviceEl = /** @type {HTMLInputElement} */ (document.getElementById("tap-device"));
+const tapPackageEl = /** @type {HTMLInputElement} */ (document.getElementById("tap-package"));
+const tapSimulatorEl = /** @type {HTMLInputElement} */ (document.getElementById("tap-simulator"));
+const tapStartBtn = document.getElementById("tap-start");
+const tapActiveEl = document.getElementById("tap-active");
 
 const POLL_INTERVAL_MS = 1000;
 const MAX_ROWS = 500;
@@ -33,6 +43,12 @@ let inFlight = false;
 let lastError = null;
 let cursor = null;
 const rows = [];
+// Parallel ring for native taps (folded device-logs). Native entries
+// are tagged with source ("ios" | "android") at the host; merged with
+// metro rows by timestamp at render time.
+let nativeCursor = null;
+const nativeRows = [];
+let activeTaps = [];
 
 // ── Hybrid chip filter (vendored from modules/redux/panel/panel.js) ──────
 // Keep in sync with redux. If a 4th panel needs this, extract to a shared
@@ -196,26 +212,40 @@ const filter = createChipFilter(document.getElementById("filter"), {
 
 async function refresh({ force = false } = {}) {
   if (!rnDev || typeof rnDev.callTool !== "function") {
-    renderFatal("Panel preload unavailable — open the Metro Logs panel from the sidebar.");
+    renderFatal("Panel preload unavailable — open the App Logs panel from the sidebar.");
     return;
   }
   if (inFlight && !force) return;
   inFlight = true;
   try {
-    const listArgs = {};
-    if (streamEl.value === "stdout" || streamEl.value === "stderr") {
-      listArgs.stream = streamEl.value;
-    }
-    if (cursor) listArgs.since = cursor;
-    const reply = await rnDev.callTool("list", listArgs);
-    if (reply?.kind === "error") {
-      renderFatal(`${reply.code}: ${reply.message}`);
+    // Fetch metro stdout/stderr + native device logs in parallel. The
+    // host serves each from its own ring; we merge by timestamp at
+    // render time so the user sees one chronological stream.
+    const metroArgs = {};
+    if (streamEl.value === "stdout" || streamEl.value === "stderr") metroArgs.stream = streamEl.value;
+    if (cursor) metroArgs.since = cursor;
+
+    const nativeArgs = {};
+    if (levelEl.value) nativeArgs.level = levelEl.value;
+    if (nativeCursor) nativeArgs.since = nativeCursor;
+
+    const [metroReply, nativeReply] = await Promise.all([
+      rnDev.callTool("list", metroArgs),
+      rnDev.callTool("native-list", nativeArgs).catch(() => null),
+    ]);
+    if (metroReply?.kind === "error") {
+      renderFatal(`${metroReply.code}: ${metroReply.message}`);
       return;
     }
-    const result = reply?.result ?? reply;
+    const result = metroReply?.result ?? metroReply;
     lastError = null;
     ingest(result);
+
+    if (nativeReply && nativeReply.kind !== "error") {
+      ingestNative(nativeReply?.result ?? nativeReply);
+    }
     render();
+    renderTapsRow();
   } catch (err) {
     renderFatal(err instanceof Error ? err.message : String(err));
   } finally {
@@ -227,9 +257,15 @@ async function doClear() {
   if (!rnDev || typeof rnDev.callTool !== "function") return;
   clearBtn.disabled = true;
   try {
-    await rnDev.callTool("clear", {});
-    rows.length = 0;
-    cursor = null;
+    // Clear both rings — the Clear button is unified now that the
+    // panel shows both sources. Native clear is best-effort (the
+    // device-logs side may have no taps so the call returns trivially).
+    await Promise.all([
+      rnDev.callTool("clear", {}),
+      rnDev.callTool("native-clear", {}).catch(() => null),
+    ]);
+    rows.length = 0; cursor = null;
+    nativeRows.length = 0; nativeCursor = null;
     await refresh({ force: true });
   } catch (err) {
     renderFatal(err instanceof Error ? err.message : String(err));
@@ -258,6 +294,81 @@ function ingest(result) {
   if (meta) {
     cursor = { bufferEpoch: meta.bufferEpoch, sequence: meta.lastEventSequence };
     renderStatus(meta, rows.length);
+  }
+}
+
+function ingestNative(result) {
+  if (!result) return;
+  const entries = Array.isArray(result.entries) ? result.entries : [];
+  const meta = result.meta ?? null;
+  if (!nativeCursor || result.cursorDropped) {
+    nativeRows.length = 0;
+    for (const e of entries) nativeRows.push(e);
+  } else {
+    for (const e of entries) nativeRows.push(e);
+    if (nativeRows.length > MAX_ROWS) nativeRows.splice(0, nativeRows.length - MAX_ROWS);
+  }
+  if (meta) {
+    nativeCursor = { bufferEpoch: meta.bufferEpoch, sequence: meta.lastEventSequence };
+    activeTaps = Array.isArray(meta.taps) ? meta.taps : [];
+  }
+}
+
+// ── Tap control ──────────────────────────────────────────────────────────
+
+async function startTapFromForm() {
+  const platform = tapPlatformEl.value;
+  const deviceId = tapDeviceEl.value.trim();
+  if (!deviceId) { flashTapError("device id is required"); return; }
+  const args = { platform, deviceId };
+  const pkg = tapPackageEl.value.trim();
+  if (pkg) {
+    if (platform === "ios") args.bundleId = pkg;
+    else args.packageName = pkg;
+  }
+  if (platform === "ios" && tapSimulatorEl.checked) args.simulator = true;
+  try {
+    const reply = await rnDev.callTool("start-tap", args);
+    if (reply?.kind === "error") { flashTapError(`${reply.code}: ${reply.message}`); return; }
+    const tap = reply?.result ?? reply;
+    if (tap?.status === "error") flashTapError(tap.error || "tap failed");
+    await refresh({ force: true });
+  } catch (err) {
+    flashTapError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function stopTap(tapId) {
+  try {
+    await rnDev.callTool("stop-tap", { tapId });
+    await refresh({ force: true });
+  } catch (err) {
+    flashTapError(err instanceof Error ? err.message : String(err));
+  }
+}
+
+function flashTapError(message) {
+  const existing = document.getElementById("tap-error-banner");
+  if (existing) existing.remove();
+  const banner = document.createElement("div");
+  banner.id = "tap-error-banner";
+  banner.className = "tap-error-banner";
+  banner.textContent = message;
+  document.getElementById("taps").appendChild(banner);
+  setTimeout(() => banner.remove(), 5000);
+}
+
+function renderTapsRow() {
+  tapActiveEl.replaceChildren();
+  for (const tap of activeTaps) {
+    const chip = document.createElement("span");
+    chip.className = `tap-chip ${tap.status === "running" ? "running" : tap.status === "error" ? "error" : ""}`;
+    chip.textContent = `${tap.source}:${tap.deviceId.slice(0, 12)}${tap.deviceId.length > 12 ? "…" : ""} (${tap.status})`;
+    const x = document.createElement("button");
+    x.type = "button"; x.textContent = "×"; x.title = "Stop tap";
+    x.addEventListener("click", () => stopTap(tap.tapId));
+    chip.appendChild(x);
+    tapActiveEl.appendChild(chip);
   }
 }
 
@@ -343,30 +454,55 @@ function isAtBottom(el) {
 }
 
 function render() {
-  // Hard rule: don't blow away the DOM while the user is selecting or has
-  // a live selection inside it. Next poll will catch the new rows once the
-  // selection clears.
   if (userIsInteractingWithList()) return;
 
-  const matched = filter.active ? rows.filter((e) => filter.test(e.line ?? "")) : rows;
-  filterCountEl.textContent = filter.active ? `showing ${matched.length} of ${rows.length}` : "";
+  // Build the unified display stream — metro entries + native entries
+  // merged by capture-time timestamp. Each entry is tagged with `_kind`
+  // so renderRow can dispatch without ambiguity.
+  const sourceFilter = sourceEl.value; // "" | "metro" | "ios" | "android"
+  const includeMetro = sourceFilter === "" || sourceFilter === "metro";
+  const includeNative = sourceFilter === "" || sourceFilter === "ios" || sourceFilter === "android";
+
+  let unified = [];
+  if (includeMetro) {
+    for (const e of rows) unified.push({ _kind: "metro", entry: e });
+  }
+  if (includeNative) {
+    for (const e of nativeRows) {
+      if (sourceFilter === "ios" && e.source !== "ios") continue;
+      if (sourceFilter === "android" && e.source !== "android") continue;
+      unified.push({ _kind: "native", entry: e });
+    }
+  }
+  // Sort by capture-time millis (entry.at). Stable: keep insertion order
+  // for equal timestamps so a burst stays in its arrival order.
+  unified.sort((a, b) => (a.entry.at ?? 0) - (b.entry.at ?? 0));
+
+  // Chip filter applies to a stringified form of each entry — uses the
+  // line text for metro, and "tag message deviceId level" for native.
+  const matched = filter.active ? unified.filter((u) => filter.test(textForFilter(u))) : unified;
+  const totalUnfiltered = unified.length;
+  filterCountEl.textContent = filter.active ? `showing ${matched.length} of ${totalUnfiltered}` : "";
 
   if (matched.length === 0) {
     const empty = document.createElement("div");
     empty.className = "empty";
-    empty.textContent = rows.length === 0
-      ? "No captured log lines yet."
-      : "No log lines match the filter.";
+    if (totalUnfiltered === 0) {
+      empty.textContent = activeTaps.length === 0
+        ? "No captured log lines yet. Start a native tap above to also capture iOS / Android device logs."
+        : "Waiting for log lines…";
+    } else {
+      empty.textContent = "No log lines match the filter.";
+    }
     contentEl.replaceChildren(empty);
     return;
   }
 
-  // Capture pre-rebuild scroll state from the existing log-list (if any).
   const prev = contentEl.querySelector(".log-list");
   const prevScrollTop = prev ? prev.scrollTop : 0;
   const prevAtBottom = prev ? isAtBottom(prev) : true;
 
-  // Prune collapse state for headers that aged out of the ring.
+  // Prune trace-collapse state for headers that aged out of the metro ring.
   if (rows.length > 0) {
     const oldestSeq = rows[0].sequence;
     for (const seq of collapsedTraces.keys()) {
@@ -376,13 +512,20 @@ function render() {
 
   const list = document.createElement("div");
   list.className = "log-list";
-  // Walk + fold consecutive log-trace lines under their preceding header.
+  // Walk + fold consecutive metro log-trace lines under their preceding
+  // metro header. Native entries break the fold (they're a different
+  // kind, can't be part of a JS stack frame).
   let i = 0;
   while (i < matched.length) {
-    const entry = matched[i];
+    const u = matched[i];
+    if (u._kind === "native") {
+      list.appendChild(renderRow(u.entry));
+      i++;
+      continue;
+    }
+    const entry = u.entry;
     const level = classifyLine(entry.line ?? "");
     if (level === "trace") {
-      // Standalone trace — no header above it in the filtered view.
       list.appendChild(renderRow(entry));
       i++;
       continue;
@@ -390,8 +533,9 @@ function render() {
     const headerRow = renderRow(entry);
     const traces = [];
     let j = i + 1;
-    while (j < matched.length && classifyLine(matched[j].line ?? "") === "trace") {
-      traces.push(matched[j]);
+    while (j < matched.length && matched[j]._kind === "metro"
+           && classifyLine(matched[j].entry.line ?? "") === "trace") {
+      traces.push(matched[j].entry);
       j++;
     }
     if (traces.length === 0) {
@@ -496,10 +640,21 @@ function buildTraceGroup(headerRow, traces, headerSeq) {
 }
 
 function renderRow(entry) {
+  // Native entries (folded device-logs) carry `source: "ios" | "android"`
+  // and structured fields (level, tag, deviceId, message); metro entries
+  // carry `stream: "stdout" | "stderr"` and a raw `line`. One renderer
+  // discriminates and produces the right shape.
+  if (entry.source === "ios" || entry.source === "android") {
+    return renderNativeRow(entry);
+  }
+  return renderMetroRow(entry);
+}
+
+function renderMetroRow(entry) {
   const row = document.createElement("div");
   const level = classifyLine(entry.line ?? "");
   const streamCls = entry.stream === "stderr" ? "stderr" : "stdout";
-  row.className = `log-row ${streamCls}${level ? ` log-${level}` : ""}`;
+  row.className = `log-row source-metro ${streamCls}${level ? ` log-${level}` : ""}`;
 
   const seq = document.createElement("span");
   seq.className = "seq";
@@ -513,6 +668,46 @@ function renderRow(entry) {
 
   row.appendChild(makeCopyIcon(() => entry.line ?? ""));
   return row;
+}
+
+function renderNativeRow(entry) {
+  const row = document.createElement("div");
+  row.className = `log-row source-${entry.source} log-${entry.level || "info"}`;
+
+  const seq = document.createElement("span");
+  seq.className = "seq";
+  seq.textContent = `#${entry.sequence}`;
+  row.appendChild(seq);
+
+  // 8-char device-id prefix so the user can tell which device a line
+  // came from when multiple taps are active.
+  const did = document.createElement("span");
+  did.className = "device-id-cell";
+  did.textContent = entry.deviceId ? entry.deviceId.slice(0, 8) : "";
+  did.title = entry.deviceId || "";
+  row.appendChild(did);
+
+  if (entry.tag) {
+    const tag = document.createElement("span");
+    tag.className = "seq";
+    tag.textContent = `[${entry.tag.slice(0, 30)}]`;
+    tag.title = entry.tag;
+    row.appendChild(tag);
+  }
+
+  const text = document.createElement("span");
+  text.className = "log-text";
+  text.textContent = entry.message ?? "";
+  row.appendChild(text);
+
+  row.appendChild(makeCopyIcon(() => entry.message ?? ""));
+  return row;
+}
+
+function textForFilter(unified) {
+  if (unified._kind === "metro") return unified.entry.line ?? "";
+  const e = unified.entry;
+  return `${e.source} ${e.deviceId} ${e.tag} ${e.level} ${e.message ?? ""}`;
 }
 
 function renderFatal(message) {
@@ -579,17 +774,34 @@ function stopPolling() {
 }
 
 refreshBtn.addEventListener("click", () => {
-  cursor = null;
-  rows.length = 0;
+  cursor = null; nativeCursor = null;
+  rows.length = 0; nativeRows.length = 0;
   refresh({ force: true });
 });
 clearBtn.addEventListener("click", doClear);
 copyAllBtn.addEventListener("click", () => {
-  // Copies all lines currently visible (after chip-filter + stream select).
-  // Doesn't go through the row-level copy icons so it's one click for the
-  // common "grab the slice I just filtered down to" case.
-  const matched = filter.active ? rows.filter((e) => filter.test(e.line ?? "")) : rows;
-  const text = matched.map((e) => e.line ?? "").join("\n");
+  // Copies every currently visible (post-filter) line — both metro and
+  // native, in display order. Native rows get a "[ios|android] tag: …"
+  // prefix so the destination can tell them apart.
+  const sourceFilter = sourceEl.value;
+  const includeMetro = sourceFilter === "" || sourceFilter === "metro";
+  const includeNative = sourceFilter === "" || sourceFilter === "ios" || sourceFilter === "android";
+  let unified = [];
+  if (includeMetro) for (const e of rows) unified.push({ _kind: "metro", entry: e });
+  if (includeNative) {
+    for (const e of nativeRows) {
+      if (sourceFilter === "ios" && e.source !== "ios") continue;
+      if (sourceFilter === "android" && e.source !== "android") continue;
+      unified.push({ _kind: "native", entry: e });
+    }
+  }
+  unified.sort((a, b) => (a.entry.at ?? 0) - (b.entry.at ?? 0));
+  const matched = filter.active ? unified.filter((u) => filter.test(textForFilter(u))) : unified;
+  const text = matched.map((u) => {
+    if (u._kind === "metro") return u.entry.line ?? "";
+    const e = u.entry;
+    return `[${e.source}/${e.level}] ${e.tag ? `[${e.tag}] ` : ""}${e.message ?? ""}`;
+  }).join("\n");
   if (navigator.clipboard?.writeText) {
     navigator.clipboard.writeText(text).then(() => {
       const original = copyAllBtn.textContent;
@@ -602,10 +814,21 @@ copyAllBtn.addEventListener("click", () => {
     }, () => { /* denied */ });
   }
 });
+sourceEl.addEventListener("change", () => { render(); });
+levelEl.addEventListener("change", () => {
+  nativeCursor = null; nativeRows.length = 0;
+  refresh({ force: true });
+});
 streamEl.addEventListener("change", () => {
   cursor = null;
   rows.length = 0;
   refresh({ force: true });
+});
+tapStartBtn.addEventListener("click", () => void startTapFromForm());
+tapPlatformEl.addEventListener("change", () => {
+  const isAndroid = tapPlatformEl.value === "android";
+  tapSimulatorEl.disabled = isAndroid;
+  if (isAndroid) tapSimulatorEl.checked = false;
 });
 followEl.addEventListener("change", () => {
   // Manual check → snap to bottom now (next poll would too, but waiting

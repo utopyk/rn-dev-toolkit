@@ -30,12 +30,6 @@ import { DeviceLogsStore } from "../device-logs/buffer.js";
 import { TapManager } from "../device-logs/tap-manager.js";
 import { createDefaultSpawnAdapter } from "../device-logs/adapters/index.js";
 import {
-  DEVICE_LOGS_CAPABILITY_ID,
-  DEVICE_LOGS_CAPABILITY_READ_PERMISSION,
-  DEVICE_LOGS_METHOD_PERMISSIONS,
-  createDeviceLogsHostCapability,
-} from "../device-logs/host-capability.js";
-import {
   REDUX_CAPABILITY_ID,
   REDUX_CAPABILITY_READ_PERMISSION,
   REDUX_METHOD_PERMISSIONS,
@@ -715,7 +709,15 @@ function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry 
   );
   capabilities.register(
     METRO_LOGS_CAPABILITY_ID,
-    createMetroLogsHostCapability(deps.metroLogsStore, deps.worktreeKey),
+    // Folded: metro-logs now owns the native-tap surface that used to
+    // live on its own `device-logs` capability/module. Same panel, same
+    // tooling, opt-in tap controls.
+    createMetroLogsHostCapability(
+      deps.metroLogsStore,
+      deps.worktreeKey,
+      deps.deviceLogsStore,
+      deps.deviceLogsTapManager,
+    ),
     {
       requiredPermission: METRO_LOGS_CAPABILITY_READ_PERMISSION,
       methodPermissions: METRO_LOGS_METHOD_PERMISSIONS,
@@ -727,14 +729,6 @@ function registerHostCapabilities(deps: HostCapabilityDeps): CapabilityRegistry 
     {
       requiredPermission: REDUX_CAPABILITY_READ_PERMISSION,
       methodPermissions: REDUX_METHOD_PERMISSIONS,
-    },
-  );
-  capabilities.register(
-    DEVICE_LOGS_CAPABILITY_ID,
-    createDeviceLogsHostCapability(deps.deviceLogsStore, deps.deviceLogsTapManager),
-    {
-      requiredPermission: DEVICE_LOGS_CAPABILITY_READ_PERMISSION,
-      methodPermissions: DEVICE_LOGS_METHOD_PERMISSIONS,
     },
   );
   return capabilities;

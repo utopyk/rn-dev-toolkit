@@ -258,16 +258,82 @@
       .filter-row { display: flex; gap: 8px; align-items: stretch; margin-bottom: 10px; }
       .filter-row .cf { flex: 1; min-width: 0; }
       .filter-row .cf-count { padding: 0 4px; align-self: center; min-width: 120px; text-align: right; }
+
+      /* tap controls — folded from the deleted device-logs panel. Same
+         shape: pick platform + device id + optional bundle/package,
+         optional Simulator toggle (iOS), Start button. The daemon
+         spawns idevicesyslog / simctl / adb logcat. */
+      .taps-row {
+        display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+        padding: 8px 12px; margin-bottom: 10px;
+        background: var(--bg-soft);
+        border: 1px solid var(--surface-hi);
+        border-radius: 8px;
+        font-size: 11.5px;
+        color: var(--muted);
+      }
+      .taps-row label { color: var(--muted-2); font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; }
+      .taps-row select, .taps-row input[type="text"] {
+        background: var(--bg);
+        color: var(--ink);
+        border: 1px solid var(--surface-hi);
+        border-radius: 6px;
+        padding: 3px 7px;
+        font-size: 11.5px;
+        font-family: inherit;
+      }
+      .taps-row select:focus, .taps-row input[type="text"]:focus { border-color: var(--glow); outline: none; }
+      .taps-row .tap-chip {
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 2px 8px; border-radius: 999px;
+        background: var(--surface); color: var(--ink-soft);
+        font-size: 11px;
+      }
+      .taps-row .tap-chip.running { background: rgba(52,211,153,0.12); color: var(--ready); }
+      .taps-row .tap-chip.error { background: rgba(248,113,113,0.12); color: var(--error); }
+      .taps-row .tap-chip button {
+        background: transparent; border: none; color: inherit;
+        cursor: pointer; padding: 0 2px; font-size: 14px; opacity: 0.6;
+      }
+      .taps-row .tap-chip button:hover { opacity: 1; }
+      .tap-error-banner {
+        margin-top: 4px;
+        padding: 5px 10px;
+        background: rgba(248,113,113,0.06);
+        border: 1px solid rgba(248,113,113,0.25);
+        color: var(--error);
+        border-radius: 6px;
+        font-size: 11px;
+        flex-basis: 100%;
+      }
+      .source-ios { color: var(--glow); }
+      .source-android { color: var(--ready); }
+      .source-metro { color: var(--ink); }
+      .device-id-cell { color: var(--muted); font-size: 10px; padding-right: 8px; user-select: none; }
     </style>
   </head>
   <body>
     <div class="bar">
-      <h1>Metro Logs</h1>
+      <h1>App Logs</h1>
       <div class="bar-right">
-        <select id="stream">
-          <option value="">All streams</option>
+        <select id="source">
+          <option value="">All sources</option>
+          <option value="metro">Metro (JS)</option>
+          <option value="ios">iOS native</option>
+          <option value="android">Android native</option>
+        </select>
+        <select id="stream" title="Metro stream filter (only applies when source = Metro)">
+          <option value="">stdout + stderr</option>
           <option value="stdout">stdout</option>
           <option value="stderr">stderr</option>
+        </select>
+        <select id="level" title="Native log-level filter (only applies to ios/android sources)">
+          <option value="">All levels</option>
+          <option value="debug">≥ debug</option>
+          <option value="info">≥ info</option>
+          <option value="warn">≥ warn</option>
+          <option value="error">≥ error</option>
+          <option value="fault">fault only</option>
         </select>
         <label class="toggle">
           <input id="follow" type="checkbox" checked />
@@ -277,6 +343,18 @@
         <button id="clear">Clear</button>
         <button id="refresh">Refresh</button>
       </div>
+    </div>
+    <div id="taps" class="taps-row">
+      <label>Native tap</label>
+      <select id="tap-platform">
+        <option value="android">Android</option>
+        <option value="ios">iOS</option>
+      </select>
+      <input id="tap-device" type="text" placeholder="device id / serial" />
+      <input id="tap-package" type="text" placeholder="package / bundle id (optional)" />
+      <label class="toggle"><input id="tap-simulator" type="checkbox" /> Simulator</label>
+      <button id="tap-start" type="button">Start tap</button>
+      <span id="tap-active" class="tap-active"></span>
     </div>
     <div class="filter-row">
       <div id="filter" class="cf"></div>

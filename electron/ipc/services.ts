@@ -34,6 +34,11 @@ import { getCurrentBranch } from '../../src/core/project.js';
 import { listDevices } from '../../src/core/device.js';
 import { detectAllPackageManagers, detectPackageManager } from '../../src/core/clean.js';
 import { connectElectronToDaemon } from '../daemon-connect.js';
+import {
+  attachAgentSessionAsObserver,
+  findRunnableSessionForProfile,
+  peekDaemonSessions,
+} from './sessions.js';
 import { serviceBus } from '../../src/app/service-bus.js';
 import { triggerBuildsIfNeeded } from '../../src/app/auto-build.js';
 import type { DaemonSession } from '../../src/app/client/session.js';
@@ -514,6 +519,23 @@ export async function startRealServices(
   if (!defaultProfile) {
     // Renderer will show the wizard; no session yet.
     return null;
+  }
+
+  // Short-circuit: if an agent / MCP client already booted a session for
+  // this default profile, attach as a read-only observer (🤖 tab) and
+  // skip the primary-tab boot entirely. Without this, the GUI's own
+  // `attachDaemonSession(profile)` AND the `SessionsWatcher`'s
+  // independent observer attach both create tabs against the same one
+  // session, producing the "two tabs at 8090" duplicate.
+  const peeked = await peekDaemonSessions(targetProjectRoot);
+  if (peeked) {
+    const match = findRunnableSessionForProfile(peeked, defaultProfile.name);
+    if (match) {
+      const record = await attachAgentSessionAsObserver(targetProjectRoot, match);
+      if (record) return record.daemonSession;
+      // Attach failed (race: the session may have just vanished). Fall
+      // through to the normal boot path and let it create a fresh one.
+    }
   }
 
   const worktreePath = defaultProfile.worktree ?? null;

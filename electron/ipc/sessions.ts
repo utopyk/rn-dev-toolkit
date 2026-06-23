@@ -106,11 +106,143 @@ export function planSessionReconcile(
   return { toObserve, toTeardown, dropped };
 }
 
+/**
+ * Pure helper — does the daemon's session list have a non-terminal session
+ * for `profileName`? Used by `startRealServices` to short-circuit the
+ * primary-tab boot when an agent (or any other client) already booted
+ * this profile's session: without it, the GUI's own attach AND the
+ * `SessionsWatcher`'s independent observer attach would both surface
+ * tabs for the same one session.
+ */
+export function findRunnableSessionForProfile(
+  listed: readonly ListedSession[],
+  profileName: string,
+): ListedSession | null {
+  for (const s of listed) {
+    if (s.profileName !== profileName) continue;
+    if (s.status === 'stopped' || s.status === 'stopping') continue;
+    return s;
+  }
+  return null;
+}
+
 /** Resolve the daemon socket path, honoring the RN_DEV_DAEMON_SOCK hook. */
 function resolveSockPath(projectRoot: string): string {
   const envSock = process.env.RN_DEV_DAEMON_SOCK;
   if (typeof envSock === 'string' && envSock.length > 0) return envSock;
   return join(resolve(projectRoot), '.rn-dev', 'sock');
+}
+
+/**
+ * One-shot peek at the daemon's session list. Returns `null` when no
+ * daemon is alive (the GUI's startup race) or when the request errors.
+ * Caller filters by profile name via `findRunnableSessionForProfile`.
+ */
+export async function peekDaemonSessions(
+  projectRoot: string,
+): Promise<ListedSession[] | null> {
+  const sockPath = resolveSockPath(projectRoot);
+  if (!(await isDaemonAlive(sockPath))) return null;
+  try {
+    const client = new IpcClient(sockPath);
+    const resp = await client.send({
+      type: 'command',
+      action: 'sessions/list',
+      id: `gui-peek-${Date.now()}`,
+    });
+    return parseSessionsList(resp.payload);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Module-level guard so the `SessionsWatcher.tick` and `startRealServices`
+ * code paths can't race two `attachAgentSessionAsObserver` calls for the
+ * SAME sessionId. `state.sessions` is updated synchronously inside
+ * `attachDaemonSession` AFTER its async daemon handshake — so checking
+ * the map alone leaves a window where two awaited attaches can both
+ * proceed and create duplicate observer tabs.
+ */
+const pendingObserves = new Set<SessionId>();
+
+/**
+ * Attach to an existing agent/MCP session as a read-only observer
+ * (🤖 tab). Shared by `SessionsWatcher.tick` (poll path) and
+ * `startRealServices` (boot-time short-circuit when an agent session
+ * already exists for the GUI's default profile). Idempotent: returns
+ * `null` if the session is already observed or its attach is mid-flight.
+ *
+ * The daemon uses non-counting observer attach (see `observerConnections`
+ * in src/daemon/supervisor.ts), so the GUI never keeps the session alive.
+ */
+export async function attachAgentSessionAsObserver(
+  projectRoot: string,
+  listed: ListedSession,
+): Promise<SessionRecord | null> {
+  if (state.sessions.has(listed.sessionId)) return null;
+  if (pendingObserves.has(listed.sessionId)) return null;
+  pendingObserves.add(listed.sessionId);
+  const instanceId = `agent-${listed.sessionId.slice(0, 8)}`;
+  try {
+    const record = await attachDaemonSession({
+      projectRoot,
+      instanceId,
+      observe: {
+        sessionId: listed.sessionId,
+        worktreeKeyHint: listed.worktreeKey,
+      },
+    });
+
+    // Derive the Metro port — sessions/list doesn't carry it, but the
+    // attached session's metro adapter does. Port stays 0 if the agent
+    // session hasn't published a Metro instance yet (DevToolsView then
+    // shows its "connecting" state until a later observe re-runs).
+    let port = 0;
+    let metroStatus = listed.status;
+    try {
+      const inst = await record.daemonSession.metro.getInstance();
+      if (inst) {
+        port = inst.port;
+        metroStatus = inst.status;
+      }
+    } catch {
+      /* leave port 0 — non-fatal */
+    }
+
+    const worktreeName = listed.profileName ?? 'agent';
+    const instance: InstanceState = {
+      id: instanceId,
+      worktree: null,
+      worktreeName,
+      branch: listed.profileName ?? '·',
+      port,
+      deviceId: null,
+      deviceName: 'agent session',
+      deviceIcon: '🤖',
+      platform: 'both',
+      mode: 'quick',
+      serviceLog: [],
+      metroLog: [],
+      metroStatus,
+      observed: true,
+    };
+    instances.set(instanceId, instance);
+    send('instance:created', toSummary(instance));
+    send('instance:log', {
+      instanceId,
+      text: `👁 Observing agent session ${listed.sessionId.slice(0, 8)} (read-only).`,
+    });
+    wireInstanceEvents(instance, record.daemonSession);
+    return record;
+  } catch {
+    // E_UNKNOWN_SESSION (session vanished mid-poll), boot failed, or the
+    // attach watchdog tripped — all normal races. No tab was created
+    // yet; skip quietly and let the next tick retry if it reappears.
+    return null;
+  } finally {
+    pendingObserves.delete(listed.sessionId);
+  }
 }
 
 function parseSessionsList(payload: unknown): ListedSession[] {
@@ -220,60 +352,8 @@ export class SessionsWatcher {
 
   private async observe(s: ListedSession, projectRoot: string): Promise<void> {
     this.observingInFlight.add(s.sessionId);
-    const instanceId = `agent-${s.sessionId.slice(0, 8)}`;
     try {
-      const record = await attachDaemonSession({
-        projectRoot,
-        instanceId,
-        observe: { sessionId: s.sessionId, worktreeKeyHint: s.worktreeKey },
-      });
-
-      // Derive the Metro port — sessions/list doesn't carry it, but the
-      // attached session's metro adapter does. Port stays 0 if the agent
-      // session hasn't published a Metro instance yet (DevToolsView then
-      // shows its "connecting" state until a later observe re-runs).
-      let port = 0;
-      let metroStatus = s.status;
-      try {
-        const inst = await record.daemonSession.metro.getInstance();
-        if (inst) {
-          port = inst.port;
-          metroStatus = inst.status;
-        }
-      } catch {
-        /* leave port 0 — non-fatal */
-      }
-
-      const worktreeName = s.profileName ?? 'agent';
-      const instance: InstanceState = {
-        id: instanceId,
-        worktree: null,
-        worktreeName,
-        branch: s.profileName ?? '·',
-        port,
-        deviceId: null,
-        deviceName: 'agent session',
-        deviceIcon: '🤖',
-        platform: 'both',
-        mode: 'quick',
-        serviceLog: [],
-        metroLog: [],
-        metroStatus,
-        observed: true,
-      };
-      instances.set(instanceId, instance);
-      send('instance:created', toSummary(instance));
-      send('instance:log', {
-        instanceId,
-        text: `👁 Observing agent session ${s.sessionId.slice(0, 8)} (read-only).`,
-      });
-      // Forward this session's metro/build/lifecycle events to the
-      // renderer's instance:* channels — same as a GUI-owned tab.
-      wireInstanceEvents(instance, record.daemonSession);
-    } catch {
-      // E_UNKNOWN_SESSION (session vanished mid-poll), boot failed, or the
-      // attach watchdog tripped — all normal races. No tab was created
-      // yet; skip quietly and let the next tick retry if it reappears.
+      await attachAgentSessionAsObserver(projectRoot, s);
     } finally {
       this.observingInFlight.delete(s.sessionId);
     }

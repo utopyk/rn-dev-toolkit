@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { asSessionId, type SessionId } from '../../../src/core/identifiers.js';
-import { planSessionReconcile, type ListedSession } from '../sessions.js';
+import {
+  findRunnableSessionForProfile,
+  planSessionReconcile,
+  type ListedSession,
+} from '../sessions.js';
 
 // Unit coverage of the SessionsWatcher's pure reconcile planner — the
 // part that carries every edge case (classification of external vs own
@@ -147,5 +151,71 @@ describe('planSessionReconcile', () => {
     });
     expect(plan.toTeardown).toEqual([sid('s-gone')]);
     expect(plan.toObserve.map((s) => s.sessionId)).toEqual([sid('s-new')]);
+  });
+});
+
+describe('findRunnableSessionForProfile', () => {
+  // Powers the `startRealServices` short-circuit that prevents the
+  // duplicate "GUI primary tab + agent observer tab" against the same
+  // session — the bug a user surfaced when the GUI rendered two tabs on
+  // port 8090 after the agent booted its default-profile session via MCP.
+
+  it('returns the running session that matches the profile name', () => {
+    const found = findRunnableSessionForProfile(
+      [
+        listed('s-other', 'running', 'ios-sim'),
+        listed('s-match', 'running', 'android-emu-5554'),
+      ],
+      'android-emu-5554',
+    );
+    expect(found?.sessionId).toBe(sid('s-match'));
+  });
+
+  it('returns null when no session has that profile name', () => {
+    const found = findRunnableSessionForProfile(
+      [listed('s-1', 'running', 'ios-sim')],
+      'android-emu-5554',
+    );
+    expect(found).toBeNull();
+  });
+
+  it('returns null when an empty list is passed', () => {
+    expect(findRunnableSessionForProfile([], 'android-emu-5554')).toBeNull();
+  });
+
+  it('skips stopped/stopping sessions even when the profile matches', () => {
+    const found = findRunnableSessionForProfile(
+      [
+        listed('s-dead', 'stopped', 'android-emu-5554'),
+        listed('s-leaving', 'stopping', 'android-emu-5554'),
+      ],
+      'android-emu-5554',
+    );
+    expect(found).toBeNull();
+  });
+
+  it('accepts non-terminal statuses (starting, running) without restricting to "running"', () => {
+    // The daemon emits `starting` for a session that has booted but whose
+    // services are still warming up. We should still treat it as a match,
+    // not race the GUI into creating a primary tab while it boots.
+    const found = findRunnableSessionForProfile(
+      [listed('s-warm', 'starting', 'android-emu-5554')],
+      'android-emu-5554',
+    );
+    expect(found?.sessionId).toBe(sid('s-warm'));
+  });
+
+  it('returns the first matching session when several share the profile name', () => {
+    // Multi-session for the same profile is allowed by the daemon. The
+    // short-circuit picks the first non-terminal one — the sessionsWatcher
+    // surfaces the rest as their own 🤖 tabs on later ticks.
+    const found = findRunnableSessionForProfile(
+      [
+        listed('s-1', 'running', 'android-emu-5554'),
+        listed('s-2', 'running', 'android-emu-5554'),
+      ],
+      'android-emu-5554',
+    );
+    expect(found?.sessionId).toBe(sid('s-1'));
   });
 });

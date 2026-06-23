@@ -37,10 +37,18 @@ interface ModulePanelListEntry {
 // arrays + DOM from growing without limit during long sessions.
 const MAX_LOG_LINES = 1000;
 
-// Keyboard shortcuts that drive a *mutating* action on the active
-// session. Suppressed when the active tab is a read-only observe tab so
-// a human watching an agent can't reload/clean/toggle the agent's app.
-const MUTATING_SHORTCUTS = new Set(['r', 'd', 'l', 't', 'c', 'w']);
+// Keyboard shortcuts suppressed on a read-only observe tab. Reload
+// (`r`) and dev menu (`d`) are deliberately excluded — they're benign
+// signals to the app (reload re-fetches the bundle from Metro, devMenu
+// toggles the on-device dev overlay) and don't change anything daemon-
+// side. A human collaborating with an agent through the observer tab
+// routinely needs them (reload after the agent rebuilds; iterate on a
+// fix the agent shipped to the vendored bundle). The remaining four
+// genuinely mutate the agent's session — lint/typecheck run daemon-
+// side processes that pipe into the observer's log buffer (confusing
+// because the human, not the agent, kicked them off); clean tears down
+// state; watcher toggle changes daemon file-watch state.
+const MUTATING_SHORTCUTS = new Set(['l', 't', 'c', 'w']);
 
 function makeEmptyLogs(): InstanceLogs {
   return { serviceLines: [], metroLines: [], sections: [] };

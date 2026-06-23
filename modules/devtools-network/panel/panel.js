@@ -907,6 +907,38 @@ function stopPolling() {
 
 refreshBtn.addEventListener("click", () => refresh({ force: true }));
 clearBtn.addEventListener("click", doClear);
+
+// Coverage banner — informs the user that JS-layer-only capture
+// doesn't include NSURLSession/OkHttp/Firebase/Sentry/image-loader/
+// etc. traffic, and offers a (currently-disabled) "Enable native
+// capture" toggle that's wired up to be flipped on when the future
+// `@rn-dev/native-net-tap` opt-in module ships.
+//
+// Persistence: keep the dismissal in sessionStorage so it survives a
+// soft reload of the panel but comes back next time the panel is
+// mounted fresh.
+const coverageBanner = document.getElementById("coverage-banner");
+const coverageDismiss = document.getElementById("coverage-dismiss");
+const coverageNativeBtn = document.getElementById("coverage-native-btn");
+if (coverageBanner && coverageDismiss) {
+  const KEY = "rndev.network.coverage-dismissed";
+  try {
+    if (window.sessionStorage?.getItem(KEY) === "1") coverageBanner.hidden = true;
+  } catch { /* sessionStorage unavailable — keep banner visible */ }
+  coverageDismiss.addEventListener("click", () => {
+    coverageBanner.hidden = true;
+    try { window.sessionStorage?.setItem(KEY, "1"); } catch { /* ignore */ }
+  });
+}
+if (coverageNativeBtn) {
+  // The button is disabled today (no native module to enable). Clicks
+  // surface the same hint the title attr shows, in case the user
+  // doesn't hover. Future work: detect the @rn-dev/native-net-tap
+  // module and flip this on/off based on its install state.
+  coverageNativeBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+  });
+}
 followEl.addEventListener("change", () => {
   if (followEl.checked) {
     const wrap = contentEl.querySelector(".table-wrap");

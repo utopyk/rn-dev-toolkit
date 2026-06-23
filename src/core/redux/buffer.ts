@@ -100,6 +100,55 @@ function capState(value: unknown): { value: unknown; truncated: boolean; truncat
   return { value: out, truncated: truncatedSlices > 0, truncatedSlices };
 }
 
+/**
+ * Cap a redux DIFF value with per-entry granularity.
+ *
+ * Why this exists: the diff is an array of `{ path, op, before, after }`
+ * where `before` and `after` carry the FULL slice references. A single
+ * action that mutates a ~290 KB slice has a diff entry holding ~580 KB
+ * (before + after). Using `capValue` wholesale replaces the entire diff
+ * array with the string `<oversized:Nbytes>` — the panel checks
+ * `Array.isArray(diff)` and falls through to "No state changes for this
+ * action," losing every smaller change in the same dispatch.
+ *
+ * Strategy mirrors `capState`: if the whole array fits, keep it raw.
+ * Otherwise cap each entry's `before` / `after` independently so the
+ * array shape (path + op) survives. The panel renders the placeholder
+ * string in the leaf cell, which is the same UX the State tab already
+ * gives for oversized slices.
+ */
+function capDiff(value: unknown): { value: unknown; truncated: boolean; truncatedEntries: number } {
+  const whole = capValue(value);
+  if (!whole.truncated) return { value: whole.value, truncated: false, truncatedEntries: 0 };
+  if (!Array.isArray(value)) {
+    return { value: whole.value, truncated: true, truncatedEntries: 1 };
+  }
+  const out: unknown[] = [];
+  let truncatedEntries = 0;
+  for (const entry of value) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      out.push(entry);
+      continue;
+    }
+    const e = entry as Record<string, unknown>;
+    const capped: Record<string, unknown> = { ...e };
+    let entryTruncated = false;
+    if ("before" in e) {
+      const c = capValue(e.before);
+      capped.before = c.value;
+      if (c.truncated) entryTruncated = true;
+    }
+    if ("after" in e) {
+      const c = capValue(e.after);
+      capped.after = c.value;
+      if (c.truncated) entryTruncated = true;
+    }
+    if (entryTruncated) truncatedEntries++;
+    out.push(capped);
+  }
+  return { value: out, truncated: truncatedEntries > 0, truncatedEntries };
+}
+
 /** Navigate a dot/bracket path (`a.b[0].c`) into a value tree. */
 export function navigatePath(root: unknown, path: string): { value: unknown; present: boolean } {
   if (path === "") return { value: root, present: true };
@@ -142,9 +191,15 @@ export class ReduxStore {
     const ring = this.ensureRing(sessionKey);
 
     const cappedPayload = capValue(frame.payload);
-    const cappedDiff = capValue(frame.diff);
+    // Per-entry cap (see `capDiff`). A diff entry's before/after carry
+    // the full slice refs; one oversized slice would replace the entire
+    // array with a string under wholesale `capValue` and the panel
+    // would render "No state changes" for an action that DID change
+    // state. Each entry's path + op survives so the panel still shows
+    // the structural change with a placeholder leaf where needed.
+    const cappedDiff = capDiff(frame.diff);
     if (cappedPayload.truncated) ring.truncatedCount++;
-    if (cappedDiff.truncated) ring.truncatedCount++;
+    if (cappedDiff.truncated) ring.truncatedCount += cappedDiff.truncatedEntries;
 
     const record: ReduxActionRecord = {
       sequence: ring.nextSequence++,

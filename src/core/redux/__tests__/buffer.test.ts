@@ -200,6 +200,61 @@ describe("ReduxStore — size caps + isolation", () => {
     store.append(S, { type: "BIG", stateAfter: "x".repeat(MAX_VALUE_BYTES + 10) });
     expect(String(store.getState(S).value)).toMatch(/^<oversized:\d+bytes>$/);
   });
+
+  it("when a diff entry's before/after is oversized, only THAT entry's values get the marker — array shape survives", () => {
+    // Regression: acme's `roDetail/fetchRepairOrderDetail/fulfilled`
+    // action had a diff entry whose `before`+`after` pair was ~580 KB
+    // (the slice itself ran ~290 KB). Wholesale `capValue(frame.diff)`
+    // replaced the whole array with `<oversized:Nbytes>` (a STRING),
+    // the panel's `Array.isArray(diff)` check fell through, and it
+    // rendered "No state changes for this action" — confusing the user
+    // about whether the action did anything. Per-entry cap keeps the
+    // array intact so path + op still render.
+    const store = new ReduxStore();
+    const fatSlice = "x".repeat(MAX_VALUE_BYTES + 10);
+    store.append(S, {
+      type: "roDetail/fetchRepairOrderDetail/fulfilled",
+      diff: [
+        { path: "roDetail", op: "replace", before: { id: "1" }, after: fatSlice },
+        { path: "ui", op: "replace", before: { theme: "dark" }, after: { theme: "light" } },
+      ],
+    });
+    const action = store.listActions(S).entries[0]!;
+    expect(Array.isArray(action.diff)).toBe(true);
+    const diff = action.diff as Array<Record<string, unknown>>;
+    expect(diff).toHaveLength(2);
+    // First entry: `after` was huge → only `after` becomes a marker
+    expect(diff[0]!.path).toBe("roDetail");
+    expect(diff[0]!.op).toBe("replace");
+    expect(diff[0]!.before).toEqual({ id: "1" });
+    expect(String(diff[0]!.after)).toMatch(/^<oversized:\d+bytes>$/);
+    // Second entry: both sides small → both stay raw
+    expect(diff[1]!.before).toEqual({ theme: "dark" });
+    expect(diff[1]!.after).toEqual({ theme: "light" });
+    // truncatedCount counts truncated diff ENTRIES
+    expect(store.listActions(S).meta.truncatedCount).toBe(1);
+  });
+
+  it("diff that fits as a whole is stored raw (per-entry cap is no-op)", () => {
+    const store = new ReduxStore();
+    store.append(S, {
+      type: "ui/setTheme",
+      diff: [{ path: "ui", op: "replace", before: { theme: "dark" }, after: { theme: "light" } }],
+    });
+    expect(store.listActions(S).entries[0]!.diff).toEqual([
+      { path: "ui", op: "replace", before: { theme: "dark" }, after: { theme: "light" } },
+    ]);
+    expect(store.listActions(S).meta.truncatedCount).toBe(0);
+  });
+
+  it("non-array oversized diff still gets the wholesale marker", () => {
+    // A diff that arrives as a non-array (an enhancer redactor that
+    // returned a string, say) has nothing to descend into and should
+    // surface the same wholesale marker `capValue` produces.
+    const store = new ReduxStore();
+    store.append(S, { type: "WEIRD", diff: "x".repeat(MAX_VALUE_BYTES + 10) });
+    expect(String(store.listActions(S).entries[0]!.diff)).toMatch(/^<oversized:\d+bytes>$/);
+  });
 });
 
 describe("navigatePath", () => {

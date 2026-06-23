@@ -64,6 +64,42 @@ function capValue(value: unknown): { value: unknown; truncated: boolean } {
   return { value, truncated: false };
 }
 
+/**
+ * Cap a redux STATE value with per-top-level-slice granularity.
+ *
+ * Why this exists: a real-world redux state tree commonly has 20-50
+ * top-level slices, and a single bloated slice (a normalized entities
+ * cache, an offline outbox, a captured-image buffer) blows past
+ * MAX_VALUE_BYTES on its own — even though every other slice is tiny.
+ * Using `capValue` wholesale replaces the ENTIRE state with one
+ * `<oversized:Nbytes>` marker, killing visibility into 49 healthy
+ * slices because of 1 fat one (the acme case: ~290 KB total state,
+ * the panel went dark).
+ *
+ * Strategy: if the whole thing fits, keep it raw. Otherwise drill in
+ * one level — cap each top-level slice independently and merge. Each
+ * oversized slice gets its own `<oversized:Nbytes>` marker; the rest
+ * remain navigable. `truncatedCount` counts how many slices were
+ * replaced this way.
+ */
+function capState(value: unknown): { value: unknown; truncated: boolean; truncatedSlices: number } {
+  const whole = capValue(value);
+  if (!whole.truncated) return { value: whole.value, truncated: false, truncatedSlices: 0 };
+  // Whole-state is oversized — try per-slice. Only meaningful for plain
+  // objects; arrays/primitives have nothing to descend into.
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return { value: whole.value, truncated: true, truncatedSlices: 1 };
+  }
+  const out: Record<string, unknown> = {};
+  let truncatedSlices = 0;
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    const c = capValue(v);
+    out[k] = c.value;
+    if (c.truncated) truncatedSlices++;
+  }
+  return { value: out, truncated: truncatedSlices > 0, truncatedSlices };
+}
+
 /** Navigate a dot/bracket path (`a.b[0].c`) into a value tree. */
 export function navigatePath(root: unknown, path: string): { value: unknown; present: boolean } {
   if (path === "") return { value: root, present: true };
@@ -125,8 +161,11 @@ export class ReduxStore {
     }
 
     if (frame.stateAfter !== undefined) {
-      const cappedState = capValue(frame.stateAfter);
-      if (cappedState.truncated) ring.truncatedCount++;
+      // Per-slice cap (see `capState`). When one top-level slice is huge
+      // (e.g. a normalized entities cache), only that slice is replaced
+      // with `<oversized:Nbytes>` — every other slice stays navigable.
+      const cappedState = capState(frame.stateAfter);
+      if (cappedState.truncated) ring.truncatedCount += cappedState.truncatedSlices;
       ring.latestState = cappedState.value;
       ring.hasState = true;
     }

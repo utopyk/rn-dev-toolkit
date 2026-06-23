@@ -156,6 +156,50 @@ describe("ReduxStore — size caps + isolation", () => {
     expect(store.size("b")).toBe(2);
     expect(store.listActions("a").entries.map((e) => e.type)).toEqual(["A"]);
   });
+
+  it("when whole state is oversized, only the oversized SLICES get the marker (per-slice cap)", () => {
+    // Regression: acme's redux state ran ~290 KB total. Wholesale
+    // capValue() replaced the entire tree with one marker, killing the
+    // panel's view of every other slice. Per-slice cap keeps small
+    // slices visible.
+    const store = new ReduxStore();
+    const fatSlice = "x".repeat(MAX_VALUE_BYTES + 10); // pushes total over cap
+    store.append(S, {
+      type: "INIT",
+      stateAfter: {
+        auth: { user: "u1" },          // small, must remain raw
+        ui: { theme: "dark" },         // small
+        entities: fatSlice,            // oversized → marker
+        flags: { beta: true },         // small
+      },
+    });
+    const stateAfter = store.getState(S).value as Record<string, unknown>;
+    expect(stateAfter.auth).toEqual({ user: "u1" });
+    expect(stateAfter.ui).toEqual({ theme: "dark" });
+    expect(stateAfter.flags).toEqual({ beta: true });
+    expect(String(stateAfter.entities)).toMatch(/^<oversized:\d+bytes>$/);
+    // truncatedCount tracks SLICES truncated for the state path
+    expect(store.listActions(S).meta.truncatedCount).toBe(1);
+  });
+
+  it("state that fits as a whole is stored raw (per-slice cap is no-op)", () => {
+    const store = new ReduxStore();
+    store.append(S, {
+      type: "INIT",
+      stateAfter: { auth: { user: "u1" }, ui: { theme: "dark" } },
+    });
+    const s = store.getState(S).value;
+    expect(s).toEqual({ auth: { user: "u1" }, ui: { theme: "dark" } });
+    expect(store.listActions(S).meta.truncatedCount).toBe(0);
+  });
+
+  it("non-object oversized state (huge string at root) still gets the wholesale marker", () => {
+    // Per-slice descent only makes sense for plain objects. An array
+    // or primitive that's oversized has nothing to drill into.
+    const store = new ReduxStore();
+    store.append(S, { type: "BIG", stateAfter: "x".repeat(MAX_VALUE_BYTES + 10) });
+    expect(String(store.getState(S).value)).toMatch(/^<oversized:\d+bytes>$/);
+  });
 });
 
 describe("navigatePath", () => {

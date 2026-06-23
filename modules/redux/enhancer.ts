@@ -25,9 +25,56 @@
 
 // MUST match src/core/redux/ingest.ts REDUX_INGEST_PORT_OFFSET.
 const REDUX_INGEST_PORT_OFFSET = 4000;
-const ENHANCER_VERSION = "0.1.0";
+const ENHANCER_VERSION = "0.1.1";
 const MAX_QUEUE = 200;
 const RECONNECT_MS = 3000;
+
+/**
+ * Safe JSON stringifier — handles values that vanilla JSON.stringify
+ * throws on (circular references, BigInt), and replaces common
+ * non-serializable runtime objects with a placeholder so a single
+ * dirty value can't silently lose every subsequent action frame.
+ *
+ * Why this exists: acme (and other apps) store live native objects
+ * in their redux state — a `socket: WebSocket` slice is the canonical
+ * case. After the first action that puts the live object in state,
+ * vanilla JSON.stringify throws "Converting circular structure to JSON"
+ * on every subsequent dispatch, the enhancer's send() catches and
+ * silently returns, and the panel goes dark with no signal. This
+ * stringifier guarantees the JSON serialization step never throws.
+ */
+function safeStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+  return JSON.stringify(value, (_key, v) => {
+    if (typeof v === "bigint") return v.toString() + "n";
+    if (typeof v === "function") return "[function]";
+    if (typeof v === "object" && v !== null) {
+      if (seen.has(v)) return "[circular]";
+      seen.add(v);
+      // Strip well-known non-plain native objects — replacing them with
+      // a recognizable placeholder keeps the rest of the state shape
+      // intact in the panel.
+      const ctor = (v as { constructor?: { name?: string } }).constructor?.name;
+      if (
+        ctor === "WebSocket" ||
+        ctor === "XMLHttpRequest" ||
+        ctor === "Headers" ||
+        ctor === "Request" ||
+        ctor === "Response" ||
+        ctor === "Blob" ||
+        ctor === "FormData" ||
+        ctor === "AbortController" ||
+        ctor === "AbortSignal"
+      ) {
+        return `<${ctor}>`;
+      }
+      if (v instanceof Error) return { __error: v.message, name: v.name };
+      if (typeof Map !== "undefined" && v instanceof Map) return Array.from(v.entries());
+      if (typeof Set !== "undefined" && v instanceof Set) return Array.from(v.values());
+    }
+    return v;
+  });
+}
 
 export interface ReduxEnhancerOptions {
   /** Full ws URL override. Else derived from the Metro scriptURL. */
@@ -134,8 +181,20 @@ export function rnDevReduxEnhancer(opts: ReduxEnhancerOptions = {}) {
       const send = (frame: unknown): void => {
         let text: string;
         try {
-          text = JSON.stringify(frame);
-        } catch {
+          // safeStringify never throws — handles circular refs, BigInt,
+          // and live native objects (WebSocket etc.) that would silently
+          // drop every action after the first time they enter state.
+          text = safeStringify(frame);
+        } catch (err) {
+          // Even with safeStringify this branch should be unreachable;
+          // we log it instead of silently swallowing so future
+          // serialization regressions are visible. RN's console.warn
+          // surfaces in Metro logs.
+          try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const g: any = globalThis;
+            g.console?.warn?.("[rn-dev redux enhancer] frame stringify failed:", String(err));
+          } catch { /* ignore */ }
           return;
         }
         if (open && ws) {

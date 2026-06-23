@@ -42,38 +42,63 @@ const RECONNECT_MS = 3000;
  * on every subsequent dispatch, the enhancer's send() catches and
  * silently returns, and the panel goes dark with no signal. This
  * stringifier guarantees the JSON serialization step never throws.
+ *
+ * Cycle detection is ANCESTOR-CHAIN-BASED (add on enter, remove on exit)
+ * — NOT a flat "every object I've ever seen" set. The shared-ref-as-
+ * cycle false positive is what made the panel show "[circular]" all
+ * over the diff: redux frames carry both `diff[*].before/after` and
+ * `stateAfter`, and the same slice object appears in both. A flat
+ * `WeakSet<object>` marks the second occurrence as circular even though
+ * sibling subtrees pointing at the same object form a DAG, not a cycle.
  */
 function safeStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
-  return JSON.stringify(value, (_key, v) => {
+  const ancestors = new WeakSet<object>();
+
+  function walk(v: unknown): unknown {
     if (typeof v === "bigint") return v.toString() + "n";
     if (typeof v === "function") return "[function]";
-    if (typeof v === "object" && v !== null) {
-      if (seen.has(v)) return "[circular]";
-      seen.add(v);
-      // Strip well-known non-plain native objects — replacing them with
-      // a recognizable placeholder keeps the rest of the state shape
-      // intact in the panel.
-      const ctor = (v as { constructor?: { name?: string } }).constructor?.name;
-      if (
-        ctor === "WebSocket" ||
-        ctor === "XMLHttpRequest" ||
-        ctor === "Headers" ||
-        ctor === "Request" ||
-        ctor === "Response" ||
-        ctor === "Blob" ||
-        ctor === "FormData" ||
-        ctor === "AbortController" ||
-        ctor === "AbortSignal"
-      ) {
-        return `<${ctor}>`;
-      }
-      if (v instanceof Error) return { __error: v.message, name: v.name };
-      if (typeof Map !== "undefined" && v instanceof Map) return Array.from(v.entries());
-      if (typeof Set !== "undefined" && v instanceof Set) return Array.from(v.values());
+    if (typeof v !== "object" || v === null) return v;
+    if (ancestors.has(v)) return "[circular]";
+    // Strip well-known non-plain native objects — replacing them with
+    // a recognizable string placeholder keeps the rest of the state
+    // shape intact in the panel without ever recursing into them.
+    const ctor = (v as { constructor?: { name?: string } }).constructor?.name;
+    if (
+      ctor === "WebSocket" ||
+      ctor === "XMLHttpRequest" ||
+      ctor === "Headers" ||
+      ctor === "Request" ||
+      ctor === "Response" ||
+      ctor === "Blob" ||
+      ctor === "FormData" ||
+      ctor === "AbortController" ||
+      ctor === "AbortSignal"
+    ) {
+      return `<${ctor}>`;
     }
-    return v;
-  });
+    if (v instanceof Error) return { __error: v.message, name: v.name };
+    ancestors.add(v);
+    try {
+      if (typeof Map !== "undefined" && v instanceof Map) {
+        return Array.from(v.entries()).map(([k, val]) => [walk(k), walk(val)]);
+      }
+      if (typeof Set !== "undefined" && v instanceof Set) {
+        return Array.from(v.values()).map((val) => walk(val));
+      }
+      if (Array.isArray(v)) {
+        return v.map((child) => walk(child));
+      }
+      const obj: Record<string, unknown> = {};
+      for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+        obj[k] = walk(val);
+      }
+      return obj;
+    } finally {
+      ancestors.delete(v);
+    }
+  }
+
+  return JSON.stringify(walk(value));
 }
 
 export interface ReduxEnhancerOptions {

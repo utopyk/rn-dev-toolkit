@@ -52,6 +52,61 @@ describe("rnDevReduxEnhancer — safeStringify keeps capture alive after live ob
     return { send: vi.fn(), close: vi.fn() };
   }
 
+  it("DAG references (shared between sibling subtrees) are NOT marked [circular]", () => {
+    // Regression: a flat WeakSet-based "seen" check treated a DAG as a
+    // cycle — a shared slice object referenced from BOTH `diff[*].after`
+    // AND `stateAfter` would serialize as `[circular]` on whichever
+    // branch was walked second. Result was the panel's Diff tab showing
+    // "[circular]" for healthy slices on every dispatch. Ancestor-chain
+    // tracking (add on enter, delete on exit) avoids the false positive.
+    const ws = mkFakeWebSocket();
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket = function FakeWS(_url: string) {
+      Object.assign(this as object, ws);
+      setTimeout(() => ws.onopen?.(), 0);
+      return ws;
+    } as unknown as never;
+
+    interface Slice { theme: string }
+    interface State { settings: Slice; mirror: Slice }
+    const shared: Slice = { theme: "dark" };
+    function reducer(state: State = { settings: shared, mirror: shared }, action: { type: string }): State {
+      if (action.type === "FLIP") {
+        const next = { theme: state.settings.theme === "dark" ? "light" : "dark" };
+        return { settings: next, mirror: next };
+      }
+      return state;
+    }
+    const createStore: (r: typeof reducer) => { dispatch: (a: { type: string }) => void; getState: () => State; subscribe: () => () => void } = (r) => {
+      let s = r(undefined as unknown as State, { type: "@@INIT" });
+      const listeners: Array<() => void> = [];
+      return {
+        dispatch: (a) => { s = r(s, a); listeners.forEach((l) => l()); },
+        getState: () => s,
+        subscribe: (l: () => void) => { listeners.push(l); return () => {}; },
+      };
+    };
+    const enhancer = rnDevReduxEnhancer({ url: "ws://test/" });
+    const enhanced = enhancer(createStore as unknown as never);
+    const store = enhanced(reducer);
+    store.dispatch({ type: "FLIP" });
+
+    return new Promise<void>((resolve) => {
+      setTimeout(() => {
+        const frames = ws.send.mock.calls.map((c) => c[0] as string);
+        const actionFrames = frames.filter((f) => f.includes("\"t\":\"action\""));
+        expect(actionFrames.length).toBeGreaterThan(0);
+        for (const frame of actionFrames) {
+          // Neither the diff entries nor stateAfter slices for a real
+          // DAG (same ref reached via two sibling paths) should serialize
+          // as "[circular]". They only would under the old flat-WeakSet
+          // implementation.
+          expect(frame).not.toContain("[circular]");
+        }
+        resolve();
+      }, 20);
+    });
+  });
+
   it("dispatches survive a circular state value (acme's WebSocket-in-state case)", () => {
     const ws = mkFakeWebSocket();
     // Stub global WebSocket and RN's scriptURL source so the enhancer

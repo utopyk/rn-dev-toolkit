@@ -157,14 +157,18 @@ export async function peekDaemonSessions(
 }
 
 /**
- * Module-level guard so the `SessionsWatcher.tick` and `startRealServices`
- * code paths can't race two `attachAgentSessionAsObserver` calls for the
- * SAME sessionId. `state.sessions` is updated synchronously inside
- * `attachDaemonSession` AFTER its async daemon handshake — so checking
- * the map alone leaves a window where two awaited attaches can both
- * proceed and create duplicate observer tabs.
+ * Module-level in-flight registry so the `SessionsWatcher.tick` and
+ * `startRealServices` code paths can't race two attaches for the same
+ * sessionId. `state.sessions` is updated synchronously inside
+ * `attachDaemonSession` AFTER its async daemon handshake — checking the
+ * map alone leaves a window where two awaited attaches both proceed.
+ * Using a Map (not a Set) lets a second caller AWAIT the in-flight
+ * attach's promise rather than bail with `null`: without this,
+ * `startRealServices` would see the watcher's attach in progress, return
+ * null, and fall through to the primary-tab boot path — re-introducing
+ * the duplicate this fix is meant to prevent.
  */
-const pendingObserves = new Set<SessionId>();
+const pendingObserves = new Map<SessionId, Promise<SessionRecord | null>>();
 
 /**
  * Attach to an existing agent/MCP session as a read-only observer
@@ -180,66 +184,82 @@ export async function attachAgentSessionAsObserver(
   projectRoot: string,
   listed: ListedSession,
 ): Promise<SessionRecord | null> {
-  if (state.sessions.has(listed.sessionId)) return null;
-  if (pendingObserves.has(listed.sessionId)) return null;
-  pendingObserves.add(listed.sessionId);
-  const instanceId = `agent-${listed.sessionId.slice(0, 8)}`;
-  try {
-    const record = await attachDaemonSession({
-      projectRoot,
-      instanceId,
-      observe: {
-        sessionId: listed.sessionId,
-        worktreeKeyHint: listed.worktreeKey,
-      },
-    });
+  // Already attached (the watcher tick beat us, or vice-versa). Return
+  // the live record so `startRealServices` can short-circuit on its
+  // existence rather than falling through and double-booting the same
+  // session as a primary tab.
+  const existing = state.sessions.get(listed.sessionId);
+  if (existing) return existing;
+  // Attach in flight by another caller — await its result instead of
+  // bailing with null. Returning null here would let `startRealServices`
+  // fall through to the primary-tab boot, re-introducing the duplicate.
+  const inFlight = pendingObserves.get(listed.sessionId);
+  if (inFlight) return inFlight;
 
-    // Derive the Metro port — sessions/list doesn't carry it, but the
-    // attached session's metro adapter does. Port stays 0 if the agent
-    // session hasn't published a Metro instance yet (DevToolsView then
-    // shows its "connecting" state until a later observe re-runs).
-    let port = 0;
-    let metroStatus = listed.status;
+  const promise = (async (): Promise<SessionRecord | null> => {
+    const instanceId = `agent-${listed.sessionId.slice(0, 8)}`;
     try {
-      const inst = await record.daemonSession.metro.getInstance();
-      if (inst) {
-        port = inst.port;
-        metroStatus = inst.status;
-      }
-    } catch {
-      /* leave port 0 — non-fatal */
-    }
+      const record = await attachDaemonSession({
+        projectRoot,
+        instanceId,
+        observe: {
+          sessionId: listed.sessionId,
+          worktreeKeyHint: listed.worktreeKey,
+        },
+      });
 
-    const worktreeName = listed.profileName ?? 'agent';
-    const instance: InstanceState = {
-      id: instanceId,
-      worktree: null,
-      worktreeName,
-      branch: listed.profileName ?? '·',
-      port,
-      deviceId: null,
-      deviceName: 'agent session',
-      deviceIcon: '🤖',
-      platform: 'both',
-      mode: 'quick',
-      serviceLog: [],
-      metroLog: [],
-      metroStatus,
-      observed: true,
-    };
-    instances.set(instanceId, instance);
-    send('instance:created', toSummary(instance));
-    send('instance:log', {
-      instanceId,
-      text: `👁 Observing agent session ${listed.sessionId.slice(0, 8)} (read-only).`,
-    });
-    wireInstanceEvents(instance, record.daemonSession);
-    return record;
-  } catch {
-    // E_UNKNOWN_SESSION (session vanished mid-poll), boot failed, or the
-    // attach watchdog tripped — all normal races. No tab was created
-    // yet; skip quietly and let the next tick retry if it reappears.
-    return null;
+      // Derive the Metro port — sessions/list doesn't carry it, but the
+      // attached session's metro adapter does. Port stays 0 if the agent
+      // session hasn't published a Metro instance yet (DevToolsView then
+      // shows its "connecting" state until a later observe re-runs).
+      let port = 0;
+      let metroStatus = listed.status;
+      try {
+        const inst = await record.daemonSession.metro.getInstance();
+        if (inst) {
+          port = inst.port;
+          metroStatus = inst.status;
+        }
+      } catch {
+        /* leave port 0 — non-fatal */
+      }
+
+      const worktreeName = listed.profileName ?? 'agent';
+      const instance: InstanceState = {
+        id: instanceId,
+        worktree: null,
+        worktreeName,
+        branch: listed.profileName ?? '·',
+        port,
+        deviceId: null,
+        deviceName: 'agent session',
+        deviceIcon: '🤖',
+        platform: 'both',
+        mode: 'quick',
+        serviceLog: [],
+        metroLog: [],
+        metroStatus,
+        observed: true,
+      };
+      instances.set(instanceId, instance);
+      send('instance:created', toSummary(instance));
+      send('instance:log', {
+        instanceId,
+        text: `👁 Observing agent session ${listed.sessionId.slice(0, 8)} (read-only).`,
+      });
+      wireInstanceEvents(instance, record.daemonSession);
+      return record;
+    } catch {
+      // E_UNKNOWN_SESSION (session vanished mid-poll), boot failed, or the
+      // attach watchdog tripped — all normal races. No tab was created
+      // yet; skip quietly and let the next tick retry if it reappears.
+      return null;
+    }
+  })();
+
+  pendingObserves.set(listed.sessionId, promise);
+  try {
+    return await promise;
   } finally {
     pendingObserves.delete(listed.sessionId);
   }

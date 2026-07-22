@@ -15,6 +15,7 @@
   ],
   "scripts": {
     "dev": "bun run src/index.tsx",
+    "setup": "bun scripts/setup.ts",
     "dev:renderer": "cd renderer && npx vite",
     "dev:electron": "electron electron/launcher.cjs",
     "dev:gui": "concurrently \"npm run dev:renderer\" \"npm run dev:electron\"",

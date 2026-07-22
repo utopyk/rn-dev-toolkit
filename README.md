@@ -5,6 +5,33 @@ manager, and an agent-native MCP server. Designed around the principle
 that any action a human can take (Electron GUI, Ink terminal), an agent
 can take too (MCP).
 
+## Setup (new machine)
+
+Prerequisites: [bun](https://bun.sh), Node ≥ 18, and whatever your RN app
+already needs (Xcode / Android SDK). Then:
+
+```bash
+git clone <this-repo> && cd rn-dev-cli
+bun scripts/setup.ts --app /path/to/your-rn-app
+```
+
+The script installs dependencies (root + renderer), builds the host and
+every shipped module, symlinks the modules into `~/.rn-dev/modules/` (the
+daemon's discovery directory), and registers the rn-dev MCP server for the
+given app repo in Claude Code (local scope). Pass `--app` once per
+app/worktree, or omit it to skip MCP registration. Safe to re-run any time —
+existing links and registrations are left alone.
+
+Afterwards:
+
+- GUI: `npm run dev:gui`
+- Verify modules load: `cd /path/to/your-rn-app && bun <this-repo>/dist/index.js module list`
+- Restart open Claude Code sessions in the app repo so they pick up the MCP server.
+
+Note: if your app repo pins a Node version via nodenv/asdf that doesn't have
+bun installed, use an absolute bun path when running commands from inside the
+app repo (the MCP registration already stores an absolute path).
+
 ## Modules
 
 Built-in modules ship with the host:

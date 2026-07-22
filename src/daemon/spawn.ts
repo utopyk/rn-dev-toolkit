@@ -286,13 +286,17 @@ function pickDaemonInterpreter(entry: string): string {
   const override = process.env.RN_DEV_DAEMON_INTERPRETER;
   if (override) return override;
   if (entry.endsWith(".tsx") || entry.endsWith(".ts")) return "bun";
-  // Compiled .js — process.execPath works UNLESS the parent is
-  // Electron (where execPath is the Electron binary). Detect Electron
-  // by sniffing for the electron-specific globals injected at boot.
+  // Compiled .js — the dist bundle targets bun (`build.ts` bundles with
+  // `target: "bun"`; OpenTUI's `bun:` imports make it fail under node
+  // with ERR_UNSUPPORTED_ESM_URL_SCHEME), so an Electron parent must
+  // spawn bun, not node. Detect Electron by sniffing for the
+  // electron-specific globals injected at boot. Non-Electron parents
+  // reaching here ARE bun running the bundle (MCP/CLI), so execPath is
+  // already the bun binary.
   const isElectron =
     typeof process.versions === "object" &&
     "electron" in (process.versions as Record<string, unknown>);
-  if (isElectron) return "node";
+  if (isElectron) return "bun";
   return process.execPath;
 }
 

@@ -30,6 +30,7 @@ import { registerProjectHandlers } from './project.js';
 import { registerWizardHandlers } from './wizard.js';
 import { registerDevtoolsHandlers } from './devtools.js';
 import { installPanelBridge } from '../panel-bridge-electron.js';
+import { electronAssetsDir } from '../paths.js';
 import { PanelSenderRegistry } from '../panel-sender-registry.js';
 import { createBoundsCache, type ModulesPanelsIpcDeps } from './modules-panels.js';
 import { registerModulesPanelsIpc } from './modules-panels-register.js';
@@ -313,7 +314,7 @@ function registerModulePanelsHandlers(window: BrowserWindow): void {
         );
       }
       if (!bridge) {
-        const preloadPath = path.join(__dirname, '..', 'preload-module.js');
+        const preloadPath = path.join(electronAssetsDir, 'preload-module.js');
         bridge = installPanelBridge({
           window,
           preloadPath,

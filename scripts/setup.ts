@@ -247,7 +247,8 @@ function main(): void {
   }
   console.log(`
 Next steps:
-  - Launch the GUI:            cd ${repoRoot} && npm run dev:gui
+  - Launch the GUI (dev):      cd ${repoRoot} && npm run dev:gui
+  - Build the desktop app:     cd ${repoRoot} && npm run build:app   (→ release/mac-arm64/rn-dev.app, drag to /Applications)
   - Verify modules load:       cd <your-app> && bun ${join(repoRoot, "dist/index.js")} module list
   - Restart any open Claude Code sessions in the app repo to pick up the MCP server.
 `);

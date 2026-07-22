@@ -1,0 +1,33 @@
+# Packaged Electron GUI. Inputs are produced by `bun run build.ts` (the
+# daemon/CLI bundle in dist/) and `bun run build.ts gui` (dist-electron/ +
+# dist-renderer/) — `npm run build:app` chains all three then packages.
+#
+# The app carries NO node_modules: the electron main is a single CJS
+# bundle with only `electron` external, and the renderer is a static
+# vite build. The daemon ships as an extraResource (outside the asar —
+# spawnDetachedDaemon must exec a real file with bun; see
+# electron/daemon-connect.ts resolveDaemonEntry).
+appId: dev.rn-dev.gui
+productName: rn-dev
+directories:
+  output: release
+files:
+  - dist-electron/**
+  - dist-renderer/**
+  - "!node_modules/**"
+extraResources:
+  - from: dist
+    to: daemon
+    filter:
+      - "**/*"
+      - "!*.map"
+      - "!rn-dev"
+asar: true
+npmRebuild: false
+mac:
+  # `dir` = unpacked .app in release/mac-arm64 — right for handing to a
+  # couple of teammates (zip it yourself). No signing identity: ad-hoc
+  # signature only, receivers right-click → Open once.
+  target: dir
+  identity: null
+  category: public.app-category.developer-tools

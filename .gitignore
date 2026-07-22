@@ -11,3 +11,5 @@ renderer/bun.lock
 # Module-host runtime lockfiles (acquired-by-pid markers)
 modules/*/.lock
 
+dist-electron/
+release/

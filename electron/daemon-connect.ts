@@ -45,15 +45,20 @@ import type { SessionId } from "../src/core/identifiers.js";
  * client became the only path. Probe both, fail loudly only after
  * neither resolves.
  *
- * Packaged Electron (`app.isPackaged`) still throws — installer
- * work in Phase 13.5 wires the asar layout.
+ * Packaged Electron (`app.isPackaged`): the CLI bundle ships as an
+ * extraResource at `<resources>/daemon/index.js` (electron-builder.yml
+ * copies `dist/` there — asar is skipped so `spawnDetachedDaemon` can
+ * exec a real file). The bundle targets bun, so the spawn side picks
+ * bun as the interpreter — see `pickDaemonInterpreter`.
  */
 function resolveDaemonEntry(): string {
   if (app.isPackaged) {
+    const packaged = path.join(process.resourcesPath, "daemon", "index.js");
+    if (existsSync(packaged)) return packaged;
     throw new Error(
-      "resolveDaemonEntry: packaged Electron is not supported yet. " +
-        "Run via `bun run electron` / `npm run dev:gui` until the " +
-        "packaged-build daemon entry is wired in Phase 13.5.",
+      `resolveDaemonEntry: packaged daemon bundle missing at ${packaged} ` +
+        "(broken build — electron-builder.yml should ship dist/ as the " +
+        "daemon extraResource).",
     );
   }
   const here = path.dirname(fileURLToPath(import.meta.url));

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "React Native developer CLI with TUI, profile system, and metro manager",
   "type": "module",
+  "main": "dist-electron/main.cjs",
   "bin": {
     "rn-dev": "./dist/index.js"
   },
@@ -22,6 +23,8 @@
     "build": "bun run build.ts",
     "build:compile": "bun run build.ts compile",
     "build:renderer": "cd renderer && npx vite build",
+    "build:gui": "bun run build.ts gui",
+    "build:app": "bun run build.ts && bun run build.ts gui && npx electron-builder",
     "build:electron": "npx electron-builder",
     "test": "vitest run",
     "test:watch": "vitest",

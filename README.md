@@ -24,7 +24,10 @@ existing links and registrations are left alone.
 
 Afterwards:
 
-- GUI: `npm run dev:gui`
+- GUI (dev, hot-reload): `npm run dev:gui`
+- Desktop app: `npm run build:app` → `release/mac-arm64/rn-dev.app`; drag it
+  to /Applications. It opens straight into your last project (or the
+  project picker) and cold-spawns the daemon itself — no terminal needed.
 - Verify modules load: `cd /path/to/your-rn-app && bun <this-repo>/dist/index.js module list`
 - Restart open Claude Code sessions in the app repo so they pick up the MCP server.
 

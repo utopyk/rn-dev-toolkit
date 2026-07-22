@@ -8,6 +8,7 @@ import { state } from './ipc/state.js';
 import { detectProjectRoot } from '../src/core/project.js';
 import { getLastProject } from '../src/core/recent-projects.js';
 import { serviceBus } from '../src/app/service-bus.js';
+import { electronAssetsDir, packagedRendererIndex } from './paths.js';
 
 const isDev = !app.isPackaged;
 
@@ -95,7 +96,7 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       webviewTag: true,  // Enable <webview> for DevTools
-      preload: path.join(__dirname, '..', 'electron', 'preload.cjs'),
+      preload: path.join(electronAssetsDir, 'preload.cjs'),
     },
   });
 
@@ -105,7 +106,7 @@ async function createWindow() {
     console.log(`[electron] Loading Vite dev server on port ${vitePort}`);
     mainWindow.loadURL(`http://localhost:${vitePort}`);
   } else {
-    mainWindow.loadFile(path.join(__dirname, '..', 'dist-renderer', 'index.html'));
+    mainWindow.loadFile(packagedRendererIndex);
   }
 
   mainWindow.on('closed', () => {

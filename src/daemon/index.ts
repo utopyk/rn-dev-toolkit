@@ -619,7 +619,7 @@ function handleSessionStatus(
         id: event.message.id,
         payload: {
           code: "E_UNKNOWN_SESSION",
-          message: `session ${sid} not found`,
+          message: `session ${sid} not found — ${describeLiveSessions(supervisor)}`,
         },
       });
       return;
@@ -707,6 +707,24 @@ function handleSessionsList(
  */
 function activeSessions(supervisor: DaemonSupervisor): readonly SessionEntry[] {
   return supervisor.listSessions().filter((e) => e.state.status !== "stopped");
+}
+
+/**
+ * Human/agent-readable summary of the live session table for
+ * unknown-session errors. Bare "session X not found" made agents invent
+ * theories ("the daemon is cold-spawn-looping") instead of seeing the
+ * obvious: which sessions ARE live and what they're for. Transient
+ * boot-attempt entries also show up here with their status, so a churn
+ * of failed port-conflict boots reads as what it is.
+ */
+function describeLiveSessions(supervisor: DaemonSupervisor): string {
+  const active = activeSessions(supervisor);
+  if (active.length === 0) return "no live sessions on this daemon";
+  const rows = active.map(
+    (e) =>
+      `${e.sessionId} (profile "${e.activeProfile.name}", status ${e.state.status})`,
+  );
+  return `live sessions: ${rows.join("; ")}`;
 }
 
 /**
@@ -856,7 +874,7 @@ async function handleEventsSubscribe(
     if (!entry) {
       rejectAndCleanup(
         "E_UNKNOWN_SESSION",
-        `session ${input.sessionId} not found`,
+        `session ${input.sessionId} not found — ${describeLiveSessions(supervisor)}`,
       );
       return;
     }

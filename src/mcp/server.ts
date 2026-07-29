@@ -20,6 +20,12 @@ import { ProfileStore } from "../core/profile.js";
 import { ArtifactStore } from "../core/artifact.js";
 import { createDefaultPreflightEngine } from "../core/preflight.js";
 import { connectToDaemonSession } from "../app/client/session.js";
+import {
+  DEFAULT_IDLE_RELEASE_MS,
+  IDLE_CHECK_INTERVAL_MS,
+  IdleTracker,
+  resolveIdleReleaseMs,
+} from "./idle-release.js";
 import { type SessionId } from "../core/identifiers.js";
 import { detectProjectRoot } from "../core/project.js";
 
@@ -161,9 +167,18 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
       const session = await connectSession(profile);
       sessions.set(session.sessionId, { session, profile });
       defaultSessionId = session.sessionId;
-    } catch {
-      // Daemon unreachable at startup — degrade to built-ins-only mode
-      // (mirrors the old IpcClient-null fallback).
+    } catch (err) {
+      // Degrade to built-ins-only mode (mirrors the old IpcClient-null
+      // fallback) — but NEVER silently. A swallowed E_PORT_CONFLICT here
+      // (default profile's port owned by a session booted under another
+      // profile) left the MCP sessionless with no signal anywhere, and
+      // agents then chased "no session" ghosts. stderr lands in the MCP
+      // client's log surface.
+      console.error(
+        `rn-dev mcp: could not attach default session (profile "${profile.name}"): ` +
+          `${err instanceof Error ? err.message : String(err)} — running built-ins-only; ` +
+          `use rn-dev/start-session to attach manually.`,
+      );
     }
   }
 
@@ -203,10 +218,61 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
     };
   });
 
+  // -------------------------------------------------------------------
+  // Idle auto-release (see src/mcp/idle-release.ts for the full why).
+  // A parked Claude window's MCP must not pin daemon sessions/Metro
+  // ports forever: after `idleReleaseMs` without a tool call we
+  // voluntarily disconnect every session (dropping the daemon-side
+  // refcount — last client out tears the session down and frees its
+  // port) and remember the profiles. The next tool call re-attaches
+  // via boot-or-join before dispatching, so an agent coming back to a
+  // parked window sees at most one slower first call, never an error.
+  // Voluntary disconnects don't trigger wireSessionReconnect (it only
+  // fires on unexpected socket death), so release and auto-reconnect
+  // can't fight each other.
+  // -------------------------------------------------------------------
+  const idleReleaseMs = resolveIdleReleaseMs();
+  const idleTracker = new IdleTracker(idleReleaseMs ?? DEFAULT_IDLE_RELEASE_MS);
+  const releasedProfiles: McpSessionRecord["profile"][] = [];
+  let reattachInFlight: Promise<void> | null = null;
+  const reattachReleased = (): Promise<void> => {
+    if (releasedProfiles.length === 0 && !reattachInFlight) {
+      return Promise.resolve();
+    }
+    if (!reattachInFlight) {
+      reattachInFlight = (async () => {
+        const toRestore = releasedProfiles.splice(0, releasedProfiles.length);
+        for (const p of toRestore) {
+          try {
+            const session = await connectSession(p);
+            const record: McpSessionRecord = { session, profile: p };
+            if (ctx.attachSession) {
+              ctx.attachSession(record);
+            } else {
+              ctx.sessions.set(session.sessionId, record);
+              if (!ctx.defaultSessionId) ctx.defaultSessionId = session.sessionId;
+            }
+            console.error(
+              `rn-dev mcp: re-attached idle-released session (profile "${p.name}" -> ${session.sessionId})`,
+            );
+          } catch {
+            // Daemon unreachable — keep the profile queued so the next
+            // tool call retries instead of losing the session forever.
+            releasedProfiles.push(p);
+          }
+        }
+        reattachInFlight = null;
+      })();
+    }
+    return reattachInFlight;
+  };
+
   // Register tools/call handler. Handlers may throw — that's an infrastructure
   // failure (e.g. tool lookup missed). Per-tool logical failures come back as
   // `{ isError: true, ... }` in the ToolResult shape.
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    idleTracker.touch();
+    await reattachReleased();
     const tools = [...builtInTools, ...moduleTools];
     const tool = tools.find((t) => t.name === request.params.name);
     if (!tool) {
@@ -381,6 +447,10 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
     }
     ctx.sessions.clear();
     ctx.defaultSessionId = null;
+    // Idle-released sessions belong to the OLD project — re-attaching
+    // them after the switch would boot old-project profiles against the
+    // new root. Drop them.
+    releasedProfiles.length = 0;
 
     // Re-scope every project-derived dependency to the new root.
     projectRoot = root;
@@ -426,6 +496,33 @@ export async function startMcpServer(argv: readonly string[] = process.argv): Pr
   for (const record of ctx.sessions.values()) {
     wireSessionEvents(record);
     wireSessionReconnect(record);
+  }
+
+  // Idle-release timer. `.unref()` so it never keeps the MCP process
+  // alive on its own — stdio closing remains the exit signal.
+  if (idleReleaseMs !== null) {
+    const idleTimer = setInterval(() => {
+      if (ctx.sessions.size === 0 || !idleTracker.isIdle()) return;
+      const records = [...ctx.sessions.values()];
+      console.error(
+        `rn-dev mcp: no tool calls for ${Math.round(idleTracker.idleFor() / 60_000)}m — ` +
+          `releasing ${records.length} session(s) so this parked window doesn't pin ` +
+          `daemon sessions/Metro ports. The next tool call re-attaches automatically.`,
+      );
+      for (const record of records) {
+        if (!releasedProfiles.some((p) => p.name === record.profile.name)) {
+          releasedProfiles.push(record.profile);
+        }
+        try {
+          record.session.disconnect();
+        } catch {
+          // already closed
+        }
+      }
+      ctx.sessions.clear();
+      ctx.defaultSessionId = null;
+    }, IDLE_CHECK_INTERVAL_MS);
+    idleTimer.unref();
   }
 }
 

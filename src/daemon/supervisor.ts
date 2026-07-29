@@ -221,7 +221,11 @@ export class DaemonSupervisor extends EventEmitter {
           return {
             kind: "error",
             code: "E_PORT_CONFLICT",
-            message: `Metro port ${profile.metroPort} is already in use by session ${other.sessionId}`,
+            message:
+              `Metro port ${profile.metroPort} is already owned by session ` +
+              `${other.sessionId} (profile "${other.activeProfile.name}", ` +
+              `status ${other.state.status}). Stop that session or use a ` +
+              `profile with a different metroPort.`,
           };
         }
       }

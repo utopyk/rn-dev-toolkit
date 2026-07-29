@@ -301,11 +301,19 @@ export async function bootSessionServices(
     const isMetro = await metro.isMetroOnPort(port);
 
     if (!isMetro) {
+      // Name the holder. A bare "port busy" sends the operator (or an
+      // agent) into a diagnosis loop we can answer right here.
+      const busyPid = await metro.findProcessOnPort(port);
+      const busyCmd = busyPid != null ? await metro.getProcessCommand(busyPid) : null;
+      const holder =
+        busyPid != null
+          ? ` (pid ${busyPid}${busyCmd ? `: ${busyCmd}` : ""})`
+          : "";
       emit(
-        `\u2716 Port ${port} is held by a non-Metro process. Change \`metroPort\` in your profile or stop the conflicting service.`,
+        `\u2716 Port ${port} is held by a non-Metro process${holder}. Change \`metroPort\` in your profile or stop the conflicting service.`,
       );
       throw new Error(
-        `Port ${port} is held by a non-Metro process. Change metroPort or stop the conflicting service.`,
+        `Port ${port} is held by a non-Metro process${holder}. Change metroPort or stop the conflicting service.`,
       );
     }
 
@@ -343,8 +351,13 @@ export async function bootSessionServices(
       const range = metro.portRangeReadable;
       const fallback = await metro.findFreePortInRange(range[0], range[1]);
       emit(
-        `\u2139 Port ${port} belongs to a different worktree (${holderCwd ?? "unknown"}). ` +
-          `Falling back to free port ${fallback}.`,
+        `\u2139 Port ${port} belongs to a different worktree's Metro ` +
+          `(pid ${holderPid ?? "?"}, cwd ${holderCwd ?? "unknown"}) \u2014 likely another ` +
+          `rn-dev session, possibly kept alive by an idle editor/agent window ` +
+          `attached to that worktree. Falling back to free port ${fallback}. ` +
+          `If this session's platform bakes the Metro port into the app binary ` +
+          `(physical iOS), reclaim ${port} by stopping that worktree's session ` +
+          `or closing the window that pins it.`,
       );
       artifactStore.save(worktreeKey, { metroPort: fallback });
       port = fallback;

@@ -283,6 +283,32 @@ export class MetroManager extends EventEmitter {
   }
 
   /**
+   * Read a process's full command line via `ps -ww -o command=`.
+   * Returns null if ps fails or the pid is gone.
+   *
+   * Used to NAME the holder in port-conflict errors: "port 8081 busy"
+   * with a bare pid sends the operator (or agent) off to re-derive what
+   * we already know — whether it's another worktree's Metro, a stray
+   * simulator proxy, or an unrelated service.
+   */
+  getProcessCommand(pid: number): Promise<string | null> {
+    return new Promise((resolve) => {
+      try {
+        execFile("ps", ["-ww", "-o", "command=", "-p", String(pid)], (err, stdout) => {
+          if (err) {
+            resolve(null);
+            return;
+          }
+          const cmd = stdout.trim();
+          resolve(cmd.length > 0 ? cmd : null);
+        });
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+
+  /**
    * Find the first port in `[min, max]` that is both free on this host AND
    * not tracked by another instance in this manager. Throws if no port in
    * the range is available.

@@ -51,6 +51,15 @@ export interface ListedSession {
   profileName: string | null;
   worktreeKey: string;
   status: string;
+  /**
+   * Current git branch of the daemon's worktree — the ground-truth
+   * "which tree am I serving" signal for both this GUI tab and the
+   * `sessions/list` MCP tool. Null on non-git worktrees / detached HEAD /
+   * old daemons that don't carry the field.
+   */
+  currentBranch: string | null;
+  /** Short (7-char) HEAD SHA; null on non-git or older daemons. */
+  headSha: string | null;
 }
 
 /**
@@ -229,7 +238,11 @@ export async function attachAgentSessionAsObserver(
         id: instanceId,
         worktree: null,
         worktreeName,
-        branch: listed.profileName ?? '·',
+        // Prefer the daemon's live branch over the profile name, which
+        // was only a placeholder here. Falls back to the profile name for
+        // older daemons that don't publish `currentBranch`.
+        branch: listed.currentBranch ?? listed.profileName ?? '·',
+        headSha: listed.headSha,
         port,
         deviceId: null,
         deviceName: 'agent session',
@@ -280,6 +293,14 @@ function parseSessionsList(payload: unknown): ListedSession[] {
       profileName: typeof r.profileName === 'string' ? r.profileName : null,
       worktreeKey: typeof r.worktreeKey === 'string' ? r.worktreeKey : '',
       status: r.status,
+      currentBranch:
+        typeof r.currentBranch === 'string' && r.currentBranch.length > 0
+          ? r.currentBranch
+          : null,
+      headSha:
+        typeof r.headSha === 'string' && r.headSha.length > 0
+          ? r.headSha
+          : null,
     });
   }
   return out;

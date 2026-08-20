@@ -108,6 +108,34 @@ describe("applyAndroidBundler", () => {
     expect(touched).toBe(false);
   });
 
+  it("uses 10.0.2.2 (not LAN) when the device is an emulator", async () => {
+    // Regression: LAN-IP pinning broke the emulator app the moment the
+    // Mac joined a different network. 10.0.2.2 is the emulator's stable
+    // alias to the host loopback, so it survives network changes.
+    const writes: (string | undefined)[] = [];
+    let hostResolved = false;
+    const runAdb: AdbRunner = async (_argv, input) => {
+      if (input !== undefined) writes.push(input);
+      return "";
+    };
+    const res = await applyAndroidBundler(
+      { deviceId: "emulator-5554", appId: "com.acme", port: 8092 },
+      {
+        runAdb,
+        resolveHost: () => {
+          hostResolved = true;
+          return "192.168.1.83";
+        },
+      },
+    );
+    expect(res.applied).toBe(true);
+    expect(res.detail).toContain("10.0.2.2:8092");
+    expect(writes[0]).toContain(
+      '<string name="debug_http_host">10.0.2.2:8092</string>',
+    );
+    expect(hostResolved).toBe(false);
+  });
+
   it("starts a fresh prefs map when the cat read fails (file absent)", async () => {
     const writes: (string | undefined)[] = [];
     const runAdb: AdbRunner = async (argv, input) => {

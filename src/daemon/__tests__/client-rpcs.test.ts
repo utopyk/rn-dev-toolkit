@@ -115,6 +115,23 @@ describe("daemon client RPCs (integration)", () => {
         .instance;
       expect(inst).not.toBeNull();
       expect(inst?.status).toBe("running");
+
+      // Bug 2026-08-20: `metro/status` had no handler at all — the MCP
+      // client called it and got `E_UNKNOWN_ACTION`. Pin the wire
+      // contract now (status + port + sessionId payload).
+      const statusResp = await daemon.client.send({
+        type: "command",
+        action: "metro/status",
+        id: "status-1",
+      });
+      const statusPayload = statusResp.payload as {
+        sessionId: string;
+        status: string;
+        port: number | null;
+      };
+      expect(statusPayload.status).toBe("running");
+      expect(typeof statusPayload.sessionId).toBe("string");
+      expect(typeof statusPayload.port).toBe("number");
     } finally {
       subClose();
     }

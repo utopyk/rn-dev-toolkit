@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { execSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   makeTestWorktree,
   spawnTestDaemon,
@@ -155,6 +158,91 @@ describe("daemon sessions/list (D2)", () => {
       }
     } finally {
       subA.close();
+    }
+  });
+
+  it("exposes currentBranch + headSha for a git-tracked worktree", async () => {
+    // Regression: bug 2026-08-20 — two agents bundling out of the same
+    // "root" session across a `git checkout` swap. `sessions/list` had
+    // no branch signal, so neither client could see the tree had drifted.
+    // Now every entry carries the daemon's live branch + short SHA.
+    const { path: worktree, cleanup } = makeTestWorktree();
+    cleanups.push(cleanup);
+    const runGit = (cmd: string) =>
+      execSync(cmd, { cwd: worktree, stdio: "pipe" });
+    runGit("git init -q -b feat/session-list-branch");
+    runGit("git config user.email test@rn-dev.local");
+    runGit("git config user.name rn-dev-test");
+    writeFileSync(join(worktree, "seed.txt"), "seed\n");
+    runGit("git add seed.txt");
+    runGit('git commit -q -m "seed"');
+    const expectedSha = execSync("git rev-parse --short HEAD", {
+      cwd: worktree,
+    })
+      .toString()
+      .trim();
+
+    const daemon = await spawnTestDaemon(worktree, {
+      env: { RN_DEV_DAEMON_BOOT_MODE: "fake" },
+    });
+    liveHandles.push(daemon);
+    const sub = await daemon.client.subscribe(
+      {
+        type: "command",
+        action: "events/subscribe",
+        id: "sub-branch",
+        payload: { profile: makeProfile(worktree, "alpha", 8081) },
+      },
+      { onEvent: () => {} },
+    );
+    try {
+      const resp = await daemon.client.send({
+        type: "command",
+        action: "sessions/list",
+        id: "list-branch",
+      });
+      const payload = resp.payload as {
+        sessions?: Array<{ currentBranch?: string | null; headSha?: string | null }>;
+      };
+      expect(payload.sessions).toHaveLength(1);
+      expect(payload.sessions?.[0]?.currentBranch).toBe(
+        "feat/session-list-branch",
+      );
+      expect(payload.sessions?.[0]?.headSha).toBe(expectedSha);
+    } finally {
+      sub.close();
+    }
+  });
+
+  it("returns null branch/sha on a non-git worktree (no crash)", async () => {
+    const { path: worktree, cleanup } = makeTestWorktree();
+    cleanups.push(cleanup);
+    const daemon = await spawnTestDaemon(worktree, {
+      env: { RN_DEV_DAEMON_BOOT_MODE: "fake" },
+    });
+    liveHandles.push(daemon);
+    const sub = await daemon.client.subscribe(
+      {
+        type: "command",
+        action: "events/subscribe",
+        id: "sub-nogit",
+        payload: { profile: makeProfile(worktree, "alpha", 8081) },
+      },
+      { onEvent: () => {} },
+    );
+    try {
+      const resp = await daemon.client.send({
+        type: "command",
+        action: "sessions/list",
+        id: "list-nogit",
+      });
+      const payload = resp.payload as {
+        sessions?: Array<{ currentBranch?: string | null; headSha?: string | null }>;
+      };
+      expect(payload.sessions?.[0]?.currentBranch).toBeNull();
+      expect(payload.sessions?.[0]?.headSha).toBeNull();
+    } finally {
+      sub.close();
     }
   });
 });

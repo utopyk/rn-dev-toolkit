@@ -53,6 +53,12 @@ export type ViewTab = 'dev-space' | 'devtools' | 'lint-test' | 'metro-logs' | 's
 export interface ProfileInfo {
   name: string;
   branch: string;
+  /**
+   * Short (7-char) HEAD SHA. Rendered next to the branch in the banner so
+   * a wrong-branch swap of the underlying worktree is visible at a glance
+   * — the collision root cause on 2026-08-20 had no such surface.
+   */
+  headSha?: string | null;
   platform: string;
   dirty: boolean;
   port: number;
@@ -64,6 +70,7 @@ export interface InstanceInfo {
   id: string;
   worktreeName: string;
   branch: string;
+  headSha?: string | null;
   port: number;
   deviceName: string;
   deviceIcon: string;

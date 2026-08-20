@@ -88,6 +88,28 @@ export async function getCurrentBranch(dir: string): Promise<string | null> {
 }
 
 // ---------------------------------------------------------------------------
+// getHeadSha
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the short (7-char) HEAD commit SHA, or null when the directory
+ * isn't a git repo. Cheap on every filesystem — safe to call on the hot
+ * path of `sessions/list`.
+ */
+export async function getHeadSha(dir: string): Promise<string | null> {
+  try {
+    const result = await execAsync("git rev-parse --short HEAD", {
+      cwd: dir,
+      timeout: 15000,
+    });
+    const sha = result.trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // getWorktrees
 // ---------------------------------------------------------------------------
 

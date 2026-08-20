@@ -38,6 +38,13 @@
   font-weight: 500;
 }
 
+.profile-sha {
+  color: var(--muted-2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  margin-left: 4px;
+}
+
 .profile-dirty {
   color: var(--booting);
   font-weight: 500;

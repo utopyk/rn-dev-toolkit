@@ -10,6 +10,12 @@ export interface InstanceState {
   worktree: string | null;
   worktreeName: string;
   branch: string;
+  /**
+   * Short (7-char) HEAD SHA for the tab. Non-null for daemons that carry
+   * it on `sessions/list` and for locally-booted primary tabs; null for
+   * older daemons or non-git worktrees.
+   */
+  headSha: string | null;
   port: number;
   deviceId: string | null;
   deviceName: string;
@@ -33,6 +39,7 @@ export interface InstanceSummary {
   id: string;
   worktreeName: string;
   branch: string;
+  headSha: string | null;
   port: number;
   deviceName: string;
   deviceIcon: string;
@@ -190,6 +197,7 @@ export function toSummary(inst: InstanceState): InstanceSummary {
     id: inst.id,
     worktreeName: inst.worktreeName,
     branch: inst.branch,
+    headSha: inst.headSha,
     port: inst.port,
     deviceName: inst.deviceName,
     deviceIcon: inst.deviceIcon,

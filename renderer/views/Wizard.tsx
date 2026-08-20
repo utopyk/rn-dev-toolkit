@@ -524,38 +524,58 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
           </StepContainer>
         );
 
-      case 5:
+      case 5: {
+        const showEmpty = devices.length === 0 && loadingKey !== 'devices';
         return (
           <StepContainer
             title="Device"
             subtitle="Select a simulator or device to run on."
           >
-            <SearchableList<DeviceOption>
-              items={devices}
-              labelKey="name"
-              searchKeys={['name', 'runtime']}
-              onSelect={(d) => {
-                setState((s) => ({ ...s, device: d }));
-                goNext();
-              }}
-              placeholder="Search devices..."
-              loading={loadingKey === 'devices'}
-              renderItem={(d, isActive) => (
-                <>
-                  <span className={`sl-device-dot ${d.status}`} />
-                  <span className={`sl-device-badge ${d.isPhysical ? 'physical' : 'simulator'}`}>
-                    {d.isPhysical ? '📱' : '💻'}
-                  </span>
-                  <span className="sl-item-label">{d.name}</span>
-                  <span className={`sl-device-type ${d.isPhysical ? 'physical' : 'simulator'}`}>
-                    {d.isPhysical ? 'Device' : 'Simulator'}
-                  </span>
-                  {d.runtime && <span className="sl-item-meta">{d.runtime.replace(/iOS-/,'').replace(/-/g,'.')}</span>}
-                </>
-              )}
-            />
+            {showEmpty ? (
+              <div className="wz-empty-devices" data-testid="wz-empty-devices">
+                <div className="wz-empty-title">
+                  No {state.platform === 'android' ? 'Android' : state.platform === 'ios' ? 'iOS' : ''} devices found
+                </div>
+                <div className="wz-empty-body">
+                  {state.platform === 'android'
+                    ? 'Start an emulator (`emulator -avd <name>`) or plug in a device, then use Back and Next to refresh.'
+                    : state.platform === 'ios'
+                    ? 'Open a Simulator (`xcrun simctl` or Xcode) or plug in an iPhone, then use Back and Next to refresh.'
+                    : 'Start a simulator/emulator or plug in a device, then use Back and Next to refresh.'}
+                </div>
+                <div className="wz-empty-hint">
+                  You can also skip this step — profile creation continues without a default device.
+                </div>
+              </div>
+            ) : (
+              <SearchableList<DeviceOption>
+                items={devices}
+                labelKey="name"
+                searchKeys={['name', 'runtime']}
+                onSelect={(d) => {
+                  setState((s) => ({ ...s, device: d }));
+                  goNext();
+                }}
+                placeholder="Search devices..."
+                loading={loadingKey === 'devices'}
+                renderItem={(d, isActive) => (
+                  <>
+                    <span className={`sl-device-dot ${d.status}`} />
+                    <span className={`sl-device-badge ${d.isPhysical ? 'physical' : 'simulator'}`}>
+                      {d.isPhysical ? '📱' : '💻'}
+                    </span>
+                    <span className="sl-item-label">{d.name}</span>
+                    <span className={`sl-device-type ${d.isPhysical ? 'physical' : 'simulator'}`}>
+                      {d.isPhysical ? 'Device' : 'Simulator'}
+                    </span>
+                    {d.runtime && <span className="sl-item-meta">{d.runtime.replace(/iOS-/,'').replace(/-/g,'.')}</span>}
+                  </>
+                )}
+              />
+            )}
           </StepContainer>
         );
+      }
 
       case 6: {
         const relevantChecks = preflightChecks.filter(

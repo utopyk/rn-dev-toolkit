@@ -110,7 +110,13 @@ export async function applyAndroidBundler(
   if (!APP_ID_RE.test(appId)) {
     throw new Error(`applyAndroidBundler: refusing unsafe appId "${appId}"`);
   }
-  const host = (deps.resolveHost ?? resolveLanIp)();
+  // Emulators reach the host through the special 10.0.2.2 alias — it's
+  // stable across LAN changes (the emulator's user-mode net remaps it to
+  // the host's loopback). The LAN IP would work too but breaks the
+  // instant the Mac joins a different network. See
+  // https://developer.android.com/studio/run/emulator-networking
+  const isEmulator = deviceId.startsWith("emulator-");
+  const host = isEmulator ? "10.0.2.2" : (deps.resolveHost ?? resolveLanIp)();
   if (!host) {
     return {
       applied: false,

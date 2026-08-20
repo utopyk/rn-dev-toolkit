@@ -28,6 +28,7 @@ const CLIENT_RPC_ACTIONS = new Set<string>([
   "metro/reload",
   "metro/devMenu",
   "metro/getInstance",
+  "metro/status",
   "devtools/listNetwork",
   "devtools/status",
   "devtools/clear",
@@ -207,6 +208,19 @@ async function dispatch(
     }
     case "metro/getInstance": {
       return { instance: services.metro.getInstance(services.sessionId) };
+    }
+    case "metro/status": {
+      // Snapshot subset for the `rn-dev/metro-status` MCP tool — used to
+      // ship the whole MetroInstance was overkill and pulled in fields
+      // the tool consumer never touched. Bug 2026-08-20: the MCP called
+      // this action with the bare `metro-status` name (no namespace) and
+      // it fell off the daemon's dispatch table entirely.
+      const inst = services.metro.getInstance(services.sessionId);
+      return {
+        sessionId: services.sessionId,
+        status: inst?.status ?? "unknown",
+        port: inst?.port ?? null,
+      };
     }
     case "devtools/listNetwork": {
       const filter = readObjectField(message.payload, "filter");

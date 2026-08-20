@@ -1,7 +1,7 @@
 import { ipcMain } from 'electron';
 import path from 'path';
 import { ProfileStore } from '../../src/core/profile.js';
-import { getCurrentBranch } from '../../src/core/project.js';
+import { getCurrentBranch, getHeadSha } from '../../src/core/project.js';
 import { listDevices } from '../../src/core/device.js';
 import { attachDaemonSession, wireInstanceEvents } from './services.js';
 import { triggerBuildsIfNeeded } from '../../src/app/auto-build.js';
@@ -213,6 +213,7 @@ async function doCreate(data: unknown): Promise<unknown> {
   }
 
   const branch = profileData.branch ?? await getCurrentBranch(state.projectRoot) ?? 'main';
+  const headSha = await getHeadSha(state.projectRoot);
 
   let deviceName = 'No device';
   let deviceIcon = '💻';
@@ -243,6 +244,7 @@ async function doCreate(data: unknown): Promise<unknown> {
     worktree: worktreePath,
     worktreeName,
     branch,
+    headSha,
     port,
     deviceId,
     deviceName,

@@ -14,6 +14,11 @@ export function ProfileBanner({ profile }: ProfileBannerProps) {
         <span className="profile-name">{profile.name}</span>
         <span className="profile-sep">|</span>
         <span className="profile-branch">{profile.branch}</span>
+        {profile.headSha ? (
+          <span className="profile-sha" title={`HEAD ${profile.headSha}`}>
+            @{profile.headSha}
+          </span>
+        ) : null}
         <span className="profile-sep">|</span>
         <span>{profile.platform}</span>
         <span className="profile-sep">|</span>

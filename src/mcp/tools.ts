@@ -734,7 +734,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const resolved = resolveSession(ctx, args);
         if (!resolved.ok) return resolved.result;
         const resp = await resolved.record.session.client.send(
-          makeIpcMessage("reload", { sessionId: resolved.sessionId }),
+          makeIpcMessage("metro/reload", { sessionId: resolved.sessionId }),
         );
         return resp.payload ?? { status: "reloaded" };
       },
@@ -777,7 +777,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const resolved = resolveSession(ctx, args);
         if (!resolved.ok) return resolved.result;
         const resp = await resolved.record.session.client.send(
-          makeIpcMessage("dev-menu", { sessionId: resolved.sessionId }),
+          makeIpcMessage("metro/devMenu", { sessionId: resolved.sessionId }),
         );
         return resp.payload ?? { status: "opened" };
       },
@@ -791,7 +791,7 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
         const resolved = resolveSession(ctx, args);
         if (!resolved.ok) return resolved.result;
         const resp = await resolved.record.session.client.send(
-          makeIpcMessage("metro-status", { sessionId: resolved.sessionId }),
+          makeIpcMessage("metro/status", { sessionId: resolved.sessionId }),
         );
         return resp.payload ?? { status: "unknown" };
       },

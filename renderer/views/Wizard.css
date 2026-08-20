@@ -632,3 +632,30 @@
   color: var(--ink);
   box-shadow: var(--glow-medium);
 }
+
+.wz-empty-devices {
+  padding: 16px 20px;
+  border-radius: var(--radius-item);
+  background: var(--surface);
+  border: 1px dashed var(--muted-2);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.wz-empty-title {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.wz-empty-body {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.wz-empty-hint {
+  color: var(--muted-2);
+  font-size: 12px;
+}

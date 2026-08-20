@@ -1,4 +1,31 @@
+import { spawn as spawnChild } from "node:child_process";
 import { execAsync, execShellAsync } from "./exec-async.js";
+
+/**
+ * Test seam. `bootDevice` uses this to launch a cold AVD; specs override
+ * it with `setEmulatorSpawner` and restore the default with `null`. ESM
+ * import bindings are frozen, so `vi.spyOn(childProc, "spawn")` throws —
+ * a first-class seam is the least-magic fix.
+ */
+type EmulatorSpawner = (avdName: string) => { unref?: () => void } | null;
+let emulatorSpawner: EmulatorSpawner = (avdName) => {
+  const child = spawnChild("emulator", ["-avd", avdName], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
+  return child;
+};
+export function setEmulatorSpawner(fn: EmulatorSpawner | null): void {
+  emulatorSpawner = fn ?? ((avdName) => {
+    const child = spawnChild("emulator", ["-avd", avdName], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+    return child;
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -11,6 +38,11 @@ export interface Device {
   status: "available" | "booted" | "shutdown" | "unauthorized";
   runtime?: string; // iOS only, e.g. "iOS-17-2"
   isPhysical?: boolean; // true for real devices, false/undefined for simulators
+  // Raw AVD name for Android emulator entries. Populated for BOTH running
+  // emulators (via `adb -s emulator-XXXX emu avd name`) and cold AVDs from
+  // `emulator -list-avds`, so listDevices can dedupe the two lists on it.
+  // A cold AVD's `id` is `avd:<name>`; bootDevice reads that to launch it.
+  avdName?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -113,7 +145,8 @@ export async function enrichAndroidNames(devices: Device[]): Promise<Device[]> {
 
       if (d.isPhysical === false) {
         const avd = await probe(`adb -s ${d.id} emu avd name`);
-        return avd ? { ...d, name: avd.replace(/_/g, " ") } : d;
+        if (!avd) return d;
+        return { ...d, name: avd.replace(/_/g, " "), avdName: avd };
       }
 
       const market = await probe(
@@ -192,26 +225,82 @@ export function parseSimctlDevices(jsonOutput: string): Device[] {
 }
 
 // ---------------------------------------------------------------------------
+// parseAvdList — cold AVDs from `emulator -list-avds`
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse `emulator -list-avds` output — one AVD name per line, no header.
+ * Skips blank lines and the informational INFO/WARNING preamble the emulator
+ * binary sometimes prints when configured with an obsolete SDK.
+ */
+export function parseAvdList(output: string): string[] {
+  const names: string[] = [];
+  for (const raw of output.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    // AVD names are `[A-Za-z0-9._-]+` (Android SDK convention). Anything
+    // with a space, colon, or bracket is a log line — skip it.
+    if (!/^[A-Za-z0-9._-]+$/.test(line)) continue;
+    names.push(line);
+  }
+  return names;
+}
+
+/**
+ * Returns cold-AVD entries — AVDs installed on this machine that aren't
+ * currently attached to adb. Best-effort: returns [] when the `emulator`
+ * binary isn't on PATH (no Android SDK installed).
+ */
+export async function listAvds(): Promise<Device[]> {
+  try {
+    const output = await execAsync("emulator -list-avds", { timeout: 10000 });
+    return parseAvdList(output).map((name) => ({
+      id: `avd:${name}`,
+      name: name.replace(/_/g, " "),
+      type: "android",
+      status: "shutdown",
+      isPhysical: false,
+      avdName: name,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // listDevices
 // ---------------------------------------------------------------------------
 
 /**
  * Discover connected/available devices by calling the real platform tools.
  * Catches errors gracefully if `adb` or `xcrun` are not installed.
+ *
+ * Android surface is symmetric with iOS: `adb devices` catches attached
+ * phones and running emulators; `emulator -list-avds` catches cold AVDs
+ * (installed but not booted). Cold AVDs whose name matches a running
+ * emulator's `avdName` are dropped — the running entry wins.
  */
 export async function listDevices(platform: "ios" | "android" | "both"): Promise<Device[]> {
   const devices: Device[] = [];
 
   if (platform === "android" || platform === "both") {
+    let attached: Device[] = [];
     try {
       const output = await execAsync("adb devices", {
         timeout: 15000, // 15s max
       });
       const parsed = parseAdbDevices(output);
-      devices.push(...(await enrichAndroidNames(parsed)));
+      attached = await enrichAndroidNames(parsed);
     } catch {
       // adb not available, timed out, or failed
     }
+    devices.push(...attached);
+
+    const running = new Set(
+      attached.map((d) => d.avdName).filter((n): n is string => !!n),
+    );
+    const cold = (await listAvds()).filter((d) => !running.has(d.avdName!));
+    devices.push(...cold);
   }
 
   if (platform === "ios" || platform === "both") {
@@ -300,16 +389,33 @@ export function parseXctraceDevices(output: string): Device[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Boot an iOS simulator. Returns true on success, false on failure.
- * Physical devices are a no-op: they connect via USB/network and have nothing to boot.
+ * Boot a device.
+ *
+ * - iOS simulator → `xcrun simctl boot <udid>` (blocks until booted).
+ * - iOS physical → no-op (returns true; nothing to boot over USB).
+ * - Android cold AVD (id starts with `avd:`) → detached `emulator -avd <name>`.
+ *   Emulator startup is minutes long; we return true as soon as the child
+ *   is spawned. The wizard/session-start loop will discover it via adb.
+ * - Android already-attached (`emulator-*`, physical serial) → no-op true.
  */
 export async function bootDevice(device: Device): Promise<boolean> {
-  if (device.type !== "ios") {
-    return false;
-  }
-  if (device.isPhysical) {
+  if (device.type === "android") {
+    if (device.id.startsWith("avd:")) {
+      const avdName = device.id.slice("avd:".length);
+      if (!/^[A-Za-z0-9._-]+$/.test(avdName)) return false;
+      try {
+        emulatorSpawner(avdName);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    // Already attached (`adb devices` visible) — nothing to do.
     return true;
   }
+
+  if (device.type !== "ios") return false;
+  if (device.isPhysical) return true;
 
   try {
     await execShellAsync(`xcrun simctl boot ${device.id}`, {

@@ -30,7 +30,7 @@ import path, { join } from 'path';
 import { existsSync } from 'fs';
 import { ArtifactStore } from '../../src/core/artifact.js';
 import { ProfileStore } from '../../src/core/profile.js';
-import { getCurrentBranch } from '../../src/core/project.js';
+import { getCurrentBranch, getHeadSha } from '../../src/core/project.js';
 import { listDevices } from '../../src/core/device.js';
 import { detectAllPackageManagers, detectPackageManager } from '../../src/core/clean.js';
 import { connectElectronToDaemon } from '../daemon-connect.js';
@@ -568,11 +568,13 @@ export async function startRealServices(
     }
   }
 
+  const headSha = await getHeadSha(targetProjectRoot);
   const instance: InstanceState = {
     id,
     worktree: worktreePath,
     worktreeName,
     branch: defaultProfile.branch,
+    headSha,
     port,
     deviceId,
     deviceName,

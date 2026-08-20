@@ -440,6 +440,7 @@ export function App() {
     ? {
         name: activeInstance.id,
         branch: activeInstance.branch,
+        headSha: activeInstance.headSha ?? null,
         platform: activeInstance.platform,
         dirty: true,
         port: activeInstance.port,

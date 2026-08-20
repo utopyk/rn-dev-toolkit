@@ -172,3 +172,59 @@ describe('Wizard — iOS bundle picker', () => {
     ).toBeTruthy();
   });
 });
+
+describe('Wizard — device step empty state', () => {
+  beforeEach(() => {
+    cleanup();
+    uninstallFakeIpcBridge();
+  });
+
+  async function advanceToStep5Android(bridge: FakeIpcBridge): Promise<void> {
+    await advanceToStep3(bridge);
+    // Step 3: switch platform to Android so getDevices is called with
+    // 'android' — the bug we're pinning was Android-specific (adb-only
+    // discovery, cold AVDs invisible). Then Next.
+    await waitFor(() => screen.getByText('Platform'));
+    // RadioGroup renders <label><span class="wz-radio-label">Android</span></label>
+    // without a real <input>, so pick the label span rather than
+    // getByLabelText (which requires an id/for pairing).
+    const androidLabel = screen
+      .getAllByText('Android')
+      .find((el) => el.className.includes('wz-radio-label'));
+    if (!androidLabel) throw new Error('Android radio label not found');
+    fireEvent.click(androidLabel);
+    fireEvent.click(screen.getByRole('button', { name: /Next/i }));
+    // Step 4: Mode — any default is fine. Next.
+    await waitFor(() => screen.getByText(/Mode/));
+    fireEvent.click(screen.getByRole('button', { name: /Next/i }));
+    // Step 5: Device.
+    await waitFor(() => screen.getByText('Device'));
+  }
+
+  it('shows an actionable empty state (not a blank list) when getDevices returns []', async () => {
+    // Regression: bug 2026-08-20 — profile wizard rendered an empty list
+    // when the user's only Android target was a powered-off AVD, with no
+    // hint that anything was wrong or what to do. The listDevices fix
+    // covers the common case (cold AVDs now surface as `shutdown`
+    // entries); THIS test pins the fallback UX when the list really is
+    // empty (no SDK, permission issue, misconfig).
+    const bridge = installFakeIpcBridge();
+    bridge.invoke.mockImplementation(defaultInvokeImpl);
+
+    render(<Wizard onComplete={() => undefined} onCancel={() => undefined} />);
+    await advanceToStep5Android(bridge);
+
+    const empty = await waitFor(() =>
+      screen.getByTestId('wz-empty-devices'),
+    );
+    expect(empty).toBeTruthy();
+    expect(empty.textContent).toMatch(/No Android devices found/);
+    // Mentions the recovery action — `emulator -avd <name>` — so the
+    // user isn't left staring at a blank screen.
+    expect(empty.textContent).toMatch(/emulator -avd/);
+    // Reachable-forward hint: "you can skip".
+    expect(empty.textContent).toMatch(/skip this step/i);
+    // And the SearchableList is NOT rendered (no stray "No matches for ''").
+    expect(screen.queryByPlaceholderText('Search devices...')).toBeNull();
+  });
+});

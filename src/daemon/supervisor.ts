@@ -173,6 +173,7 @@ export class DaemonSupervisor extends EventEmitter {
   private readonly subscribeRegistry: import("../daemon/subscribe-registry.js").SubscribeRegistry | undefined;
 
   private readonly sessions = new Map<SessionId, SessionEntry>();
+  private headWatcher: import("../core/session/head-watcher.js").HeadWatcher | null = null;
 
   constructor(opts: DaemonSupervisorOptions) {
     super();
@@ -180,6 +181,39 @@ export class DaemonSupervisor extends EventEmitter {
     this.ipc = opts.ipc;
     this.bootFn = opts.bootFn;
     this.subscribeRegistry = opts.subscribeRegistry;
+
+    // Bug 2026-08-20 (multi-agent shared checkout): a `git checkout` on
+    // the daemon's worktree silently changed which tree Metro was
+    // serving — no signal reached the clients. Watch .git/HEAD and fan
+    // a loud warn log across every live session so the swap is visible
+    // in each tab's log stream instead of manifesting minutes later as
+    // a phantom type error or a wrong-bundle hot-reload.
+    void import("../core/session/head-watcher.js").then(({ startHeadWatcher }) =>
+      startHeadWatcher({
+        worktree: this.worktree,
+        onDrift: (from, to) => this.onHeadDrift(from, to),
+      }).then((w) => {
+        this.headWatcher = w;
+      }),
+    );
+  }
+
+  private onHeadDrift(from: string | null, to: string | null): void {
+    const fromLabel = from ?? "(detached)";
+    const toLabel = to ?? "(detached)";
+    const line =
+      `⚠ worktree HEAD changed: ${fromLabel} → ${toLabel} — ` +
+      `bundles now serve the new tree. If another client is attached ` +
+      `here, its Metro is doing the same.`;
+    for (const entry of this.sessions.values()) {
+      if (entry.state.status === "stopped") continue;
+      this.emitSessionEvent({
+        kind: "session/log",
+        worktreeKey: entry.sessionWorktreeKey,
+        sessionId: entry.sessionId,
+        data: { level: "warn", message: line },
+      });
+    }
   }
 
   // ===========================================================================
@@ -467,6 +501,8 @@ export class DaemonSupervisor extends EventEmitter {
    * Stop every active session — used on daemon shutdown.
    */
   async shutdown(): Promise<void> {
+    this.headWatcher?.stop();
+    this.headWatcher = null;
     const entries = Array.from(this.sessions.values());
     for (const entry of entries) {
       try {

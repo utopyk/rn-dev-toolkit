@@ -241,7 +241,7 @@ export function createProgram(): Command {
       }
       await client.send({
         type: "command",
-        action: "reload",
+        action: "metro/reload",
         id: Date.now().toString(),
       });
       console.log("Reload sent");
@@ -262,7 +262,7 @@ export function createProgram(): Command {
       }
       await client.send({
         type: "command",
-        action: "dev-menu",
+        action: "metro/devMenu",
         id: Date.now().toString(),
       });
       console.log("Dev menu command sent");

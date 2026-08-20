@@ -37,6 +37,7 @@ import {
   RpcArgError,
 } from "./rpc-args.js";
 import type { SessionAmbiguousData } from "./error-codes.js";
+import { getCurrentBranch, getHeadSha } from "../core/project.js";
 
 // ---------------------------------------------------------------------------
 // Daemon entry for `rn-dev daemon <worktree>`.
@@ -682,18 +683,56 @@ function handleSessionsList(
   event: IpcMessageEvent,
   supervisor: DaemonSupervisor,
 ): void {
-  const sessions = supervisor.listSessions().map((entry) => ({
-    sessionId: entry.sessionId,
-    profileName: entry.activeProfile.name,
-    worktreeKey: entry.sessionWorktreeKey,
-    status: entry.state.status,
-    services: entry.state.services,
-  }));
-  event.reply({
-    type: "response",
-    action: "sessions/list",
-    id: event.message.id,
-    payload: { sessions },
+  // Fire git lookups OUTSIDE the response critical path — pinning the reply
+  // on a `git rev-parse` would let a slow FS turn `sessions/list` into a
+  // multi-second RPC. Every session on this daemon shares one worktree, so
+  // one lookup covers all entries.
+  //
+  // Bug 2026-08-20: two agents bundled from the same "root" session across
+  // a `git checkout` switch. Neither side saw the branch drift because
+  // `sessions/list` didn't carry it. Fixing that here is the cheap half of
+  // the mitigation — a HEAD watcher (see next commit) is the loud half.
+  Promise.all([
+    getCurrentBranch(supervisor.getWorktree()),
+    getHeadSha(supervisor.getWorktree()),
+  ]).then(([currentBranch, headSha]) => {
+    const sessions = supervisor.listSessions().map((entry) => ({
+      sessionId: entry.sessionId,
+      profileName: entry.activeProfile.name,
+      worktreeKey: entry.sessionWorktreeKey,
+      status: entry.state.status,
+      services: entry.state.services,
+      // Ground truth of what this session is currently serving. May differ
+      // from `entry.activeProfile.branch` (the branch the profile was
+      // saved on) — the discrepancy is exactly what the HEAD watcher will
+      // flag as "worktree drift" once it lands.
+      currentBranch,
+      headSha,
+    }));
+    event.reply({
+      type: "response",
+      action: "sessions/list",
+      id: event.message.id,
+      payload: { sessions },
+    });
+  }).catch(() => {
+    // Git lookups already swallow their own errors; getting here means
+    // something worse (Promise.all itself). Fall back to the plain shape.
+    const sessions = supervisor.listSessions().map((entry) => ({
+      sessionId: entry.sessionId,
+      profileName: entry.activeProfile.name,
+      worktreeKey: entry.sessionWorktreeKey,
+      status: entry.state.status,
+      services: entry.state.services,
+      currentBranch: null,
+      headSha: null,
+    }));
+    event.reply({
+      type: "response",
+      action: "sessions/list",
+      id: event.message.id,
+      payload: { sessions },
+    });
   });
 }
 

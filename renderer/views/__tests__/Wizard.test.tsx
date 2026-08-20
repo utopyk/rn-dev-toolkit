@@ -230,6 +230,48 @@ describe('Wizard — device step empty state', () => {
     expect(screen.queryByPlaceholderText('Search devices...')).toBeNull();
   });
 
+  it('labels Android emulators as "Emulator" (not "Simulator") on the device row', async () => {
+    // Bug found 2026-08-20 manual pass: cold AVDs surfaced by today's
+    // listDevices fix rendered with the iOS-only "Simulator" badge.
+    const bridge = installFakeIpcBridge();
+    bridge.invoke.mockImplementation((channel: string, ...rest: unknown[]) => {
+      if (channel === 'wizard:getDevices') {
+        return Promise.resolve([
+          {
+            id: 'avd:Pixel_6a_API_35',
+            name: 'Pixel 6a API 35',
+            type: 'android',
+            status: 'shutdown',
+            isPhysical: false,
+          },
+        ]);
+      }
+      return defaultInvokeImpl(channel, ...rest);
+    });
+
+    render(<Wizard onComplete={() => undefined} onCancel={() => undefined} />);
+    await advanceToStep5Android(bridge);
+
+    await waitFor(() => screen.getByText('Pixel 6a API 35'));
+    expect(screen.getByText('Emulator')).toBeTruthy();
+    // And the misapplied Simulator label is not present.
+    expect(screen.queryByText('Simulator')).toBeNull();
+  });
+
+  it('Esc dismisses the wizard (calls onCancel)', async () => {
+    // Bug found 2026-08-20 manual pass: memory
+    // `feedback_modal_over_inline_confirm` says modals must dismiss on
+    // Esc; the wizard was ignoring it.
+    const bridge = installFakeIpcBridge();
+    bridge.invoke.mockImplementation(defaultInvokeImpl);
+    const onCancel = vi.fn();
+    render(<Wizard onComplete={() => undefined} onCancel={onCancel} />);
+    // Wait for the wizard to fully mount.
+    await waitFor(() => screen.getByText(/Default \(root\)/));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
   it('Refresh button re-invokes getDevices and picks up a late-connected device', async () => {
     // Regression: bug 2026-08-20 followup — plugging in a phone AFTER
     // landing on the device step required Back → Next to see it.

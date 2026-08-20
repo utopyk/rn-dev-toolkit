@@ -10,7 +10,6 @@ export function ProfileBanner({ profile }: ProfileBannerProps) {
   return (
     <div className="profile-banner">
       <div className="profile-info">
-        <span className="profile-label">V </span>
         <span className="profile-name">{profile.name}</span>
         <span className="profile-sep">|</span>
         <span className="profile-branch">{profile.branch}</span>

@@ -175,6 +175,19 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
     if (step === 5) void refreshDevices();
   }, [step, refreshDevices]);
 
+  // Esc dismisses the wizard modal — memory `feedback_modal_over_inline_confirm`
+  // requires this. The create-worktree sub-flow has its own Esc that
+  // just closes that inline field, so we skip Esc here while it's open.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (creatingWorktree) return;
+      onCancel();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onCancel, creatingWorktree]);
+
   // Discover bundles (iOS schemes / Android flavors) when the platform
   // step opens or when the platform changes. iOS-only for now —
   // Android picker UX lands when a multi-flavor app surfaces here.
@@ -577,19 +590,27 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
                 }}
                 placeholder="Search devices..."
                 loading={loadingKey === 'devices'}
-                renderItem={(d, isActive) => (
-                  <>
-                    <span className={`sl-device-dot ${d.status}`} />
-                    <span className={`sl-device-badge ${d.isPhysical ? 'physical' : 'simulator'}`}>
-                      {d.isPhysical ? '📱' : '💻'}
-                    </span>
-                    <span className="sl-item-label">{d.name}</span>
-                    <span className={`sl-device-type ${d.isPhysical ? 'physical' : 'simulator'}`}>
-                      {d.isPhysical ? 'Device' : 'Simulator'}
-                    </span>
-                    {d.runtime && <span className="sl-item-meta">{d.runtime.replace(/iOS-/,'').replace(/-/g,'.')}</span>}
-                  </>
-                )}
+                renderItem={(d, isActive) => {
+                  // Simulator is Apple terminology — an Android AVD is
+                  // an Emulator. The class name stays `simulator` for
+                  // the CSS (styles are shared) but the label + icon
+                  // reflect the actual platform.
+                  const virtualLabel = d.type === 'android' ? 'Emulator' : 'Simulator';
+                  const virtualIcon = d.type === 'android' ? '🤖' : '💻';
+                  return (
+                    <>
+                      <span className={`sl-device-dot ${d.status}`} />
+                      <span className={`sl-device-badge ${d.isPhysical ? 'physical' : 'simulator'}`}>
+                        {d.isPhysical ? '📱' : virtualIcon}
+                      </span>
+                      <span className="sl-item-label">{d.name}</span>
+                      <span className={`sl-device-type ${d.isPhysical ? 'physical' : 'simulator'}`}>
+                        {d.isPhysical ? 'Device' : virtualLabel}
+                      </span>
+                      {d.runtime && <span className="sl-item-meta">{d.runtime.replace(/iOS-/,'').replace(/-/g,'.')}</span>}
+                    </>
+                  );
+                }}
               />
             )}
           </StepContainer>

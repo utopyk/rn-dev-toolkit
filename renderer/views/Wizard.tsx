@@ -161,15 +161,19 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
     }
   }, [step]);
 
+  const refreshDevices = useCallback(async () => {
+    setLoadingKey('devices');
+    const data = await invoke<DeviceOption[]>(
+      'wizard:getDevices',
+      state.platform,
+    );
+    setDevices(data ?? []);
+    setLoadingKey(null);
+  }, [invoke, state.platform]);
+
   useEffect(() => {
-    if (step === 5) {
-      setLoadingKey('devices');
-      invoke<DeviceOption[]>('wizard:getDevices', state.platform).then((data) => {
-        setDevices(data ?? []);
-        setLoadingKey(null);
-      });
-    }
-  }, [step, state.platform]);
+    if (step === 5) void refreshDevices();
+  }, [step, refreshDevices]);
 
   // Discover bundles (iOS schemes / Android flavors) when the platform
   // step opens or when the platform changes. iOS-only for now —
@@ -526,11 +530,26 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
 
       case 5: {
         const showEmpty = devices.length === 0 && loadingKey !== 'devices';
+        const refreshing = loadingKey === 'devices';
         return (
           <StepContainer
             title="Device"
             subtitle="Select a simulator or device to run on."
           >
+            <div className="wz-devices-toolbar">
+              <button
+                type="button"
+                className="wz-refresh-btn"
+                onClick={() => void refreshDevices()}
+                disabled={refreshing}
+                data-testid="wz-refresh-devices"
+              >
+                {refreshing ? '⟳ Refreshing…' : '↻ Refresh'}
+              </button>
+              <span className="wz-devices-count">
+                {refreshing ? '' : `${devices.length} device${devices.length === 1 ? '' : 's'}`}
+              </span>
+            </div>
             {showEmpty ? (
               <div className="wz-empty-devices" data-testid="wz-empty-devices">
                 <div className="wz-empty-title">
@@ -538,10 +557,10 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
                 </div>
                 <div className="wz-empty-body">
                   {state.platform === 'android'
-                    ? 'Start an emulator (`emulator -avd <name>`) or plug in a device, then use Back and Next to refresh.'
+                    ? 'Start an emulator (`emulator -avd <name>`) or plug in a device, then hit Refresh.'
                     : state.platform === 'ios'
-                    ? 'Open a Simulator (`xcrun simctl` or Xcode) or plug in an iPhone, then use Back and Next to refresh.'
-                    : 'Start a simulator/emulator or plug in a device, then use Back and Next to refresh.'}
+                    ? 'Open a Simulator (`xcrun simctl` or Xcode) or plug in an iPhone, then hit Refresh.'
+                    : 'Start a simulator/emulator or plug in a device, then hit Refresh.'}
                 </div>
                 <div className="wz-empty-hint">
                   You can also skip this step — profile creation continues without a default device.

@@ -222,9 +222,51 @@ describe('Wizard — device step empty state', () => {
     // Mentions the recovery action — `emulator -avd <name>` — so the
     // user isn't left staring at a blank screen.
     expect(empty.textContent).toMatch(/emulator -avd/);
+    // Points at the Refresh button, not the awkward Back+Next dance.
+    expect(empty.textContent).toMatch(/hit Refresh/);
     // Reachable-forward hint: "you can skip".
     expect(empty.textContent).toMatch(/skip this step/i);
     // And the SearchableList is NOT rendered (no stray "No matches for ''").
     expect(screen.queryByPlaceholderText('Search devices...')).toBeNull();
+  });
+
+  it('Refresh button re-invokes getDevices and picks up a late-connected device', async () => {
+    // Regression: bug 2026-08-20 followup — plugging in a phone AFTER
+    // landing on the device step required Back → Next to see it.
+    // The Refresh button is the one-click recovery path.
+    const bridge = installFakeIpcBridge();
+    let callCount = 0;
+    bridge.invoke.mockImplementation((channel: string, ...rest: unknown[]) => {
+      if (channel === 'wizard:getDevices') {
+        callCount++;
+        if (callCount === 1) return Promise.resolve([]);
+        return Promise.resolve([
+          {
+            id: 'R83W70PNCBZ',
+            name: "Martin's Pixel 8",
+            type: 'android',
+            status: 'available',
+            isPhysical: true,
+          },
+        ]);
+      }
+      return defaultInvokeImpl(channel, ...rest);
+    });
+
+    render(<Wizard onComplete={() => undefined} onCancel={() => undefined} />);
+    await advanceToStep5Android(bridge);
+
+    // Initial state: empty banner is visible.
+    await waitFor(() => screen.getByTestId('wz-empty-devices'));
+    expect(callCount).toBe(1);
+
+    // Click Refresh — a device shows up now.
+    fireEvent.click(screen.getByTestId('wz-refresh-devices'));
+    await waitFor(() => screen.getByText("Martin's Pixel 8"));
+    expect(callCount).toBe(2);
+
+    // Empty banner is gone; SearchableList replaces it.
+    expect(screen.queryByTestId('wz-empty-devices')).toBeNull();
+    expect(screen.getByPlaceholderText('Search devices...')).toBeTruthy();
   });
 });

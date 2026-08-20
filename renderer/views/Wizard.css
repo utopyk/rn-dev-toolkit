@@ -659,3 +659,38 @@
   color: var(--muted-2);
   font-size: 12px;
 }
+
+.wz-devices-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  padding: 0 2px;
+}
+
+.wz-refresh-btn {
+  padding: 6px 12px;
+  background: var(--surface);
+  border: 1px solid var(--muted-2);
+  border-radius: var(--radius-item);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 160ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.wz-refresh-btn:hover:not(:disabled) {
+  border-color: var(--accent-border);
+  color: var(--ink);
+  box-shadow: var(--glow-medium);
+}
+
+.wz-refresh-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.wz-devices-count {
+  color: var(--muted-2);
+  font-size: 12px;
+}

@@ -184,14 +184,16 @@ export function App() {
             });
           }
         } else {
-          // No instances yet — check if any profiles exist
-          invoke<unknown[]>('profiles:list').then((profiles) => {
-            if (!profiles || profiles.length === 0) {
-              // No profiles at all — go straight to wizard
-              setShowWizard(true);
-            }
-            // If profiles exist, startRealServices in main will create one
-            // from the default profile, and we'll get it via instance:created event
+          // No instances yet. Show the wizard when nothing on disk claims
+          // the current branch — `wizard:hasProfile` resolves that
+          // (`profileStore.findDefault(null, currentBranch)` under the
+          // hood). The prior `profiles.length > 0 → wait for main.ts`
+          // heuristic left the UI blank forever whenever profiles existed
+          // for OTHER branches (State B, 2026-08-20): main sees no match,
+          // aborts silently, and the `instance:created` event we're
+          // waiting for never fires.
+          invoke<boolean>('wizard:hasProfile').then((hasMatching) => {
+            if (!hasMatching) setShowWizard(true);
           });
         }
       });

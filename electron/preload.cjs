@@ -33,6 +33,7 @@ const INVOKE_EXACT = Object.freeze([
   'devtools-network:select-target',
 
   // Wizard
+  'wizard:hasProfile',
   'wizard:createWorktree',
   'wizard:getWorktrees',
   'wizard:getBranches',
@@ -40,6 +41,7 @@ const INVOKE_EXACT = Object.freeze([
   'wizard:getBundles',
   'wizard:getPreflightChecks',
   'wizard:getTooling',
+  'wizard:getPackageManagers',
   'wizard:saveProfile',
 
   // Module-system panels + config

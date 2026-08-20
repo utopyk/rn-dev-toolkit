@@ -67,6 +67,30 @@ describe("preload allowlist — isAllowedOn", () => {
   });
 });
 
+describe("preload allowlist — ipc handler parity", () => {
+  // Bug 2026-08-20: `wizard:hasProfile` had an ipcMain.handle but was
+  // missing from the allowlist. Renderer's invoke was rejected at the
+  // preload layer, so State B (returning user, no matching default
+  // profile for current branch) showed a blank UI instead of the
+  // wizard. This parity check pins every wizard:* handler.
+  const handlers = [
+    "wizard:hasProfile",
+    "wizard:createWorktree",
+    "wizard:getWorktrees",
+    "wizard:getBranches",
+    "wizard:getDevices",
+    "wizard:getBundles",
+    "wizard:getPreflightChecks",
+    "wizard:getTooling",
+    "wizard:getPackageManagers",
+    "wizard:saveProfile",
+  ];
+
+  it.each(handlers)("wizard handler %s is invocable from the renderer", (ch) => {
+    expect(allowlist.isAllowedInvoke(ch)).toBe(true);
+  });
+});
+
 describe("preload allowlist — lists are frozen", () => {
   it("INVOKE_EXACT cannot be mutated at runtime", () => {
     expect(() => {

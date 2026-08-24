@@ -87,6 +87,16 @@ describe("validateConfig", () => {
     expect(result.valid).toBe(true);
   });
 
+  it("accepts an enumerateEnvs callback (fn stripped for ajv)", () => {
+    const result = validateConfig({
+      enumerateEnvs: () => [
+        { key: "production", label: "Production" },
+        { key: "staging", label: "Staging", description: "shared preview" },
+      ],
+    });
+    expect(result.valid).toBe(true);
+  });
+
   it("rejects hook keys that are not '<id>/<name>'", () => {
     const result = validateConfig({ hooks: { "no-slash": "./x.sh" } });
     expect(result.valid).toBe(false);

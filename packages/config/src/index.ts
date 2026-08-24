@@ -11,6 +11,7 @@ export {
 } from "./define-config.js";
 
 export type {
+  EnvOption,
   HookContracts,
   HookEntry,
   HookEntryCommon,

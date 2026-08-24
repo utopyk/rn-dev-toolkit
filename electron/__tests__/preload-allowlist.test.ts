@@ -80,6 +80,7 @@ describe("preload allowlist — ipc handler parity", () => {
     "wizard:getBranches",
     "wizard:getDevices",
     "wizard:getBundles",
+    "wizard:getEnvs",
     "wizard:getPreflightChecks",
     "wizard:getTooling",
     "wizard:getPackageManagers",

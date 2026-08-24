@@ -25,6 +25,9 @@
       "description": "Module IDs whose `onFail: 'hard'` registrations against non-override slots the project opts in to (security gate, H5).",
       "items": { "type": "string", "minLength": 1 },
       "uniqueItems": true
+    },
+    "enumerateEnvs": {
+      "description": "Callback that returns the app-level environments this project supports. JSON Schema cannot type-check the function; the daemon validates it is callable at config-load. Ajv sees the fn-stripped sentinel string '<fn>' — the loader replaces function values with that during shape validation."
     }
   },
   "$defs": {

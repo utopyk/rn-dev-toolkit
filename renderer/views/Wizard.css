@@ -694,3 +694,34 @@
   color: var(--muted-2);
   font-size: 12px;
 }
+
+.wz-env-section {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px dashed var(--muted-2);
+}
+
+.wz-env-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.wz-env-title {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.wz-env-hint {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.wz-env-hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--muted-2);
+}

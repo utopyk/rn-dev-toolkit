@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { HookError, HookErrorCode } from "@rn-dev/module-sdk";
 import schema from "../config.schema.json" with { type: "json" };
 import type {
+  EnvOption,
   HookEntry,
   HookPhase,
   HookSlotsOf,
@@ -49,6 +50,7 @@ export interface DefineConfigInput<
     : Partial<Record<HookSlotsOf<M[number]>, HookEntry>>;
   allowModuleOverrides?: string[];
   allowModuleHardFails?: string[];
+  enumerateEnvs?: () => EnvOption[] | Promise<EnvOption[]>;
 }
 
 export function defineConfig<

@@ -39,6 +39,7 @@ const INVOKE_EXACT = Object.freeze([
   'wizard:getBranches',
   'wizard:getDevices',
   'wizard:getBundles',
+  'wizard:getEnvs',
   'wizard:getPreflightChecks',
   'wizard:getTooling',
   'wizard:getPackageManagers',

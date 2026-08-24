@@ -55,6 +55,8 @@ function defaultInvokeImpl(channel: string, ...args: unknown[]): unknown {
       return Promise.resolve(['main', 'develop']);
     case 'wizard:getDevices':
       return Promise.resolve([]);
+    case 'wizard:getEnvs':
+      return Promise.resolve([]);
     case 'wizard:getPreflightChecks':
       return Promise.resolve([]);
     case 'wizard:getTooling':
@@ -270,6 +272,108 @@ describe('Wizard — device step empty state', () => {
     await waitFor(() => screen.getByText(/Default \(root\)/));
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the Environment sub-section when the project declares no envs (default)', async () => {
+    const bridge = installFakeIpcBridge();
+    bridge.invoke.mockImplementation(defaultInvokeImpl); // getEnvs → []
+
+    render(<Wizard onComplete={() => undefined} onCancel={() => undefined} />);
+    // Walk to step 4 (Build Mode).
+    await advanceToStep3(bridge);
+    fireEvent.click(screen.getByRole('button', { name: /Next/i }));
+    await waitFor(() => screen.getByText(/Build Mode/));
+
+    expect(screen.queryByTestId('wz-env-section')).toBeNull();
+    // Header remains "Build Mode" (no env suffix).
+    expect(screen.getByText('Build Mode')).toBeTruthy();
+    // Next is not blocked.
+    const nextBtn = screen.getByRole('button', { name: /Next/i }) as HTMLButtonElement;
+    expect(nextBtn.disabled).toBe(false);
+  });
+
+  it('shows the Environment picker, blocks Next until one is chosen, and saves APP_ENV', async () => {
+    // Regression for the "one-command prod build" path — project declares
+    // envs via `rn-dev.config.enumerateEnvs`, wizard surfaces them,
+    // selection lands in `profile.env.APP_ENV` for the `build/pre` hook.
+    const bridge = installFakeIpcBridge();
+    const saveCalls: unknown[] = [];
+    bridge.invoke.mockImplementation((channel: string, ...rest: unknown[]) => {
+      if (channel === 'wizard:getEnvs') {
+        return Promise.resolve([
+          { key: 'production', label: 'Production', description: 'live customers' },
+          { key: 'staging', label: 'Staging' },
+        ]);
+      }
+      if (channel === 'wizard:saveProfile') {
+        saveCalls.push(rest[0]);
+        return Promise.resolve({ ok: true });
+      }
+      return defaultInvokeImpl(channel, ...rest);
+    });
+
+    render(<Wizard onComplete={() => undefined} onCancel={() => undefined} />);
+    await advanceToStep3(bridge);
+    fireEvent.click(screen.getByRole('button', { name: /Next/i }));
+    await waitFor(() => screen.getByText('Build Mode & Environment'));
+
+    // Env section visible with both options and the doc hint.
+    const section = screen.getByTestId('wz-env-section');
+    expect(section.textContent).toMatch(/Production/);
+    expect(section.textContent).toMatch(/Staging/);
+    expect(section.textContent).toMatch(/live customers/);
+    expect(section.textContent).toMatch(/profile\.env\.APP_ENV/);
+
+    // Next is disabled until an env is chosen (guardrail — the whole
+    // point of this step is not letting the user Next past an unset
+    // env when the project declared some).
+    let nextBtn = screen.getByRole('button', { name: /Next/i }) as HTMLButtonElement;
+    expect(nextBtn.disabled).toBe(true);
+
+    // Pick Production.
+    const prodLabel = section.querySelectorAll('.wz-radio-label');
+    const prod = Array.from(prodLabel).find((el) => el.textContent === 'Production');
+    if (!prod) throw new Error('Production radio label not found');
+    fireEvent.click(prod);
+
+    // Now Next is unlocked.
+    nextBtn = screen.getByRole('button', { name: /Next/i }) as HTMLButtonElement;
+    expect(nextBtn.disabled).toBe(false);
+
+    // Walk to the end and click Finish. Steps 5-7 all `canGoNext: true`.
+    for (let i = 0; i < 3; i++) {
+      fireEvent.click(screen.getByRole('button', { name: /Next/i }));
+    }
+    await waitFor(() => screen.getByRole('button', { name: /Finish/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Finish/i }));
+
+    await waitFor(() => expect(saveCalls.length).toBe(1));
+    const saved = saveCalls[0] as { env?: Record<string, string> };
+    expect(saved.env).toEqual({ APP_ENV: 'production' });
+  });
+
+  it('auto-selects the only env when the project declares just one', async () => {
+    const bridge = installFakeIpcBridge();
+    const saveCalls: unknown[] = [];
+    bridge.invoke.mockImplementation((channel: string, ...rest: unknown[]) => {
+      if (channel === 'wizard:getEnvs') {
+        return Promise.resolve([{ key: 'production', label: 'Production' }]);
+      }
+      if (channel === 'wizard:saveProfile') {
+        saveCalls.push(rest[0]);
+        return Promise.resolve({ ok: true });
+      }
+      return defaultInvokeImpl(channel, ...rest);
+    });
+
+    render(<Wizard onComplete={() => undefined} onCancel={() => undefined} />);
+    await advanceToStep3(bridge);
+    fireEvent.click(screen.getByRole('button', { name: /Next/i }));
+    await waitFor(() => screen.getByText('Build Mode & Environment'));
+
+    // With one env, Next should be immediately usable (auto-picked).
+    const nextBtn = screen.getByRole('button', { name: /Next/i }) as HTMLButtonElement;
+    expect(nextBtn.disabled).toBe(false);
   });
 
   it('Refresh button re-invokes getDevices and picks up a late-connected device', async () => {

@@ -51,6 +51,12 @@ type Platform = 'ios' | 'android' | 'both';
 type Mode = 'quick' | 'dirty' | 'clean' | 'ultra-clean';
 type PreflightFrequency = 'once' | 'always';
 
+interface EnvOption {
+  key: string;
+  label: string;
+  description?: string;
+}
+
 interface WizardState {
   worktree: WorktreeOption | null;
   branch: string | null;
@@ -58,6 +64,7 @@ interface WizardState {
   scheme: string | null;
   configuration: string | null;
   mode: Mode;
+  appEnv: string | null;
   device: DeviceOption | null;
   preflightChecks: string[];
   preflightFrequency: PreflightFrequency;
@@ -119,6 +126,7 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
   const [worktrees, setWorktrees] = useState<WorktreeOption[]>([]);
   const [branches, setBranches] = useState<string[]>([]);
   const [devices, setDevices] = useState<DeviceOption[]>([]);
+  const [envs, setEnvs] = useState<EnvOption[]>([]);
   const [preflightChecks, setPreflightChecks] = useState<PreflightCheck[]>([]);
   const [tooling, setTooling] = useState<ToolingOption[]>([]);
   const [loadingKey, setLoadingKey] = useState<string | null>(null);
@@ -131,6 +139,7 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
     scheme: null,
     configuration: null,
     mode: 'dirty',
+    appEnv: null,
     device: null,
     preflightChecks: [],
     preflightFrequency: 'once',
@@ -150,6 +159,20 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
       });
     }
   }, [step]);
+
+  // Fetch project-declared app environments once on mount. Cheap when
+  // the project has no `rn-dev.config` (handler returns [] fast).
+  useEffect(() => {
+    invoke<EnvOption[]>('wizard:getEnvs').then((data) => {
+      const list = data ?? [];
+      setEnvs(list);
+      // Auto-select when there's exactly one: a single-option picker is
+      // visual noise and users would just click it anyway.
+      if (list.length === 1) {
+        setState((s) => (s.appEnv ? s : { ...s, appEnv: list[0].key }));
+      }
+    }).catch(() => setEnvs([]));
+  }, [invoke]);
 
   useEffect(() => {
     if (step === 2 && branches.length === 0) {
@@ -250,13 +273,18 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
       case 1: return true; // worktree is optional (null = root repo)
       case 2: return state.branch !== null;
       case 3: return true;
-      case 4: return true;
+      // When the project declares app environments via
+      // `rn-dev.config.enumerateEnvs`, require a pick — the whole
+      // point of this step is that "which env am I building for" is
+      // load-bearing, and letting the user Next past it without a
+      // choice defeats the guardrail.
+      case 4: return envs.length === 0 || state.appEnv !== null;
       case 5: return true; // device is optional
       case 6: return true;
       case 7: return true;
       default: return false;
     }
-  }, [step, state]);
+  }, [step, state, envs.length]);
 
   const goNext = () => {
     if (step < TOTAL_STEPS) {
@@ -301,7 +329,11 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
         ...state.onSaveTools,
         ...(state.customCommand.trim() ? [state.customCommand.trim()] : []),
       ],
-      env: {},
+      // `APP_ENV` is the convention project `build/pre` hooks read
+      // (documented in `packages/config/src/types.ts` on `enumerateEnvs`).
+      // Omit when no env was picked so the shell-env map stays clean
+      // for projects that don't declare envs.
+      env: state.appEnv ? { APP_ENV: state.appEnv } : {},
     };
 
     await invoke('wizard:saveProfile', profileData);
@@ -525,7 +557,7 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
       case 4:
         return (
           <StepContainer
-            title="Build Mode"
+            title={envs.length > 0 ? 'Build Mode & Environment' : 'Build Mode'}
             subtitle="How aggressively should we clean before building?"
           >
             <RadioGroup
@@ -538,6 +570,29 @@ export function Wizard({ onComplete, onCancel }: WizardProps) {
               value={state.mode}
               onChange={(v) => setState((s) => ({ ...s, mode: v as Mode }))}
             />
+            {envs.length > 0 && (
+              <div className="wz-env-section" data-testid="wz-env-section">
+                <div className="wz-env-header">
+                  <span className="wz-env-title">Environment</span>
+                  <span className="wz-env-hint">
+                    Which app environment this profile targets. The project's
+                    <code> build/pre </code> hook receives this via
+                    <code> profile.env.APP_ENV</code>.
+                  </span>
+                </div>
+                <RadioGroup
+                  options={envs.map((e) => ({
+                    value: e.key,
+                    label: e.label,
+                    description: e.description,
+                  }))}
+                  value={state.appEnv ?? ''}
+                  onChange={(v) =>
+                    setState((s) => ({ ...s, appEnv: v || null }))
+                  }
+                />
+              </div>
+            )}
           </StepContainer>
         );
 

@@ -153,4 +153,32 @@ export interface RnDevConfig {
    * `'warn'` with an audit entry (security gate, H5).
    */
   allowModuleHardFails?: string[];
+  /**
+   * Optional: enumerate the app-level environments this project supports
+   * (dev, staging, production, ...). When present, the profile wizard
+   * shows an "Environment" picker step whose selection is written into
+   * `profile.env.APP_ENV` — a `build/pre` hook in the project then
+   * reads that key and swaps its `.env` (or whatever mechanism the
+   * project uses) accordingly.
+   *
+   * Kept as a project-side callback rather than a first-class rn-dev
+   * concept so the tool stays project-agnostic: acme exposes
+   * `[dev, staging, production]` from a `.env`-parsing script; another
+   * project could expose EAS profiles, `.env.<name>` files, or anything
+   * else. rn-dev doesn't care.
+   */
+  enumerateEnvs?: () => EnvOption[] | Promise<EnvOption[]>;
+}
+
+/**
+ * Single row in the Environment picker.
+ *
+ * `key` is what lands in `profile.env.APP_ENV` and what the project's
+ * `build/pre` hook receives — pick a stable identifier
+ * (`"production"`, `"eas-preview"`), not a display string.
+ */
+export interface EnvOption {
+  key: string;
+  label: string;
+  description?: string;
 }

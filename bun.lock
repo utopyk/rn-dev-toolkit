@@ -71,6 +71,13 @@
         "@rn-dev/module-sdk": "*",
       },
     },
+    "modules/redux": {
+      "name": "@rn-dev-modules/redux",
+      "version": "0.1.0",
+      "dependencies": {
+        "@rn-dev/module-sdk": "*",
+      },
+    },
     "packages/config": {
       "name": "@rn-dev/config",
       "version": "0.1.0",
@@ -300,6 +307,8 @@
     "@rn-dev-modules/devtools-network": ["@rn-dev-modules/devtools-network@workspace:modules/devtools-network"],
 
     "@rn-dev-modules/metro-logs": ["@rn-dev-modules/metro-logs@workspace:modules/metro-logs"],
+
+    "@rn-dev-modules/redux": ["@rn-dev-modules/redux@workspace:modules/redux"],
 
     "@rn-dev/config": ["@rn-dev/config@workspace:packages/config"],
 

@@ -35,9 +35,12 @@ interface LaunchOptions {
    * Write a non-default profile (matching neither the current branch
    * nor the worktree). Simulates Martin's reported setup: profiles
    * exist but none match `findDefault(null, "main")`, so
-   * `startRealServices` returns null without showing the wizard. Tabs
-   * that depend on the daemon-client should surface a fast "configure
-   * a profile" error, not a 30s `awaitModulesClient` timeout.
+   * `startRealServices` returns null. Since 2559c8b (State B) the
+   * renderer auto-opens the wizard for this case — `wizard:hasProfile`
+   * asks whether a profile matches the CURRENT branch, not whether any
+   * profile exists. Behind that wizard the daemon-client abort is armed,
+   * so dismissing it must surface a fast "configure a profile" error,
+   * not a 30s `awaitModulesClient` timeout.
    */
   profileMismatch?: boolean;
 }
@@ -55,9 +58,9 @@ async function launchElectron(opts: LaunchOptions = {}): Promise<ElectronHandle>
 
   if (opts.profileMismatch) {
     // Profile that wouldn't match findDefault(null, "main"): use a
-    // different branch so startRealServices returns null + the renderer
-    // does NOT auto-show the wizard (App.tsx only shows the wizard when
-    // zero profiles exist).
+    // different branch so startRealServices returns null and the
+    // renderer auto-opens the wizard (App.tsx:195 gates on
+    // `wizard:hasProfile`, which matches against the current branch).
     writeFileSync(
       join(profilesDir, "feature.json"),
       JSON.stringify(
@@ -464,13 +467,28 @@ test.describe("Electron smoke", () => {
 
   test("Settings tab fails fast with a fix-this-message when no default profile matches the current branch", async () => {
     handle = await launchElectron({ profileMismatch: true });
+
+    // State B (2559c8b): profiles exist but none match the current
+    // branch, so the renderer auto-opens the wizard instead of leaving
+    // a blank tab area. `App.tsx:715` early-returns the wizard layout,
+    // which replaces the content pane — the sidebar stays live but no
+    // tab renders behind it. Assert that first; it's the guard for the
+    // bug the manual 2026-08-20 walkthrough caught.
+    await expect(
+      handle.page.getByRole("heading", { name: /setup profile/i }),
+    ).toBeVisible({ timeout: 10_000 });
+
+    // Dismissing the wizard drops back to the normal layout with the
+    // daemon-client abort still armed. That's where the original
+    // fast-fail contract applies: pre-fix the renderer waited 30s for
+    // awaitModulesClient and surfaced "did not publish within 30000ms" —
+    // incomprehensible noise. Post-fix, main calls
+    // serviceBus.abortModulesClient as soon as startRealServices returns
+    // null, so the handler rejects with the fix-this string
+    // (electron/main.ts:177) within a couple seconds.
+    await handle.page.getByRole("button", { name: /^cancel$/i }).click();
     await handle.page.getByRole("button", { name: /settings/i }).click();
 
-    // Pre-fix: the renderer waited 30s for awaitModulesClient and surfaced
-    // "did not publish within 30000ms" — incomprehensible noise. Post-fix:
-    // main calls serviceBus.abortModulesClient as soon as
-    // startRealServices returns null, so the handler rejects with the
-    // fix-this string within a couple seconds.
     await expect(
       handle.page.getByText(/no default profile is configured/i),
     ).toBeVisible({ timeout: 10_000 });

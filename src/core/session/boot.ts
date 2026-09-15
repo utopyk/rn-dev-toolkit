@@ -401,6 +401,65 @@ export async function bootSessionServices(
     }
   }
 
+  // 6b. Hook system \u2014 early bootstrap, and the `session/pre` fire.
+  //
+  //     This has to happen HERE, before Metro, and that is the whole
+  //     point. `enumerateEnvs` lands the wizard's env pick in
+  //     `profile.env.APP_ENV` and the project rewrites `.env` from it,
+  //     but `.env` is inlined at babel transform time and is not part of
+  //     Metro's transform cache key. A project doing that switch from
+  //     `build/pre` was structurally too late: Metro had already
+  //     transformed and cached the previous env's values. Forcing a cold
+  //     Metro (`shouldResetMetroCache`) papers over the ordering;
+  //     `session/pre` fixes it, by giving the project a slot that runs
+  //     while the tree is still quiet.
+  //
+  //     Only the statically-known `session` built-in is declared as a
+  //     provider here \u2014 the module graph does not exist yet. That is why
+  //     `session/pre` is project-only: no module's `consumes.hooks`
+  //     registration has been added at this point, so none can pick it
+  //     up. Module providers are declared at step 13, which reanimates
+  //     any project registration against a module slot (`build/pre` and
+  //     friends) that was orphaned by loading the config this early.
+  //
+  //     A hard failure here aborts boot BEFORE Metro starts, which is
+  //     the correct outcome for a failed env switch: serving a bundle
+  //     built against the wrong `.env` is the bug this exists to stop.
+  const hookManager = new HookManager({
+    auditLog: getDefaultAuditLog(),
+    daemonPid: process.pid,
+  });
+  const bootTrace: Array<{ phase: 1 | 2 | 3; ts: number }> = [];
+  hookManager.on("boot/phase", (m: { phase: 1 | 2 | 3; ts: number }) => {
+    bootTrace.push(m);
+  });
+
+  // Re-validate the profile at the boot boundary. The daemon's
+  // session/start handler already validated upstream, but the
+  // ValidatedProfile brand is non-transferable through the plain
+  // `Profile` shape that flows into this factory. Re-mint here so the
+  // first hook fire receives a brand-bearing instance.
+  const validatedResult = validateProfile(profile);
+  if (!validatedResult.ok) {
+    throw new Error(
+      `bootSessionServices: profile re-validation failed (${validatedResult.code}): ${validatedResult.message}`,
+    );
+  }
+  const validatedProfile = validatedResult.profile;
+
+  const { sessionManifest } = await import("../../modules/built-in/manifests.js");
+  hookManager.declareProvider(
+    sessionManifest.id,
+    sessionManifest.provides?.hooks ?? [],
+  );
+  await loadProjectHooks({ hookManager, projectRoot, emit });
+  emit("⏳ Running session/pre hooks...");
+  await hookManager.fire(
+    "session/pre",
+    { profile: validatedProfile, worktreeKey, projectRoot },
+    validatedProfile,
+  );
+
   // 7. Metro.
   emit(`\u23f3 Starting Metro on port ${port}...`);
   const metroLogsStore = new MetroLogsStore();
@@ -561,27 +620,21 @@ export async function bootSessionServices(
   //
   //     Phase 1 (capabilities + built-ins registered) — completed by the
   //     `createModuleSystem` + `loadUserGlobalModules` calls above. NO
-  //     hook fires here; NO HookManager constructed. The contract for
-  //     Phase 1 is just "the module graph is in place."
+  //     hook fires here. The contract for Phase 1 is just "the module
+  //     graph is in place."
   //
-  //     Phase 2 (HookManager + provider declarations + project config
-  //     walk) — construct the manager, declare every built-in's
-  //     `provides.hooks`, then load the project's `rn-dev.config.*` if
-  //     present and add its registrations. Orphans (registrations
-  //     against a slot whose provider hasn't declared the hook yet)
-  //     are flagged and surfaced via the `hooks/orphaned` event.
+  //     Phase 2 (module provider declarations) — declare every built-in's
+  //     `provides.hooks`. The manager itself, and the project's
+  //     `rn-dev.config.*` walk, already happened at step 6b so the
+  //     project could run `session/pre` before Metro. Declaring providers
+  //     here reanimates every project registration that was orphaned by
+  //     that earlier load (`declareProvider` → `recomputeOrphans`), which
+  //     is what makes `build/pre` and friends live despite the config
+  //     being read before their providers existed.
   //
-  //     Phase 3 (session/init fire) — first hook fire of the session.
-  //     Consumers registered against `session/init` run here; a hard
-  //     failure aborts boot.
-  const hookManager = new HookManager({
-    auditLog: getDefaultAuditLog(),
-    daemonPid: process.pid,
-  });
-  const bootTrace: Array<{ phase: 1 | 2 | 3; ts: number }> = [];
-  hookManager.on("boot/phase", (m: { phase: 1 | 2 | 3; ts: number }) => {
-    bootTrace.push(m);
-  });
+  //     Phase 3 (session/init fire) — the first hook fire that modules
+  //     can participate in. Consumers registered against `session/init`
+  //     run here; a hard failure aborts boot.
   hookManager.emit("boot/phase", { phase: 1, ts: Date.now() });
 
   for (const m of moduleRegistry.getAllManifests()) {
@@ -590,21 +643,8 @@ export async function bootSessionServices(
       hookManager.declareProvider(m.manifest.id, provides);
     }
   }
-  await loadProjectHooks({ hookManager, projectRoot, emit });
   hookManager.emit("boot/phase", { phase: 2, ts: Date.now() });
 
-  // Re-validate the profile at the boot boundary. The daemon's
-  // session/start handler already validated upstream, but the
-  // ValidatedProfile brand is non-transferable through the plain
-  // `Profile` shape that flows into this factory. Re-mint here so the
-  // first hook fire receives a brand-bearing instance.
-  const validatedResult = validateProfile(profile);
-  if (!validatedResult.ok) {
-    throw new Error(
-      `bootSessionServices: profile re-validation failed (${validatedResult.code}): ${validatedResult.message}`,
-    );
-  }
-  const validatedProfile = validatedResult.profile;
   await hookManager.fire(
     "session/init",
     { profile: validatedProfile, worktreeKey, projectRoot },

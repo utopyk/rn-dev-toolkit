@@ -45,6 +45,19 @@ export const lintTestManifest: ModuleManifest = {
  * `session/init` to run code once the daemon has booted, and against
  * `session/profile-changed` to react to a profile-update RPC.
  *
+ * `session/pre` (2026-09-15) fires EARLY — before Metro starts, before
+ * the module graph exists. It is the slot for work that must happen
+ * while the tree is still quiet, the motivating case being an env
+ * switch: a project whose `build/pre` hook rewrites `.env` was too late
+ * by definition, because Metro had already transformed and cached the
+ * old values (`.env` is not part of Metro's transform cache key). See
+ * `docs/sessions/2026-09-15-staging-bundle-on-prod-build.md`.
+ *
+ * `session/pre` is PROJECT-ONLY by construction, not by policy: it
+ * fires before `createModuleSystem`, so no module's `consumes.hooks`
+ * registration exists yet to pick it up. Only `rn-dev.config.*`
+ * registrations run there.
+ *
  * The manifest contributes no TUI/MCP surface — it exists purely as
  * the host-end of the hook contribution-points namespace. The
  * `kind: "built-in-privileged"` stamp comes from `registerBuiltIn`,
@@ -58,7 +71,7 @@ export const sessionManifest: ModuleManifest = {
   version: "0.1.0",
   hostRange: ">=0.1.0",
   scope: "global",
-  provides: { hooks: ["init", "profile-changed"] },
+  provides: { hooks: ["pre", "init", "profile-changed"] },
   activationEvents: ["onStartup"],
 };
 

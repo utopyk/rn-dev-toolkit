@@ -11,6 +11,14 @@
 
 export default {
   hooks: {
+    // Fires before Metro starts — the slot a project uses to swap app
+    // environments, since `.env` is inlined at babel transform time and
+    // is not part of Metro's transform cache key.
+    "session/pre": {
+      script: "./hooks/session-pre.mjs",
+      onFail: "warn",
+      timeoutMs: 5000,
+    },
     "build/pre": {
       script: "./hooks/build-pre.mjs",
       onFail: "warn",

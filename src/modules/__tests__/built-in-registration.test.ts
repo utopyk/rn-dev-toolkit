@@ -115,8 +115,16 @@ describe("built-in manifests — shape + contributes blocks", () => {
     expect(settingsManifest.contributes?.config?.schema).toBeDefined();
   });
 
-  it("session declares provides.hooks for init + profile-changed", () => {
-    expect(sessionManifest.provides?.hooks).toEqual(["init", "profile-changed"]);
+  it("session declares provides.hooks for pre + init + profile-changed", () => {
+    // Order matters as documentation, not as contract: `pre` first
+    // because it is the earliest fire in the session lifecycle — before
+    // Metro, before the module graph exists. See sessionManifest's
+    // docblock and `bootSessionServices` step 6b.
+    expect(sessionManifest.provides?.hooks).toEqual([
+      "pre",
+      "init",
+      "profile-changed",
+    ]);
   });
 
   it("session contributes no TUI/MCP surface (host-only contribution-points)", () => {

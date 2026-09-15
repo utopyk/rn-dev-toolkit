@@ -209,23 +209,17 @@ export async function fakeBootSessionServices(
   opts.emit("[fake-boot] session services starting");
   opts.emit("[fake-boot] session services ready");
 
-  // Emit "starting" on the next macrotask — supervisor wires event
-  // listeners AFTER bootFn resolves, so a microtask-scheduled emit
-  // fires too early. setTimeout(0) pushes past the await continuation
-  // and lets the listener attach first. "running" follows shortly
-  // after so the integration test's `waitForEvent` completes.
-  setTimeout(() => {
-    metro.emit("status", { sessionId, worktreeKey, status: "starting" });
-  }, 5);
-  setTimeout(() => {
-    metro.emit("status", { sessionId, worktreeKey, status: "running" });
-  }, 25);
-
-  // Hook system parity with production three-phase boot. Build the
-  // manager, declare every registered built-in's `provides.hooks`,
-  // skip the project-config walk (fake boots don't load
-  // rn-dev.config.*), then fire `session/init`. Phase markers emitted
-  // on the manager match the production `bootSessionServices` path.
+  // Hook system parity with production. The manager, the project-config
+  // walk and the `session/pre` fire all happen BEFORE the fake Metro
+  // reports "starting", because that ordering IS the contract
+  // `session/pre` exists to provide (see step 6b in
+  // `bootSessionServices`). A fake that fired it after Metro would let
+  // the ordering regress without a test noticing.
+  //
+  // Re-validate so the fires receive a ValidatedProfile. Fake-boot's
+  // profile already came through the same daemon-boundary
+  // validateProfile as production, but the brand isn't transferable
+  // through the plain `Profile` shape.
   const hookManager = new HookManager({
     auditLog: getDefaultAuditLog(),
     daemonPid: process.pid,
@@ -234,13 +228,12 @@ export async function fakeBootSessionServices(
   hookManager.on("boot/phase", (m: { phase: 1 | 2 | 3; ts: number }) => {
     bootTrace.push(m);
   });
-  hookManager.emit("boot/phase", { phase: 1, ts: Date.now() });
-  for (const m of moduleRegistry.getAllManifests()) {
-    const provides = m.manifest.provides?.hooks;
-    if (provides && provides.length > 0) {
-      hookManager.declareProvider(m.manifest.id, provides);
-    }
-  }
+  const fakeValidated = validateProfile(opts.profile);
+
+  hookManager.declareProvider(
+    sessionManifest.id,
+    sessionManifest.provides?.hooks ?? [],
+  );
   // Phase H2h — load project hooks under fake-boot too. Pre-H2 the fake
   // path skipped this on purpose ("fake boots don't run real services
   // anyway"), but H2 makes builder/build fire real hook subprocesses
@@ -254,13 +247,50 @@ export async function fakeBootSessionServices(
     projectRoot: opts.projectRoot,
     emit: opts.emit,
   });
+  // Same two lines production emits around this boundary. They are the
+  // only wire-observable evidence of boot ordering — `hooks/fired` events
+  // for `session/pre` are emitted before any late subscriber attaches,
+  // whereas `session/log` lines from `opts.emit` reach the subscriber
+  // that triggered the boot. The integration test pins
+  // index(session/pre line) < index(Metro line) off these.
+  opts.emit("⏳ Running session/pre hooks...");
+  if (fakeValidated.ok) {
+    await hookManager.fire(
+      "session/pre",
+      {
+        profile: fakeValidated.profile,
+        worktreeKey,
+        projectRoot: opts.projectRoot,
+      },
+      fakeValidated.profile,
+    );
+  }
+  opts.emit(`⏳ Starting Metro on port ${opts.profile.metroPort}...`);
+
+  // Emit "starting" on the next macrotask — supervisor wires event
+  // listeners AFTER bootFn resolves, so a microtask-scheduled emit
+  // fires too early. setTimeout(0) pushes past the await continuation
+  // and lets the listener attach first. "running" follows shortly
+  // after so the integration test's `waitForEvent` completes.
+  setTimeout(() => {
+    metro.emit("status", { sessionId, worktreeKey, status: "starting" });
+  }, 5);
+  setTimeout(() => {
+    metro.emit("status", { sessionId, worktreeKey, status: "running" });
+  }, 25);
+
+  // Phase markers + module provider declarations, matching production's
+  // step 13. Declaring providers here reanimates project registrations
+  // orphaned by the earlier config walk.
+  hookManager.emit("boot/phase", { phase: 1, ts: Date.now() });
+  for (const m of moduleRegistry.getAllManifests()) {
+    const provides = m.manifest.provides?.hooks;
+    if (provides && provides.length > 0) {
+      hookManager.declareProvider(m.manifest.id, provides);
+    }
+  }
   hookManager.emit("boot/phase", { phase: 2, ts: Date.now() });
 
-  // Re-validate so the session/init fire receives a ValidatedProfile.
-  // Fake-boot's profile already came through the same daemon-boundary
-  // validateProfile as production, but the brand isn't transferable
-  // through the plain `Profile` shape.
-  const fakeValidated = validateProfile(opts.profile);
   if (fakeValidated.ok) {
     await hookManager.fire(
       "session/init",

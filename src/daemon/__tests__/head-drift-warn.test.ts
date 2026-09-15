@@ -114,18 +114,28 @@ describe("supervisor HEAD-drift warning", () => {
         },
       );
       try {
-        // Give the watcher a moment to attach after both sessions boot.
-        await new Promise((r) => setTimeout(r, 200));
-        git("git checkout -q -b fix/android-sent-images-white-rect");
-        // Debounce + fs.watch settle.
-        await new Promise((r) => setTimeout(r, 800));
-
         const hit = (msgs: string[]) =>
           msgs.some(
             (m) =>
               m.includes("feat/upload-center-diagnostics") &&
               m.includes("fix/android-sent-images-white-rect"),
           );
+
+        // Give the watcher a moment to attach after both sessions boot.
+        await new Promise((r) => setTimeout(r, 200));
+        git("git checkout -q -b fix/android-sent-images-white-rect");
+
+        // Was `await setTimeout(800)` then assert. Under a full suite run
+        // that clock loses: fs.watch delivery measured p50 750ms (vs 74ms
+        // idle) on 2026-09-15, with some events lost outright. Poll for
+        // both subscribers instead — returns the moment they land, and a
+        // timeout here now means the fan-out is genuinely broken.
+        const deadline = Date.now() + 12_000;
+        while (!(hit(receivedA) && hit(receivedB))) {
+          if (Date.now() >= deadline) break;
+          await new Promise((r) => setTimeout(r, 25));
+        }
+
         expect(hit(receivedA)).toBe(true);
         expect(hit(receivedB)).toBe(true);
       } finally {
@@ -134,5 +144,5 @@ describe("supervisor HEAD-drift warning", () => {
     } finally {
       subA.close();
     }
-  }, 15_000);
+  }, 20_000);
 });

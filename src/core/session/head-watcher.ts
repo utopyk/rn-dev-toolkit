@@ -13,6 +13,16 @@
 // Cheap fs.watch on `.git/HEAD`. Debounced because a checkout writes
 // HEAD.lock + renames + reflog updates in quick succession — one drift
 // per checkout, not five.
+//
+// `fs.watch` is the fast path, NOT the guarantee. Measured on macOS
+// 2026-09-15: on an idle machine 25/25 checkouts delivered, p50 74ms,
+// max 95ms. With a full vitest suite running, the same probe delivered
+// only 21/25 — four events never arrived at all inside an 8s deadline —
+// and the ones that did had p50 750ms. A watcher whose whole job is to be
+// a loud signal cannot silently go quiet on a loaded machine, which is
+// exactly the condition it exists for (several sessions plus agents
+// building). So a slow poll backstops the watch: worst case the drift
+// surfaces `pollMs + debounceMs` late instead of never.
 
 import { promises as fs, watch as fsWatch, type FSWatcher } from "node:fs";
 import path from "node:path";
@@ -31,6 +41,11 @@ export interface HeadWatcherOptions {
   onDrift: (from: string | null, to: string | null) => void;
   /** Debounce window in ms (default 200). */
   debounceMs?: number;
+  /**
+   * Safety-net poll interval in ms (default 1000). See the note on
+   * `fs.watch` reliability in `startHeadWatcher`.
+   */
+  pollMs?: number;
 }
 
 /**
@@ -52,6 +67,10 @@ export function parseHeadFile(content: string): string | null {
  * live watcher whose `currentBranch()` is null and whose `stop()` is a
  * no-op). Kept resilient so the daemon boot path never fails on a bare
  * scratch dir.
+ *
+ * Detection is fs.watch plus a `pollMs` backstop. Where `fs.watch` is
+ * unavailable the poll alone is a complete implementation, just slower —
+ * so that case is no longer downgraded to a no-op watcher.
  */
 export async function startHeadWatcher(
   opts: HeadWatcherOptions,
@@ -75,6 +94,7 @@ export async function startHeadWatcher(
   let stopped = false;
   let watcher: FSWatcher | null = null;
   let pending: NodeJS.Timeout | null = null;
+  let poll: NodeJS.Timeout | null = null;
 
   const check = async (): Promise<void> => {
     if (stopped) return;
@@ -100,6 +120,16 @@ export async function startHeadWatcher(
     }, debounceMs);
   };
 
+  // Safety net. Routed through `schedule()` rather than calling `check()`
+  // directly so every path funnels through the same debounce — that is
+  // what keeps one checkout to one drift even when the poll and the
+  // fs.watch callback land in the same window. `pollMs` is an order of
+  // magnitude above `debounceMs`, so the poll can never starve a pending
+  // check by resetting its timer. `unref()` matches the watch's
+  // `persistent: false`: neither should hold the daemon open.
+  poll = setInterval(schedule, opts.pollMs ?? 1000);
+  poll.unref?.();
+
   try {
     // Watch the .git directory rather than the file itself: `git
     // checkout` writes HEAD.lock, then renames it over HEAD, which on
@@ -112,15 +142,12 @@ export async function startHeadWatcher(
     });
     watcher.on("error", () => {
       // Best-effort watcher — swallow (e.g. ENOENT if the caller
-      // deleted the worktree). The daemon still gets the loud signal
-      // from the failure mode that triggered it.
+      // deleted the worktree). The poll above still delivers the drift.
     });
   } catch {
-    // fsWatch not supported here → no-op watcher.
-    return {
-      currentBranch: () => current,
-      stop: () => {},
-    };
+    // fsWatch not supported here. Not a no-op any more: the poll alone is
+    // a complete (if slower) implementation, so keep it running.
+    watcher = null;
   }
 
   return {
@@ -130,6 +157,8 @@ export async function startHeadWatcher(
       stopped = true;
       if (pending) clearTimeout(pending);
       pending = null;
+      if (poll) clearInterval(poll);
+      poll = null;
       watcher?.close();
       watcher = null;
     },

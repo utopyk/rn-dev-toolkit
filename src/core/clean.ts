@@ -4,8 +4,9 @@ import {
   readdirSync,
   readFileSync,
 } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, sep } from "path";
 import { homedir, tmpdir } from "os";
+import { createHash } from "crypto";
 import { execShellAsync, execAsyncSafe } from "./exec-async.js";
 import type { Platform, RunMode } from "./types.js";
 
@@ -298,23 +299,51 @@ export class CleanManager {
 
     const clearMetroCache: CleanStep = {
       name: "clear-metro-cache",
-      description: "Remove Metro temporary files",
+      description: "Remove this project's Metro file-map cache",
       platform: "all",
       mode: ["clean", "ultra-clean"],
+      // Scoped to THIS project on purpose. The previous version deleted
+      // every `metro-*` and `haste-map-*` entry in the shared TMPDIR, so a
+      // clean on one project wiped the Metro caches of every other project
+      // and every other rn-dev session on the machine. Against the
+      // 4-concurrent-session target that is a cross-session footgun.
+      //
+      // What is actually safe to delete, per Metro 0.84:
+      //
+      // - `metro-file-map-<md5(projectRoot)>-<configHash>` — the filename
+      //   encodes a hash of the project root, so this project's entries are
+      //   precisely identifiable. We remove exactly those.
+      // - `metro-cache/` — a single FileStore root SHARED by every project
+      //   (`metro-config` defaults it to `path.join(os.tmpdir(),
+      //   "metro-cache")`). Nothing inside is attributable to a project, so
+      //   we no longer touch it. We do not need to: Metro's own
+      //   `--reset-cache` calls `store.clear()` on it at startup
+      //   (`metro/src/Server.js`), and every mode that runs this step
+      //   guarantees a subsequent cold start — `clean`/`ultra-clean` both
+      //   satisfy `shouldResetMetroCache`, and `clean/run` restarts Metro
+      //   with `resetCache: true` explicitly.
+      // - `haste-map-*` — pre-Metro-0.72 naming, no longer produced, and
+      //   not attributable to a project either. Dropped.
       action: async () => {
         const tmp = tmpdir();
+        // Mirror metro-file-map's own key derivation: md5 of the
+        // POSIX-normalised rootDir, where rootDir is `config.projectRoot`.
+        // See metro-file-map/src/lib/rootRelativeCacheKeys.js.
+        const normalizedRoot =
+          sep === "/" ? root : root.replace(/\\/g, "/");
+        const rootDirHash = createHash("md5")
+          .update(normalizedRoot)
+          .digest("hex");
+        const prefix = `metro-file-map-${rootDirHash}-`;
+
         const results: string[] = [];
         let overallSuccess = true;
-
-        // Remove metro-* and haste-map-* from TMPDIR
         try {
-          const entries = readdirSync(tmp);
-          for (const entry of entries) {
-            if (entry.startsWith("metro-") || entry.startsWith("haste-map-")) {
-              const r = removeDir(join(tmp, entry));
-              if (!r.success) overallSuccess = false;
-              results.push(r.output);
-            }
+          for (const entry of readdirSync(tmp)) {
+            if (!entry.startsWith(prefix)) continue;
+            const r = removeDir(join(tmp, entry));
+            if (!r.success) overallSuccess = false;
+            results.push(r.output);
           }
         } catch (err: unknown) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -323,7 +352,10 @@ export class CleanManager {
 
         return {
           success: overallSuccess,
-          output: results.length > 0 ? results.join("\n") : "No Metro cache files found",
+          output:
+            results.length > 0
+              ? results.join("\n")
+              : `No file-map cache for this project (${prefix}*). The shared transform cache is left alone; Metro clears it on the next --reset-cache start.`,
         };
       },
     };

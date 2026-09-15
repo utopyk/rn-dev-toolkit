@@ -168,9 +168,50 @@ export function createProgram(): Command {
       const projectRoot = requireProjectRoot();
       const mode = (options.mode ?? "clean") as RunMode;
       const platform = (options.platform ?? "both") as Platform;
-      const cleaner = new CleanManager(projectRoot);
 
       console.log(`\nRunning ${mode} clean for ${platform}...\n`);
+
+      // Prefer the daemon when one is up. It owns Metro, and `clean` /
+      // `ultra-clean` delete node_modules plus the Metro caches — doing
+      // that under a live Metro leaves it resolving modules that are gone
+      // and serving in-memory transforms from caches that are gone. The
+      // daemon's `clean/run` stops Metro first and restarts it cold.
+      // Falls through to in-process when there's no daemon or no session,
+      // where there is no Metro to protect.
+      const client = new IpcClient(path.join(projectRoot, ".rn-dev", "sock"));
+      if (await client.isServerRunning()) {
+        const resp = await client.send({
+          type: "command",
+          action: "clean/run",
+          id: Date.now().toString(),
+          payload: { mode, platform },
+        });
+        const p = resp.payload as {
+          code?: string;
+          results?: Array<{ step: string; success: boolean }>;
+          metroRestarted?: boolean;
+        };
+        if (!p.code) {
+          for (const r of p.results ?? []) {
+            console.log(`  [${r.success ? "done" : "fail"}] ${r.step}`);
+          }
+          const passed = (p.results ?? []).filter((r) => r.success).length;
+          const failed = (p.results ?? []).filter((r) => !r.success).length;
+          if (p.metroRestarted) {
+            console.log("\n  Metro was stopped for the clean and restarted cold.");
+          }
+          console.log(`\nDone: ${passed} passed, ${failed} failed.\n`);
+          return;
+        }
+        if (p.code !== "E_SESSION_NOT_RUNNING") {
+          console.error(`\nclean/run failed: ${p.code}\n`);
+          process.exit(1);
+        }
+        // E_SESSION_NOT_RUNNING — daemon is up but owns no Metro. Safe to
+        // run locally.
+      }
+
+      const cleaner = new CleanManager(projectRoot);
       const results = await cleaner.execute(
         mode,
         platform,

@@ -18,6 +18,7 @@ import type { SessionServices } from "../core/session/boot.js";
 import type { BuildOptions } from "../core/builder.js";
 import { checkAbsolutePath, checkEnv, validateProfile } from "./profile-guard.js";
 import { ProfileStore } from "../core/profile.js";
+import { CleanManager } from "../core/clean.js";
 import {
   optionalSessionId,
   RpcArgError,
@@ -35,6 +36,7 @@ const CLIENT_RPC_ACTIONS = new Set<string>([
   "devtools/selectTarget",
   "devtools/restart",
   "builder/build",
+  "clean/run",
   "watcher/start",
   "watcher/stop",
   "watcher/isRunning",
@@ -208,6 +210,73 @@ async function dispatch(
     }
     case "metro/getInstance": {
       return { instance: services.metro.getInstance(services.sessionId) };
+    }
+    case "clean/run": {
+      // Clean MUST own Metro's lifecycle. `clean`/`ultra-clean` delete
+      // node_modules and the metro-*/haste-map-* cache dirs; doing that
+      // under a live Metro leaves it resolving modules that no longer
+      // exist on disk and serving in-memory transforms from caches that
+      // are gone. Before this RPC existed the MCP tool ran CleanManager
+      // in-process, with no handle on the daemon's Metro at all, so every
+      // "clean then retest" loop silently kept the same Metro process
+      // (2026-09-14: pid survived the whole investigation).
+      const mode = readStringField(message.payload, "mode");
+      if (mode !== "dirty" && mode !== "clean" && mode !== "ultra-clean") {
+        return {
+          code: "E_RPC_INVALID_PAYLOAD",
+          message: "clean/run: mode must be dirty, clean or ultra-clean",
+        };
+      }
+      const platformArg = readStringField(message.payload, "platform") ?? "both";
+      if (
+        platformArg !== "ios" &&
+        platformArg !== "android" &&
+        platformArg !== "both"
+      ) {
+        return {
+          code: "E_RPC_INVALID_PAYLOAD",
+          message: "clean/run: platform must be ios, android or both",
+        };
+      }
+
+      const profile = services.validatedProfile;
+      const cleaner = new CleanManager(profile.projectRoot, profile.packageManager);
+
+      // `dirty` resolves to zero steps, so there is nothing for Metro to
+      // be protected from — cycling it there would be a gratuitous
+      // restart. Only take Metro down when the run actually touches disk.
+      const steps = cleaner.getStepsForMode(mode, platformArg);
+      const inst =
+        steps.length > 0 ? services.metro.getInstance(services.sessionId) : null;
+      // Snapshot the launch config BEFORE stopping: `stop()` drops the
+      // instance from the manager's map, taking projectRoot + port with it.
+      const restart = inst
+        ? { projectRoot: inst.projectRoot, port: inst.port }
+        : null;
+      if (restart) services.metro.stop(services.sessionId);
+
+      try {
+        const results = await cleaner.execute(mode, platformArg);
+        return { results, metroRestarted: Boolean(restart) };
+      } finally {
+        if (restart) {
+          // Restart even when a step failed. A half-cleaned tree with
+          // Metro down is strictly worse than one with Metro up and a
+          // failure in the results array — and if the reinstall really
+          // did break, the caller needs Metro's startup error to say so.
+          // Always cold: the caches this Metro would have reused were
+          // just deleted, and node_modules was replaced wholesale.
+          services.metro.start({
+            sessionId: services.sessionId,
+            worktreeKey: services.worktreeKey,
+            projectRoot: restart.projectRoot,
+            port: restart.port,
+            resetCache: true,
+            verbose: true,
+            env: profile.env,
+          });
+        }
+      }
     }
     case "metro/status": {
       // Snapshot subset for the `rn-dev/metro-status` MCP tool — used to

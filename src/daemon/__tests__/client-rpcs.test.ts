@@ -485,6 +485,112 @@ describe("daemon client RPCs (integration)", () => {
       subClose();
     }
   }, 10_000);
+
+  // -------------------------------------------------------------------------
+  // clean/run — 2026-09-15. Before this RPC existed, `rn-dev/clean` over
+  // MCP built a CleanManager in the MCP process and ran it against the
+  // project root with no handle on the daemon's Metro. So `clean` deleted
+  // node_modules and the Metro caches while Metro kept running and kept
+  // serving in-memory transforms from caches that no longer existed. The
+  // whole point of routing it through the daemon is that Metro's
+  // lifecycle is owned here.
+  // -------------------------------------------------------------------------
+
+  it("clean/run rejects an unknown mode before touching Metro", async () => {
+    const { daemon, subClose } = await bootRunningSession();
+    try {
+      const resp = await daemon.client.send({
+        type: "command",
+        action: "clean/run",
+        id: "clean-bad-mode",
+        payload: { mode: "nuke-it" },
+      });
+      expect((resp.payload as { code?: string }).code).toBe(
+        "E_RPC_INVALID_PAYLOAD",
+      );
+
+      // Metro must be untouched by a rejected call.
+      const inst = await daemon.client.send({
+        type: "command",
+        action: "metro/getInstance",
+        id: "clean-bad-mode-inst",
+      });
+      expect(
+        (inst.payload as { instance: { status: string } | null }).instance
+          ?.status,
+      ).toBe("running");
+    } finally {
+      subClose();
+    }
+  }, 10_000);
+
+  it("clean/run rejects an unknown platform", async () => {
+    const { daemon, subClose } = await bootRunningSession();
+    try {
+      const resp = await daemon.client.send({
+        type: "command",
+        action: "clean/run",
+        id: "clean-bad-platform",
+        payload: { mode: "dirty", platform: "web" },
+      });
+      expect((resp.payload as { code?: string }).code).toBe(
+        "E_RPC_INVALID_PAYLOAD",
+      );
+    } finally {
+      subClose();
+    }
+  }, 10_000);
+
+  it("clean/run in dirty mode does no work and leaves Metro alone", async () => {
+    const { daemon, subClose } = await bootRunningSession();
+    try {
+      const resp = await daemon.client.send({
+        type: "command",
+        action: "clean/run",
+        id: "clean-dirty",
+        payload: { mode: "dirty", platform: "both" },
+      });
+      const p = resp.payload as {
+        results: unknown[];
+        metroRestarted: boolean;
+      };
+      expect(p.results).toEqual([]);
+      // `dirty` resolves to zero steps, so bouncing Metro would be a
+      // gratuitous restart — the handler must skip the cycle entirely.
+      expect(p.metroRestarted).toBe(false);
+
+      const inst = await daemon.client.send({
+        type: "command",
+        action: "metro/getInstance",
+        id: "clean-dirty-inst",
+      });
+      expect(
+        (inst.payload as { instance: { status: string } | null }).instance
+          ?.status,
+      ).toBe("running");
+    } finally {
+      subClose();
+    }
+  }, 10_000);
+
+  it("clean/run requires a running session", async () => {
+    const { path: worktree, cleanup } = makeTestWorktree();
+    cleanups.push(cleanup);
+    const daemon = await spawnTestDaemon(worktree, {
+      env: { RN_DEV_DAEMON_BOOT_MODE: "fake" },
+    });
+    liveHandles.push(daemon);
+
+    const resp = await daemon.client.send({
+      type: "command",
+      action: "clean/run",
+      id: "clean-no-session",
+      payload: { mode: "clean" },
+    });
+    expect((resp.payload as { code?: string }).code).toBe(
+      "E_SESSION_NOT_RUNNING",
+    );
+  }, 10_000);
 });
 
 function payload(evt: IpcMessage):

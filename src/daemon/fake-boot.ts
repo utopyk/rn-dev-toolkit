@@ -56,6 +56,13 @@ interface FakeMetroSurface {
   reload(sessionId: string): boolean;
   devMenu(sessionId: string): boolean;
   getInstance(sessionId: string): MetroInstance | null;
+  /**
+   * `clean/run` stops Metro before the destructive steps and starts it
+   * again afterwards, so the fake has to model the lifecycle, not just
+   * the query surface. `getInstance` reports null between the two.
+   */
+  stop(sessionId: string): boolean;
+  start(options: { sessionId: string; port?: number; resetCache?: boolean }): void;
   stopAll(): void;
 }
 
@@ -332,17 +339,36 @@ function makeFakeMetro(
     });
     return true;
   };
-  emitter.getInstance = (_sid: string): MetroInstance | null => ({
-    sessionId,
-    worktree: "/fake",
-    port: 8081,
-    pid: 0,
-    status: "running",
-    startedAt: new Date(0),
-    projectRoot: "/fake",
-  });
+  // Lifecycle state so `clean/run`'s stop → clean → start sequence is
+  // observable: `metroRestarted` in the reply is only trustworthy if the
+  // fake actually goes down and comes back.
+  let running = true;
+  let port = 8081;
+  emitter.getInstance = (_sid: string): MetroInstance | null =>
+    running
+      ? {
+          sessionId,
+          worktree: "/fake",
+          port,
+          pid: 0,
+          status: "running",
+          startedAt: new Date(0),
+          projectRoot: "/fake",
+        }
+      : null;
+  emitter.stop = (_sid: string): boolean => {
+    if (!running) return false;
+    running = false;
+    emitter.emit("status", { sessionId, worktreeKey, status: "stopped" });
+    return true;
+  };
+  emitter.start = (options: { port?: number }): void => {
+    running = true;
+    if (typeof options.port === "number") port = options.port;
+    emitter.emit("status", { sessionId, worktreeKey, status: "running" });
+  };
   emitter.stopAll = (): void => {
-    /* no-op in fake */
+    running = false;
   };
   return emitter;
 }

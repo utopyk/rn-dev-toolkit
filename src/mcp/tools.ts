@@ -14,7 +14,6 @@ import type { Platform, Profile } from "../core/types.js";
 import { asSessionId, type SessionId } from "../core/identifiers.js";
 import { listDevices, bootDevice } from "../core/device.js";
 import { getWorktrees } from "../core/project.js";
-import { CleanManager } from "../core/clean.js";
 import { buildHooksTools } from "./tools-hooks.js";
 
 // ---------------------------------------------------------------------------
@@ -799,21 +798,30 @@ export function createToolDefinitions(ctx: McpContext): ToolDefinition[] {
     // Build & Clean
     {
       name: "rn-dev/clean",
-      description: "Run clean operations",
-      inputSchema: {
+      description:
+        "Run clean operations for the resolved session. `clean` and `ultra-clean` stop the session's Metro first, then remove node_modules + the Metro/haste caches, reinstall, and restart Metro cold (--reset-cache). Expect Metro to be unavailable for the duration and the first bundle afterwards to be slow. Pass `sessionId` to target a specific session.",
+      inputSchema: withSessionIdProp({
         type: "object",
         properties: {
           mode: { type: "string", enum: ["dirty", "clean", "ultra-clean"] },
           platform: { type: "string", enum: ["ios", "android", "both"] },
         },
         required: ["mode"],
-      },
+      }),
       handler: async (args) => {
-        const mode = args.mode as "dirty" | "clean" | "ultra-clean";
-        const platform = (args.platform as Platform) ?? "both";
-        const cleaner = new CleanManager(ctx.projectRoot);
-        const results = await cleaner.execute(mode, platform);
-        return { results };
+        // Routed through the daemon rather than run in-process: Metro is
+        // owned by the session, and a clean that leaves it running serves
+        // stale in-memory transforms from caches it just deleted.
+        const resolved = resolveSession(ctx, args);
+        if (!resolved.ok) return resolved.result;
+        const resp = await resolved.record.session.client.send(
+          makeIpcMessage("clean/run", {
+            sessionId: resolved.sessionId,
+            mode: args.mode,
+            platform: (args.platform as Platform) ?? "both",
+          }),
+        );
+        return resp.payload ?? { results: [] };
       },
     },
     {

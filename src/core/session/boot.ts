@@ -52,6 +52,7 @@ import {
 } from "../../modules/create-module-system.js";
 import type { Builder } from "../builder.js";
 import type { Profile } from "../types.js";
+import { shouldResetMetroCache } from "./metro-cache-policy.js";
 import { HookManager } from "../hooks/manager.js";
 import { getDefaultAuditLog } from "../audit-log.js";
 import { loadProjectHooks } from "../hooks/load-project-hooks.js";
@@ -447,7 +448,7 @@ export async function bootSessionServices(
     worktreeKey,
     projectRoot: effectiveRoot,
     port,
-    resetCache: profile.mode !== "dirty" && profile.mode !== "quick",
+    resetCache: shouldResetMetroCache(profile),
     verbose: true,
     env: profile.env,
   });

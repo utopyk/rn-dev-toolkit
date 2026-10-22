@@ -7,11 +7,13 @@
 // What it does, in order:
 //   1. `bun install` at the repo root (workspaces cover packages/* + modules/*).
 //   2. `npm install` in renderer/ (the renderer keeps its own npm tree).
-//   3. `bun run build` — host CLI + daemon + compiled Electron main to dist/.
-//   4. Builds every module workspace that ships a rn-dev-module.json.
-//   5. Symlinks each module into ~/.rn-dev/modules/<id> (the daemon's
+//   3. Builds every packages/* workspace (dependencies first). Their dist/ is
+//      gitignored and the host build imports them by package name.
+//   4. `bun run build` — host CLI + daemon + compiled Electron main to dist/.
+//   5. Builds every module workspace that ships a rn-dev-module.json.
+//   6. Symlinks each module into ~/.rn-dev/modules/<id> (the daemon's
 //      discovery dir — see src/modules/registry.ts scanUserGlobalModules).
-//   6. For each --app: registers the rn-dev MCP server for that project in
+//   7. For each --app: registers the rn-dev MCP server for that project in
 //      Claude Code (local scope, via `claude mcp add`), unless already present.
 //
 // Idempotent: installs and builds re-run (cheap when warm — deliberately not
@@ -125,6 +127,60 @@ export function discoverModules(root: string): DiscoveredModule[] {
   return found.sort((a, b) => a.id.localeCompare(b.id));
 }
 
+export interface DiscoveredPackage {
+  name: string;
+  dir: string;
+}
+
+interface WorkspacePackageJson {
+  name?: string;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+}
+
+/** Every packages/* workspace with a build.ts, workspace dependencies first. */
+export function discoverPackages(root: string): DiscoveredPackage[] {
+  const packagesDir = join(root, "packages");
+  const pending = new Map<string, { dir: string; deps: string[] }>();
+  for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const dir = join(packagesDir, entry.name);
+    if (!existsSync(join(dir, "build.ts"))) continue;
+    const pkgPath = join(dir, "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as WorkspacePackageJson;
+    if (typeof pkg.name !== "string" || pkg.name.length === 0) {
+      throw new Error(`${pkgPath} has no "name" field`);
+    }
+    pending.set(pkg.name, {
+      dir,
+      deps: Object.keys({
+        ...pkg.dependencies,
+        ...pkg.devDependencies,
+        ...pkg.peerDependencies,
+      }),
+    });
+  }
+
+  const ordered: DiscoveredPackage[] = [];
+  while (pending.size > 0) {
+    const ready = [...pending]
+      .filter(([, pkg]) => pkg.deps.every((dep) => !pending.has(dep)))
+      .map(([name, pkg]) => ({ name, dir: pkg.dir }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    if (ready.length === 0) {
+      throw new Error(
+        `packages/* dependency cycle among: ${[...pending.keys()].join(", ")}`,
+      );
+    }
+    for (const pkg of ready) {
+      pending.delete(pkg.name);
+      ordered.push(pkg);
+    }
+  }
+  return ordered;
+}
+
 function run(command: string, args: string[], cwd: string): void {
   console.log(`\n$ ${command} ${args.join(" ")}  (${cwd})`);
   const result = spawnSync(command, args, { cwd, stdio: "inherit" });
@@ -192,22 +248,27 @@ function main(): void {
 
   const warnings: string[] = [];
 
-  console.log("── 1/6 install root dependencies");
+  console.log("── 1/7 install root dependencies");
   run("bun", ["install"], repoRoot);
 
-  console.log("\n── 2/6 install renderer dependencies");
+  console.log("\n── 2/7 install renderer dependencies");
   run("npm", ["install"], join(repoRoot, "renderer"));
 
-  console.log("\n── 3/6 build host (CLI + daemon + Electron main)");
+  console.log("\n── 3/7 build workspace packages");
+  for (const pkg of discoverPackages(repoRoot)) {
+    run("bun", ["run", "build.ts"], pkg.dir);
+  }
+
+  console.log("\n── 4/7 build host (CLI + daemon + Electron main)");
   run("bun", ["run", "build"], repoRoot);
 
-  console.log("\n── 4/6 build modules");
+  console.log("\n── 5/7 build modules");
   const modules = discoverModules(repoRoot);
   for (const mod of modules) {
     run("bun", ["run", "build.ts"], mod.dir);
   }
 
-  console.log("\n── 5/6 link modules into ~/.rn-dev/modules");
+  console.log("\n── 6/7 link modules into ~/.rn-dev/modules");
   const linkRoot = join(homedir(), ".rn-dev", "modules");
   mkdirSync(linkRoot, { recursive: true });
   for (const mod of modules) {
@@ -232,7 +293,7 @@ function main(): void {
     }
   }
 
-  console.log("\n── 6/6 register MCP server for app repos");
+  console.log("\n── 7/7 register MCP server for app repos");
   if (args.apps.length === 0) {
     console.log("  no --app given — skipped (re-run with --app <path> to register)");
   } else {

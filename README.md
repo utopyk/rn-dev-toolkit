@@ -11,12 +11,12 @@ Prerequisites: [bun](https://bun.sh), Node ≥ 18, and whatever your RN app
 already needs (Xcode / Android SDK). Then:
 
 ```bash
-git clone <this-repo> && cd rn-dev-cli
+git clone <this-repo> && cd rn-dev-toolkit
 bun scripts/setup.ts --app /path/to/your-rn-app
 ```
 
-The script installs dependencies (root + renderer), builds the host and
-every shipped module, symlinks the modules into `~/.rn-dev/modules/` (the
+The script installs dependencies (root + renderer), builds the workspace
+packages, the host and every shipped module, symlinks the modules into `~/.rn-dev/modules/` (the
 daemon's discovery directory), and registers the rn-dev MCP server for the
 given app repo in Claude Code (local scope). Pass `--app` once per
 app/worktree, or omit it to skip MCP registration. Safe to re-run any time —

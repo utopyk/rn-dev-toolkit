@@ -149,6 +149,10 @@ instructions.
   today (with a monotonic cursor so agents can poll at any cadence
   without missing events or seeing duplicates).
 
+## Sponsors
+
+rn-dev-cli is sponsored by [Kimoby](https://www.kimoby.com).
+
 ## License
 
 Apache-2.0.
